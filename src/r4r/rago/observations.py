@@ -12,10 +12,11 @@ timeline and carry their episode (encoding), whose ARROW scale is its own.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
+from einops import rearrange
 
 from r4r.arrow import queries
 from r4r.geometry import alignment, camera
@@ -36,6 +37,7 @@ class Observations[V: IntVar, K: IntVar, C: IntVar]:
     (same episode) at `pixel_a`/`pixel_b` with depths `depth_a`/`depth_b` (ARROW units).
     `reference_from_view` are ARROW's camera poses relative to one view of the same episode
     (ARROW units), used to initialise; `intrinsics` the initial per-camera estimate.
+    `depth_map[v, i, j]` is ARROW's depth at native pixel `(j, i) · depth_stride`.
     """
 
     view_camera: Tensor[[V]]
@@ -50,6 +52,8 @@ class Observations[V: IntVar, K: IntVar, C: IntVar]:
     weight: Tensor[[K]]
     intrinsics: Tensor[[C, 3, 3]]
     reference_from_view: Tensor[[V, 4, 4]]
+    depth_map: Tensor[[V, int, int]]
+    depth_stride: int
 
     @property
     def episodes(self) -> int:
@@ -58,10 +62,25 @@ class Observations[V: IntVar, K: IntVar, C: IntVar]:
     def to(self, device: torch.device | str, dtype: torch.dtype) -> Observations[V, K, C]:
         """Move to `device`; floating tensors to `dtype`."""
 
-        def move(x: Tensor) -> Tensor:
-            return x.to(device, dtype) if x.is_floating_point() else x.to(device)
+        def floating(x: Tensor) -> Tensor:
+            return x.to(device, dtype)
 
-        return Observations(*(move(getattr(self, f.name)) for f in fields(self)))
+        return replace(
+            self,
+            view_camera=self.view_camera.to(device),
+            view_time=self.view_time.to(device),
+            view_episode=self.view_episode.to(device),
+            view_a=self.view_a.to(device),
+            view_b=self.view_b.to(device),
+            pixel_a=floating(self.pixel_a),
+            pixel_b=floating(self.pixel_b),
+            depth_a=floating(self.depth_a),
+            depth_b=floating(self.depth_b),
+            weight=floating(self.weight),
+            intrinsics=floating(self.intrinsics),
+            reference_from_view=floating(self.reference_from_view),
+            depth_map=floating(self.depth_map),
+        )
 
 
 def merge(parts: list[Observations], timesteps: list[int]) -> Observations:
@@ -91,6 +110,8 @@ def merge(parts: list[Observations], timesteps: list[int]) -> Observations:
             * (weights / weights.sum())[:, None, None, None]
         ).sum(0),
         reference_from_view=torch.cat([p.reference_from_view for p in parts]),
+        depth_map=torch.cat([p.depth_map for p in parts]),
+        depth_stride=parts[0].depth_stride,
     )
 
 
@@ -103,6 +124,8 @@ class ObservationConfig:
     # Static if ARROW's source→target displacement is below this (fraction of scene size)
     static_displacement: float = 0.01
     min_visibility: float = 0.5
+    # Dense depth for robot alignment: every `depth_stride`-th native pixel
+    depth_stride: int = 4
     chunk: int = 100_000
 
 
@@ -176,6 +199,19 @@ def observations_from_arrow(
     keep = static & visible & inside & (depth_b > 0) & (points[source, :, 2] > 0)
     pair, pixel = keep.nonzero(as_tuple=True)
 
+    # Dense depth maps on the native lattice
+    lattice = queries.pixel_grid(height, width, config.depth_stride, device)
+    rows_d, columns_d = (
+        len(range(0, height, config.depth_stride)),
+        len(range(0, width, config.depth_stride)),
+    )
+    dense = model.decode(
+        encoding,
+        queries.per_frame(camera.resize_pixels(lattice, scale_x, scale_y), views, None),
+        config.chunk,
+    )
+    depth_map = rearrange(dense.points[0, :, 2], "(v h w) -> v h w", v=views, h=rows_d, w=columns_d)
+
     return Observations(
         view_camera=view_camera,
         view_time=view_time,
@@ -189,4 +225,6 @@ def observations_from_arrow(
         weight=weight[source[pair], pixel] * found.point_confidence[0].reshape(-1, n)[pair, pixel],
         intrinsics=intrinsics,
         reference_from_view=reference_from_view,
+        depth_map=depth_map,
+        depth_stride=config.depth_stride,
     )

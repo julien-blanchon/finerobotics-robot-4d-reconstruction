@@ -17,11 +17,13 @@ from .hybrid import Hybrid
 from .initialize import initialize
 from .losses import scene_losses
 from .rig import Rig
+from .robot_alignment import RobotAlignment
 from .soft import Soft
 
 if TYPE_CHECKING:
     from torch import Tensor
 
+    from .meshes import Surface
     from .observations import Observations
     from .robot import Robot
 
@@ -45,6 +47,9 @@ class SolveConfig:
     view_rotation_std: float = 0.01
     # soft: Cauchy scale of the AX = XB residual (m)
     cauchy_calibration: float = 0.01
+    # Robot alignment (static cameras): weight, and its Cauchy scale annealed start → end (m)
+    robot_weight: float = 1.0
+    robot_cauchy: tuple[float, float] = (0.2, 0.02)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,8 +63,8 @@ class Calibration:
     scales: Tensor[[int]]
     initial_scales: Tensor[[int]]
     world_from_view: Tensor[[int, 4, 4]]
-    # Per iteration: total, 3D, 2D, penalty
-    history: Tensor[[int, 4]]
+    # Per iteration: total, 3D, 2D, robot, penalty
+    history: Tensor[[int, 5]]
 
 
 def calibrate(
@@ -68,8 +73,12 @@ def calibrate(
     observations: Observations,
     names: tuple[str, ...],
     config: SolveConfig,
+    surface: Surface | None = None,
 ) -> Calibration:
-    """Initialise in closed form, then refine with `config.method`."""
+    """Initialise in closed form, then refine with `config.method`.
+
+    With the robot's `surface`, static cameras are also aligned to the FK-posed robot.
+    """
 
     obs = observations.to(qpos.device, qpos.dtype)
     initial_mounts, initial_scales = initialize(robot, qpos, obs, names)
@@ -82,26 +91,43 @@ def calibrate(
         "soft": lambda: Soft(rig, obs, config.cauchy_calibration),
     }[config.method]()
 
+    alignment = (
+        None if surface is None else RobotAlignment(rig, surface.to(qpos.device, qpos.dtype), obs)
+    )
+    start, end = config.robot_cauchy
+
     optimizer = torch.optim.Adam(method.parameters(), lr=config.learning_rate)
     schedule = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda step: 0.5 * (1 + math.cos(math.pi * step / config.iterations))
     )
     history = []
-    for _ in range(config.iterations):
+    for step in range(config.iterations):
         poses, penalty = method(obs)
+        scales, intrinsics = rig.scales(), rig.intrinsics()
         loss_3d, loss_2d = scene_losses(
-            poses, rig.scales(), rig.intrinsics(), obs, config.cauchy_3d, config.cauchy_2d
+            poses, scales, intrinsics, obs, config.cauchy_3d, config.cauchy_2d
         )
+        if alignment is not None:
+            # Wide basin first, then precise: geometric annealing of the Cauchy scale
+            robot_scale = start * (end / start) ** (step / max(config.iterations - 1, 1))
+            loss_robot = alignment(poses, scales, intrinsics, obs, robot_scale)
+        else:
+            loss_robot = poses.new_zeros(())
         # Scene terms are means over correspondences; priors weigh like one *view* each. ARROW's
         # errors are correlated within a view, so the independent evidence is closer to the
         # number of views than to the number of correspondences.
         penalty = penalty / len(obs.view_time)
-        loss = config.weight_3d * loss_3d + config.weight_2d * loss_2d + penalty
+        loss = (
+            config.weight_3d * loss_3d
+            + config.weight_2d * loss_2d
+            + config.robot_weight * loss_robot
+            + penalty
+        )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         schedule.step()
-        history.append(torch.stack((loss, loss_3d, loss_2d, penalty)).detach())
+        history.append(torch.stack((loss, loss_3d, loss_2d, loss_robot, penalty)).detach())
 
     with torch.no_grad():
         return Calibration(

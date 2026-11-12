@@ -53,7 +53,7 @@ are checked statically, at zero runtime cost.
 every file. Defined once in `src/r4r/types.py`; add a name there before using it.
 
 ```text
-B  batch                     F  frames (images) in an encoding     N  points / pixels
+B  batch                     S  images (observations) in an encoding  N  points / pixels
 Q  queries                   P  patch tokens per frame             D  model width
 H, W image height/width      C  cameras                            T  robot timesteps
 J  joints                    L  kinematic links                    K  correspondences

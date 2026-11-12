@@ -38,9 +38,12 @@ class Soft(nn.Module):
         self.register_buffer("initial_pose", initial)
         self.view_delta = nn.Parameter(initial.new_zeros(len(initial), 6))
 
-        # Consecutive (in time) pairs of views of the same camera
+        # Consecutive (in time) pairs of views of the same camera within one episode
         order = torch.argsort(obs.view_camera * (obs.view_time.max() + 1) + obs.view_time)
-        same = obs.view_camera[order[1:]] == obs.view_camera[order[:-1]]
+        first, second = order[:-1], order[1:]
+        same = (obs.view_camera[first] == obs.view_camera[second]) & (
+            obs.view_episode[first] == obs.view_episode[second]
+        )
         self.register_buffer("first", order[:-1][same])
         self.register_buffer("second", order[1:][same])
         # Weigh each robot motion like the correspondences of one view pair

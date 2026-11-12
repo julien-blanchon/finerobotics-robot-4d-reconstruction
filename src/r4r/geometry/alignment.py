@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+from einops import rearrange
 
 from . import se3
 
@@ -34,25 +35,31 @@ def procrustes[Bs: IntTuple, N: IntVar](
 
 
 def hand_eye[M: IntVar](
-    robot_motion: Tensor[[M, 4, 4]], camera_motion: Tensor[[M, 4, 4]]
-) -> tuple[Tensor[[4, 4]], Tensor[[]]]:
-    """Solve `A_i X = X B_i(s)`: the mount `X` and the scale `s` of the camera motions.
+    robot_motion: Tensor[[M, 4, 4]], camera_motion: Tensor[[M, 4, 4]], group: Tensor[[M]]
+) -> tuple[Tensor[[4, 4]], Tensor[[int]]]:
+    """Solve `A_i X = X B_i(s_g)`: the mount `X` and one scale `s_g` per motion group.
 
     `A_i` are metric motions of the mount link, `B_i` the same motions seen by the camera in
-    unknown units (`B_i(s)` scales their translation). Rotation first (Park & Martin: align the
-    rotation axes `log R_B → log R_A`), then translation and scale jointly by least squares:
-    `(R_A − I) t_X − s R_X t_B = −t_A`. Needs ≥ 2 motions with non-parallel rotation axes.
+    unknown units (`B_i(s)` scales their translation); motions of group `g` (e.g. one episode,
+    one encoding) share the scale `s_g`. Rotation first (Park & Martin: align the rotation axes
+    `log R_B → log R_A`), then translation and scales jointly by linear least squares:
+    `(R_A − I) t_X − s_g R_X t_B = −t_A`. Needs ≥ 2 motions with non-parallel rotation axes.
     """
 
     a, b = robot_motion.double(), camera_motion.double()
     alpha, beta = se3.so3_log(a[:, :3, :3]), se3.so3_log(b[:, :3, :3])
     rotation = closest_rotation(beta.mT @ alpha)
 
+    groups = int(group.max()) + 1
     eye = torch.eye(3, dtype=a.dtype, device=a.device)
-    design = torch.cat((a[:, :3, :3] - eye, -(rotation @ b[:, :3, 3:])), -1).reshape(-1, 4)
-    solution = torch.linalg.lstsq(design, -a[:, :3, 3].reshape(-1, 1)).solution[:, 0]
+    design = a.new_zeros(len(a), 3, 3 + groups)
+    design[:, :, :3] = a[:, :3, :3] - eye
+    design[torch.arange(len(a)), :, 3 + group] = -(rotation @ b[:, :3, 3:])[..., 0]
+    solution = torch.linalg.lstsq(
+        rearrange(design, "m i u -> (m i) u"), rearrange(-a[:, :3, 3], "m i -> (m i) 1")
+    ).solution[:, 0]
     mount = se3.from_rotation_translation(rotation, solution[:3])
-    return mount.to(robot_motion.dtype), solution[3].to(robot_motion.dtype)
+    return mount.to(robot_motion.dtype), solution[3:].to(robot_motion.dtype)
 
 
 def mean_transform[N: IntVar](transforms: Tensor[[N, 4, 4]]) -> Tensor[[4, 4]]:

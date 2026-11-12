@@ -1,9 +1,12 @@
-"""The robot and its cameras with their unknowns: camera mounts and ARROW's metric scale.
+"""The robot and its cameras with their unknowns: mounts, focal lengths, ARROW's metric scales.
 
 A camera is rigidly mounted on a body of the kinematic tree (a wrist camera on the hand, an
 exterior camera on the world body). Its pose at time t is `world_from_body(q_t) · body_from_camera`.
 Free mounts (declared with priors in the robot description) are optimised as
-`initial · exp(δ)`; the others stay at their description pose.
+`initial · exp(δ)`; the others stay at their description pose. Each camera's focal length is
+corrected by a factor `exp(φ)` with a log-normal prior (std `focal_std`): wide when the initial
+intrinsics come from ARROW, tight when the dataset knows them. Each episode (one ARROW encoding)
+has its own scale, metres per ARROW unit.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ if TYPE_CHECKING:
 
 
 class Rig(nn.Module):
-    """Cameras `names` on `robot`, joint trajectory `qpos [T, Q]`, metres per ARROW unit."""
+    """Cameras `names` on `robot`, joint trajectory `qpos [T, Q]` (all episodes concatenated)."""
 
     def __init__(
         self,
@@ -37,7 +40,9 @@ class Rig(nn.Module):
         qpos: Tensor[[int, int]],
         names: tuple[str, ...],
         initial_mounts: Tensor[[int, 4, 4]],
-        initial_scale: float,
+        initial_scales: Tensor[[int]],
+        initial_intrinsics: Tensor[[int, 3, 3]],
+        focal_std: float,
     ) -> None:
         super().__init__()
         assert not robot.free_bodies, "free bodies (e.g. a second arm's base) are not supported yet"
@@ -47,6 +52,9 @@ class Rig(nn.Module):
 
         # Joint values are data: FK is computed once
         self.register_buffer("world_from_body", forward_kinematics(robot, qpos))
+        self.register_buffer(
+            "camera_body_index", torch.tensor(self.camera_body, device=qpos.device)
+        )
         self.register_buffer("initial_mount", initial_mounts)
         self.register_buffer("default_mount", robot.body_from_camera[index])
 
@@ -58,11 +66,22 @@ class Rig(nn.Module):
         self.register_buffer("prior_std", qpos.new_tensor(stds))
 
         self.mount_delta = nn.Parameter(qpos.new_zeros(len(names), 6))
-        self.log_scale = nn.Parameter(qpos.new_tensor(math.log(initial_scale)))
+        self.log_scale = nn.Parameter(initial_scales.to(qpos).log())
+        self.register_buffer("initial_intrinsics", initial_intrinsics.to(qpos))
+        self.log_focal = nn.Parameter(qpos.new_zeros(len(names)))
+        self.focal_std = focal_std
 
-    @property
-    def scale(self) -> Tensor[[]]:
+    def scales(self) -> Tensor[[int]]:
+        """Metres per ARROW unit, per episode."""
+
         return self.log_scale.exp()
+
+    def intrinsics(self) -> Tensor[[int, 3, 3]]:
+        """Per camera: initial intrinsics with corrected focal lengths (square pixels kept)."""
+
+        factor = torch.ones_like(self.initial_intrinsics)
+        factor[:, [0, 1], [0, 1]] = self.log_focal.exp()[:, None]
+        return self.initial_intrinsics * factor
 
     def mounts(self) -> Tensor[[int, 4, 4]]:
         """`body_from_camera` per camera."""
@@ -73,8 +92,7 @@ class Rig(nn.Module):
     def body_poses[V: IntVar](self, camera: Tensor[[V]], time: Tensor[[V]]) -> Tensor[[V, 4, 4]]:
         """`world_from_body` of each view's mount body."""
 
-        body = torch.tensor(self.camera_body, device=camera.device)[camera]
-        return self.world_from_body[time, body]
+        return self.world_from_body[time, self.camera_body_index[camera]]
 
     def camera_poses[V: IntVar](self, camera: Tensor[[V]], time: Tensor[[V]]) -> Tensor[[V, 4, 4]]:
         """`world_from_camera` of each view, from kinematics and the mounts."""
@@ -94,4 +112,5 @@ class Rig(nn.Module):
         translation, rotation = deviation[:, :3], deviation[:, 3:]
         cost = (translation**2).sum(-1) / self.prior_std[:, 0] ** 2
         cost = cost + (rotation**2).sum(-1) / self.prior_std[:, 1] ** 2
-        return torch.where(self.free, cost, 0.0).sum()
+        focal = (self.log_focal**2).sum() / self.focal_std**2
+        return torch.where(self.free, cost, 0.0).sum() + focal

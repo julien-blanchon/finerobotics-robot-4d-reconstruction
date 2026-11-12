@@ -1,7 +1,12 @@
 """What calibration consumes: views, static correspondences, intrinsics, initial relative poses.
 
-Everything visual is in ARROW's units (an unknown global scale) and camera frames; pixels are
-native image pixels. Built from ARROW predictions in `from_arrow`, or synthesised in tests.
+Visual geometry enters as ARROW's **depths** (z, in ARROW units, one unknown scale per
+encoding), never its 3D points: points are rebuilt as `backproject(K, pixel, scale · depth)`
+with intrinsics the calibration controls (Calib3R Eq. 2). ARROW's field of view can be badly
+off while its depth stays usable. Pixels are native image pixels.
+
+Several episodes of one rig combine with `merge`: views index a shared, concatenated robot
+timeline and carry their episode (encoding), whose ARROW scale is its own.
 """
 
 from __future__ import annotations
@@ -27,22 +32,28 @@ if TYPE_CHECKING:
 class Observations[V: IntVar, K: IntVar, C: IntVar]:
     """`V` views (one image each), `K` correspondences between views, `C` cameras.
 
-    Correspondence `k` is one static physical point seen in views `view_a[k]` and `view_b[k]`:
-    at `pixel_a`/`pixel_b`, with camera-frame coordinates `point_a`/`point_b` (ARROW units).
-    `reference_from_view` are ARROW's relative camera poses (ARROW units), used to initialise.
+    Correspondence `k` is one static physical point seen in views `view_a[k]` and `view_b[k]`
+    (same episode) at `pixel_a`/`pixel_b` with depths `depth_a`/`depth_b` (ARROW units).
+    `reference_from_view` are ARROW's camera poses relative to one view of the same episode
+    (ARROW units), used to initialise; `intrinsics` the initial per-camera estimate.
     """
 
     view_camera: Tensor[[V]]
     view_time: Tensor[[V]]
+    view_episode: Tensor[[V]]
     view_a: Tensor[[K]]
     view_b: Tensor[[K]]
     pixel_a: Tensor[[K, 2]]
     pixel_b: Tensor[[K, 2]]
-    point_a: Tensor[[K, 3]]
-    point_b: Tensor[[K, 3]]
+    depth_a: Tensor[[K]]
+    depth_b: Tensor[[K]]
     weight: Tensor[[K]]
     intrinsics: Tensor[[C, 3, 3]]
     reference_from_view: Tensor[[V, 4, 4]]
+
+    @property
+    def episodes(self) -> int:
+        return int(self.view_episode.max()) + 1
 
     def to(self, device: torch.device | str, dtype: torch.dtype) -> Observations[V, K, C]:
         """Move to `device`; floating tensors to `dtype`."""
@@ -51,6 +62,36 @@ class Observations[V: IntVar, K: IntVar, C: IntVar]:
             return x.to(device, dtype) if x.is_floating_point() else x.to(device)
 
         return Observations(*(move(getattr(self, f.name)) for f in fields(self)))
+
+
+def merge(parts: list[Observations], timesteps: list[int]) -> Observations:
+    """Observations of several episodes of one rig on a concatenated timeline.
+
+    `timesteps[e]` is the length of episode `e`'s robot trajectory (its offset on the timeline).
+    Initial intrinsics are confidence-weighted means over episodes.
+    """
+
+    views = [len(p.view_time) for p in parts]
+    view_offset = torch.tensor([0, *views[:-1]]).cumsum(0).tolist()
+    time_offset = torch.tensor([0, *timesteps[:-1]]).cumsum(0).tolist()
+    weights = torch.stack([p.weight.sum() for p in parts])
+    return Observations(
+        view_camera=torch.cat([p.view_camera for p in parts]),
+        view_time=torch.cat([p.view_time + t for p, t in zip(parts, time_offset, strict=True)]),
+        view_episode=torch.cat([torch.full_like(p.view_time, e) for e, p in enumerate(parts)]),
+        view_a=torch.cat([p.view_a + v for p, v in zip(parts, view_offset, strict=True)]),
+        view_b=torch.cat([p.view_b + v for p, v in zip(parts, view_offset, strict=True)]),
+        pixel_a=torch.cat([p.pixel_a for p in parts]),
+        pixel_b=torch.cat([p.pixel_b for p in parts]),
+        depth_a=torch.cat([p.depth_a for p in parts]),
+        depth_b=torch.cat([p.depth_b for p in parts]),
+        weight=torch.cat([p.weight for p in parts]),
+        intrinsics=(
+            torch.stack([p.intrinsics for p in parts])
+            * (weights / weights.sum())[:, None, None, None]
+        ).sum(0),
+        reference_from_view=torch.cat([p.reference_from_view for p in parts]),
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -131,18 +172,20 @@ def observations_from_arrow(
     inside = (pixel_b >= 0).all(-1) & (pixel_b <= pixel_b.new_tensor([width - 1, height - 1])).all(
         -1
     )
-    keep = static & visible & inside
+    depth_b = found.points[0].reshape(-1, n, 3)[..., 2]
+    keep = static & visible & inside & (depth_b > 0) & (points[source, :, 2] > 0)
     pair, pixel = keep.nonzero(as_tuple=True)
 
     return Observations(
         view_camera=view_camera,
         view_time=view_time,
+        view_episode=torch.zeros_like(view_time),
         view_a=source[pair],
         view_b=target[pair],
         pixel_a=native[pixel],
         pixel_b=pixel_b[pair, pixel],
-        point_a=points[source[pair], pixel],
-        point_b=found.points[0].reshape(-1, n, 3)[pair, pixel],
+        depth_a=points[source[pair], pixel, 2],
+        depth_b=depth_b[pair, pixel],
         weight=weight[source[pair], pixel] * found.point_confidence[0].reshape(-1, n)[pair, pixel],
         intrinsics=intrinsics,
         reference_from_view=reference_from_view,

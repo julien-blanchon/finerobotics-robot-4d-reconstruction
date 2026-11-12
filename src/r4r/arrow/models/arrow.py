@@ -141,12 +141,11 @@ class ARROW(nn.Module):
         with self.autocast(images.device):
             context, id_tokens = self.encoder(padded)
         context = self.context_proj(rearrange(context, "b f p c -> b (f p) c"))
-        with self.autocast(images.device):
-            keys, values = self.decoder.keys_values(context)
-
         # SDPA runs in bf16 under autocast anyway: caching in bf16 halves memory, same result
-        dtype = torch.bfloat16 if images.device.type == "cuda" else keys.dtype
-        return Encoding(images, id_tokens, keys.to(dtype), values.to(dtype))
+        dtype = torch.bfloat16 if images.device.type == "cuda" else context.dtype
+        with self.autocast(images.device):
+            keys, values = self.decoder.keys_values(context, dtype)
+        return Encoding(images, id_tokens, keys, values)
 
     @torch.inference_mode()
     def decode[B: IntVar, Q: IntVar](

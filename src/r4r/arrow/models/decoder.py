@@ -28,12 +28,23 @@ class Decoder(nn.Module):
         self.blocks = nn.ModuleList(CrossBlock(width, num_heads) for _ in range(depth))
 
     def keys_values[B: IntVar, N: IntVar](
-        self, context: Tensor[[B, N, int]]
+        self, context: Tensor[[B, N, int]], dtype: torch.dtype
     ) -> tuple[Tensor[[int, B, int, N, int]], Tensor[[int, B, int, N, int]]]:
-        """Per-block keys and values, stacked: `[blocks, B, heads, N, head_dim]`."""
+        """Per-block keys and values in `dtype`: `[blocks, B, heads, N, head_dim]`.
 
-        pairs = [block.keys_values(context) for block in self.blocks]
-        return torch.stack([k for k, _ in pairs]), torch.stack([v for _, v in pairs])
+        Written block by block into one preallocated buffer: for long contexts this cache is
+        the largest tensor of the whole pipeline (8 blocks × 2 × N × width).
+        """
+
+        keys = values = None
+        for i, block in enumerate(self.blocks):
+            k, v = block.keys_values(context)
+            if keys is None or values is None:
+                keys = torch.empty(len(self.blocks), *k.shape, dtype=dtype, device=k.device)
+                values = torch.empty(len(self.blocks), *v.shape, dtype=dtype, device=v.device)
+            keys[i], values[i] = k, v
+        assert keys is not None and values is not None, "decoder has no blocks"
+        return keys, values
 
     def forward[B: IntVar, Q: IntVar, N: IntVar](
         self,

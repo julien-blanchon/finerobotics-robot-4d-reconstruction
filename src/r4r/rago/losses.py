@@ -20,6 +20,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn.functional as F
+from einops import rearrange
 
 from r4r.geometry import camera, se3
 
@@ -33,40 +35,69 @@ if TYPE_CHECKING:
     from .observations import Observations
 
 
-def scene_losses[V: IntVar](
+def scene_losses[V: IntVar, C: IntVar](
     world_from_view: Tensor[[V, 4, 4]],
-    scale: Tensor[[]],
-    observations: Observations[V, int, int],
+    scales: Tensor[[int]],
+    intrinsics: Tensor[[C, 3, 3]],
+    observations: Observations[V, int, C],
     scale_3d: float,
     scale_2d: float,
 ) -> tuple[Tensor[[]], Tensor[[]]]:
     """(3D matching loss, 2D reprojection loss): confidence-weighted means of Cauchy losses.
 
-    `scale_3d` (m) and `scale_2d` (pixels / focal) are the Cauchy scales δ.
+    Points are rebuilt from ARROW depth, the episode's metric scale and the current
+    intrinsics. `scale_3d` (m) and `scale_2d` (pixels / focal) are the Cauchy scales δ.
     """
 
     obs = observations
-    pose_a, pose_b = world_from_view[obs.view_a], world_from_view[obs.view_b]
-    world_a = _apply(pose_a, scale * obs.point_a)
-    world_b = _apply(pose_b, scale * obs.point_b)
+
+    # Per-view tables, then per-correspondence rows. Gathering with `embedding` matters: its
+    # backward sorts indices, while plain indexing scatters 10⁵ atomic adds into ~10² rows.
+    view_scale = scales[obs.view_episode]
+    view_intrinsics = intrinsics[obs.view_camera]
+    table = torch.cat(
+        (
+            rearrange(world_from_view, "v i j -> v (i j)"),
+            rearrange(view_intrinsics, "v i j -> v (i j)"),
+            view_scale[:, None],
+        ),
+        -1,
+    )
+    rows_a, rows_b = F.embedding(obs.view_a, table), F.embedding(obs.view_b, table)
+
+    def unpack[K: IntVar](
+        rows: Tensor[[K, 26]],
+    ) -> tuple[Tensor[[K, 4, 4]], Tensor[[K, 3, 3]], Tensor[[K]]]:
+        pose = rearrange(rows[:, :16], "k (i j) -> k i j", i=4)
+        return pose, rearrange(rows[:, 16:25], "k (i j) -> k i j", i=3), rows[:, 25]
+
+    pose_a, k_a, scale_a = unpack(rows_a)
+    pose_b, k_b, scale_b = unpack(rows_b)
+
+    def rebuild[K: IntVar](
+        k: Tensor[[K, 3, 3]], pixel: Tensor[[K, 2]], depth: Tensor[[K]]
+    ) -> Tensor[[K, 3]]:
+        return camera.backproject(k, pixel[:, None], depth[:, None])[:, 0]
+
+    world_a = _apply(pose_a, rebuild(k_a, obs.pixel_a, scale_a * obs.depth_a))
+    world_b = _apply(pose_b, rebuild(k_b, obs.pixel_b, scale_b * obs.depth_b))
     weight = obs.weight / obs.weight.sum()
 
     loss_3d = (weight * cauchy((world_a - world_b).norm(dim=-1), scale_3d)).sum()
 
     def reprojection[K: IntVar](
-        pose: Tensor[[K, 4, 4]], world: Tensor[[K, 3]], view: Tensor[[K]], pixel: Tensor[[K, 2]]
+        pose: Tensor[[K, 4, 4]], k: Tensor[[K, 3, 3]], world: Tensor[[K, 3]], pixel: Tensor[[K, 2]]
     ) -> Tensor[[K]]:
-        intrinsics = obs.intrinsics[obs.view_camera[view]]
         local = _apply(se3.inverse(pose), world)
-        error = (camera.project(intrinsics, local[:, None])[:, 0] - pixel).norm(dim=-1)
+        error = (camera.project(k, local[:, None])[:, 0] - pixel).norm(dim=-1)
         in_front = local[:, 2] > MIN_REPROJECTION_DEPTH
-        return torch.where(in_front, cauchy(error / intrinsics[:, 0, 0], scale_2d), 0.0)
+        return torch.where(in_front, cauchy(error / k[:, 0, 0], scale_2d), 0.0)
 
     loss_2d = (
         weight
         * (
-            reprojection(pose_b, world_a, obs.view_b, obs.pixel_b)
-            + reprojection(pose_a, world_b, obs.view_a, obs.pixel_a)
+            reprojection(pose_b, k_b, world_a, obs.pixel_b)
+            + reprojection(pose_a, k_a, world_b, obs.pixel_a)
         )
     ).sum()
     return loss_3d, loss_2d

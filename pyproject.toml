@@ -1,0 +1,70 @@
+[project]
+name = "r4r"
+version = "0.1.0"
+description = "Robot 4D reconstruction: ARROW + Calib3R-style calibration against robot kinematics"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "torch>=2.14,<2.16",
+  "einops>=0.8,<0.9",
+  "safetensors>=0.6,<1",
+  "huggingface-hub>=1,<2",
+  "av>=17,<18",
+  "tyro>=1,<2",
+  "mujoco-core>=4,<5",
+]
+
+[project.optional-dependencies]
+lerobot = ["lerobot>=0.7,<0.8"]
+
+[project.scripts]
+r4r = "r4r.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=9,<10",
+  "ruff>=0.12",
+  "pyrefly==1.4.1",
+  "pyrefly-torch-stubs==1.4.1",
+  "pyrefly-einops-stubs==1.4.1",
+]
+# Reference ARROW (context/arrow) for numerical parity tests only.
+parity = ["timm==1.0.29"]
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["context"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "C90", "RUF", "PIE", "PERF", "FURB", "PTH", "RET", "ANN"]
+ignore = ["ANN401", "F722", "F821"]
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+project-excludes = ["context/**"]
+python-version = "3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

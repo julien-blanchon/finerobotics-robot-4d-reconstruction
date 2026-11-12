@@ -65,6 +65,7 @@ max-complexity = 12
 [tool.pyrefly]
 project-includes = ["src", "tests"]
 project-excludes = ["context/**"]
+search-path = ["."]  # tests import shared helpers as `tests.*`
 python-version = "3.13"
 # Compiled extension without type information: an untyped boundary by design
 replace-imports-with-any = ["mujoco", "mujoco.*", "arrow", "arrow.*"]  # arrow: reference release, parity tests only

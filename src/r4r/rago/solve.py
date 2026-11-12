@@ -68,7 +68,7 @@ def calibrate(
 ) -> Calibration:
     """Initialise in closed form, then refine with `config.method`."""
 
-    obs = observations
+    obs = observations.to(qpos.device, qpos.dtype)
     initial_mounts, initial_scale = initialize(robot, qpos, obs, names)
     rig = Rig(robot, qpos, names, initial_mounts, initial_scale)
     method = {

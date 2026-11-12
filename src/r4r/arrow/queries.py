@@ -85,3 +85,21 @@ def tracks[N: IntVar](
         target,
         ref,
     )
+
+
+def pairs[N: IntVar, M: IntVar](
+    xy: Tensor[[N, 2]], source: Tensor[[M]], target: Tensor[[M]]
+) -> Queries:
+    """For each view pair (source → target): where are the source's grid pixels in the target?
+
+    Answers are in the target's own camera, at the target's time. Order: pair-major, then pixel.
+    """
+
+    n = xy.shape[0]
+    target_frame = repeat(target, "m -> 1 (m n)", n=n)
+    return Queries(
+        repeat(xy, "n c -> 1 (m n) c", m=len(source)),
+        repeat(source, "m -> 1 (m n)", n=n),
+        target_frame,
+        target_frame,
+    )

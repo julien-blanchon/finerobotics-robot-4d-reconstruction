@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.data.episode import JointMap
+
 PRIOR_PREFIX = "r4r:"
 HINGE, SLIDE = int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)
 
@@ -93,8 +95,31 @@ class Robot[L: IntVar, J: IntVar, C: IntVar]:
         )
 
 
-def compile_model(path: Path, meshdir: Path | None = None) -> mujoco.MjModel:
-    """Compile an MJCF or URDF file with MuJoCo; `meshdir` overrides where meshes are read."""
+@dataclass(frozen=True, slots=True)
+class CameraMount:
+    """A camera the description may lack: rigid on `body` (None = world), free with a prior.
+
+    Added at its body's origin, looking along the body's +z (the usual wrist convention); the
+    prior is wide, the closed-form initialisation does the real work.
+    """
+
+    name: str
+    body: str | None
+    translation_std: float
+    rotation_std: float
+
+
+# MuJoCo camera orientation whose optical axis (OpenCV +z) is the body's +z: 180° about x
+LOOK_ALONG_BODY_Z = (0.0, 1.0, 0.0, 0.0)
+
+
+def compile_model(
+    path: Path, meshdir: Path | None = None, cameras: tuple[CameraMount, ...] = ()
+) -> mujoco.MjModel:
+    """Compile an MJCF or URDF file with MuJoCo, adding any `cameras` it does not define.
+
+    `meshdir` overrides where meshes are read.
+    """
 
     xml = path.read_text()
     if path.suffix.lower() == ".urdf" and "<mujoco>" not in xml:
@@ -102,13 +127,24 @@ def compile_model(path: Path, meshdir: Path | None = None) -> mujoco.MjModel:
 
     spec = mujoco.MjSpec.from_string(xml)
     spec.meshdir = str(meshdir or path.parent)
+    existing = {camera.name for camera in spec.cameras}
+    numerics = {numeric.name for numeric in spec.numerics}
+    for mount in cameras:
+        if mount.name not in existing:
+            parent = spec.worldbody if mount.body is None else spec.body(mount.body)
+            parent.add_camera(name=mount.name, quat=LOOK_ALONG_BODY_Z)
+        prior = f"{PRIOR_PREFIX}camera:{mount.name}"
+        if prior not in numerics:
+            spec.add_numeric(name=prior, data=[mount.translation_std, mount.rotation_std])
     return spec.compile()
 
 
-def load_robot(path: Path, meshdir: Path | None = None) -> Robot:
+def load_robot(
+    path: Path, meshdir: Path | None = None, cameras: tuple[CameraMount, ...] = ()
+) -> Robot:
     """Compile a robot description and extract the arrays forward kinematics needs."""
 
-    model = compile_model(path, meshdir)
+    model = compile_model(path, meshdir, cameras)
     unsupported = {int(k) for k in model.jnt_type} - {HINGE, SLIDE}
     assert not unsupported, f"only hinge/slide joints are supported, got types {unsupported}"
 
@@ -180,3 +216,21 @@ def _couplings(model: mujoco.MjModel) -> tuple[tuple[int, int, float, float], ..
             )
         )
     return tuple(couplings)
+
+
+def qpos_from_state[T: IntVar, S: IntVar](
+    robot: Robot, state: Tensor[[T, S]], joints: tuple[JointMap, ...]
+) -> Tensor[[T, int]]:
+    """MuJoCo `qpos` from a dataset state trajectory; unmapped joints stay at 0.
+
+    Mimic joints are filled later by forward kinematics (`apply_couplings`).
+    """
+
+    qpos = state.new_zeros(len(state), robot.nq)
+    for joint in joints:
+        value = joint.sign * state[:, joint.index]
+        if joint.source is not None and joint.target is not None:
+            (s0, s1), (t0, t1) = joint.source, joint.target
+            value = t0 + (value - s0) * (t1 - t0) / (s1 - s0)
+        qpos[:, robot.joint_qpos[robot.joint_names.index(joint.name)]] = value
+    return qpos

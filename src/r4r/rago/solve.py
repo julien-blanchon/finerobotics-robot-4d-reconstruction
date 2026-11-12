@@ -92,9 +92,10 @@ def calibrate(
         loss_3d, loss_2d = scene_losses(
             poses, rig.scales(), rig.intrinsics(), obs, config.cauchy_3d, config.cauchy_2d
         )
-        # Scene terms are means over correspondences; priors weigh like one correspondence each,
-        # as in a sum of residuals plus a prior
-        penalty = penalty / len(obs.view_a)
+        # Scene terms are means over correspondences; priors weigh like one *view* each. ARROW's
+        # errors are correlated within a view, so the independent evidence is closer to the
+        # number of views than to the number of correspondences.
+        penalty = penalty / len(obs.view_time)
         loss = config.weight_3d * loss_3d + config.weight_2d * loss_2d + penalty
         optimizer.zero_grad()
         loss.backward()

@@ -42,6 +42,8 @@ class CameraStream[T: IntVar, H: IntVar, W: IntVar]:
     mount: str | None  # link it is rigid on, when known
     side: str | None  # left, right, center (metadata, used as a sanity check)
     prior: CameraPrior
+    # Known intrinsics of this episode at the video resolution (per-episode table), if any
+    intrinsics: Tensor[[3, 3]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,3 +55,5 @@ class Episode[T: IntVar, S: IntVar]:
     robot: Path  # URDF or MJCF
     cameras: tuple[CameraStream, ...]
     priors: DatasetPriors
+    # Which setup (e.g. recording station) the episode belongs to, when the dataset says
+    station: str | None = None

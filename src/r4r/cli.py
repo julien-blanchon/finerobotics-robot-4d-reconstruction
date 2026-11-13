@@ -269,9 +269,18 @@ class Rig:
         bodies = body_mounts(loaded[0].priors)
         robot = load_robot(loaded[0].robot, cameras=mounts, bodies=bodies)
         robot = robot.to(device, torch.float64)
+        stations = {e.station for e in loaded}
+        if len(stations) > 1:
+            raise SystemExit(
+                f"episodes come from several stations {sorted(map(str, stations))}: a rig is "
+                "calibrated per station (pick episodes of one)"
+            )
         k = []
         for c in streams:
             height, width = c.frames.shape[-2:]
+            if c.intrinsics is not None:  # known for this episode (per-episode table)
+                k.append(c.intrinsics.tolist())
+                continue
             f = c.prior.focal or self.focal * width
             k.append([[f, 0, (width - 1) / 2], [0, f, (height - 1) / 2], [0, 0, 1]])
         intrinsics = torch.tensor(k, dtype=torch.float64, device=device)
@@ -282,7 +291,7 @@ class Rig:
             )
             for e in loaded
         ]
-        known_focal = tuple(c.prior.focal is not None for c in streams)
+        known_focal = tuple(c.intrinsics is not None or c.prior.focal is not None for c in streams)
         known_mount = tuple(m.body_from_camera is not None for m in mounts)
         model = RoMaV2.from_checkpoint(device=device)
         config = replace(RigConfig(), link_every=self.every, groups=self.groups)

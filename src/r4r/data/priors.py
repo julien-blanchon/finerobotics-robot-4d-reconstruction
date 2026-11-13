@@ -159,6 +159,44 @@ def load_priors(root: Path) -> DatasetPriors:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class EpisodeRecord:
+    """Known per-episode values: the station (setup) and each camera's intrinsics
+    `(fx, fy, cx, cy)` at the video resolution."""
+
+    station: str | None
+    intrinsics: dict[str, tuple[float, float, float, float]]
+
+
+def episode_table_path(root: Path) -> Path:
+    """`priors/<family>/<dataset>.episodes.parquet` next to the dataset's priors."""
+
+    return priors_path(root).with_suffix(".episodes.parquet")
+
+
+def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
+    """One episode's known values; None when the dataset has no table or no row for it.
+
+    The table has one row per (episode, camera): `episode, camera, fx, fy, cx, cy` and an
+    optional `station`.
+    """
+
+    path = episode_table_path(root)
+    if not path.exists():
+        return None
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path, filters=[("episode", "=", episode)])
+    if table.num_rows == 0:
+        return None
+    rows = table.to_pylist()
+    station = rows[0].get("station")
+    return EpisodeRecord(
+        None if station is None else str(station),
+        {r["camera"]: (r["fx"], r["fy"], r["cx"], r["cy"]) for r in rows},
+    )
+
+
 def write_camera(root: Path, camera: str, values: Mapping[str, object]) -> Path:
     """Set fields of one camera's priors (e.g. a fitted mount), keeping everything else."""
 

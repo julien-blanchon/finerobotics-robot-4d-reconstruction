@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -18,7 +19,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import decode_video_frames
 
 from .episode import CameraStream, Episode, JointMap
-from .priors import CameraPrior, load_priors
+from .priors import CameraPrior, load_episode_record, load_priors
 
 IMAGE_PREFIX = "observation.images."
 
@@ -40,6 +41,7 @@ def load_episode(
     robot = json.loads((root / "meta" / "robot.json").read_text())
     priors = load_priors(root)
     links = {camera["key"]: camera["urdf_link"] for camera in robot.get("cameras", [])}
+    record = load_episode_record(root, episode)
     cameras = []
     for key in meta.video_keys:
         if meta.features[key].get("info", {}).get("is_depth_map", False):
@@ -47,7 +49,12 @@ def load_episode(
         name = key.removeprefix(IMAGE_PREFIX)
         frames = None if decode is None or name in decode else torch.empty(0, 3, 0, 0)
         prior = priors.cameras.get(name, CameraPrior())
-        cameras.append(_camera(meta, root, episode, key, timestamps, links.get(key), prior, frames))
+        stream = _camera(meta, root, episode, key, timestamps, links.get(key), prior, frames)
+        if record is not None and name in record.intrinsics:
+            fx, fy, cx, cy = record.intrinsics[name]
+            k = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
+            stream = replace(stream, intrinsics=k)
+        cameras.append(stream)
     state = rows[robot["state"]["feature"]].double()
     if priors.state_shift:
         # Frame t's state from t + shift (a known video/joint-state offset), clamped
@@ -61,6 +68,7 @@ def load_episode(
         robot=root / "meta" / robot["urdf"],
         cameras=tuple(cameras),
         priors=priors,
+        station=None if record is None else record.station,
     )
 
 

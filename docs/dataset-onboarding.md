@@ -46,7 +46,11 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
 
   Check the calibration's resolution against the video's (abc-130k: K at 848×480, videos
   640×480, so crop vs resize must be checked). A dropped calibration goes into
-  `priors/ISSUES.md`. Only then is it estimated
+  `priors/ISSUES.md`. When intrinsics differ per episode (several recording stations,
+  per-unit calibrations), write them to `priors/<family>/<dataset>.episodes.parquet` (one row
+  per episode and camera: `episode, camera, fx, fy, cx, cy` at the video resolution, and
+  `station` when known); the loader gives each stream its K ✅. A station is a setup: `r4r rig`
+  refuses episodes from several stations. Only then is it estimated
   (⬜ a focal tool: ARROW pooled over many frames for static cameras; the moving-camera fit
   gives it for wrist/head cameras). Fixed by default (`focal_range: 0`); a range only for
   datasets that really vary it (randomising simulators, per-unit calibrations).

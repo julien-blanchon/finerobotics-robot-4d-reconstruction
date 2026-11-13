@@ -142,10 +142,35 @@ class Fit:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class Sheet:
+    """Contact sheet: camera frames next to the robot skeleton (top, side, front views)."""
+
+    dataset: tyro.conf.Positional[str]
+    output: tyro.conf.Positional[Path]
+    episode: int = 0
+    moments: int = 4
+
+    def run(self) -> None:
+        import cv2
+        import torch
+
+        from r4r.data.lerobot import load_episode
+        from r4r.rago.robot import load_robot
+        from r4r.viz.sheet import contact_sheet
+
+        episode = load_episode(dataset_root(self.dataset), self.episode)
+        robot = load_robot(episode.robot).to("cpu", torch.float64)
+        image = contact_sheet(episode, robot, self.moments)
+        cv2.imwrite(str(self.output), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        print(f"wrote {self.output} ({image.shape[1]}x{image.shape[0]})")
+
+
 type Command = (
     Annotated[Inspect, tyro.conf.subcommand("inspect")]
     | Annotated[Links, tyro.conf.subcommand("links")]
     | Annotated[Fit, tyro.conf.subcommand("fit")]
+    | Annotated[Sheet, tyro.conf.subcommand("sheet")]
 )
 
 

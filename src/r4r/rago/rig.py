@@ -1,12 +1,11 @@
-"""The robot and its cameras with their unknowns: mounts, focal lengths, ARROW's metric scales.
+"""The robot and its cameras with their unknowns: mounts and focal lengths.
 
 A camera is rigidly mounted on a body of the kinematic tree (a wrist camera on the hand, an
 exterior camera on the world body). Its pose at time t is `world_from_body(q_t) · body_from_camera`.
 Free mounts (declared with priors in the robot description) are optimised as
 `initial · exp(δ)`; the others stay at their description pose. Each camera's focal length is
 corrected by a factor `exp(φ)` with a log-normal prior (std `focal_std`): wide when the initial
-intrinsics come from ARROW, tight when the dataset knows them. Each episode (one ARROW encoding)
-has its own scale, metres per ARROW unit.
+intrinsics come from ARROW, tight when the dataset knows them.
 """
 
 from __future__ import annotations
@@ -40,7 +39,6 @@ class Rig(nn.Module):
         qpos: Tensor[[int, int]],
         names: tuple[str, ...],
         initial_mounts: Tensor[[int, 4, 4]],
-        initial_scales: Tensor[[int]],
         initial_intrinsics: Tensor[[int, 3, 3]],
         focal_std: float,
         pixel_unit: Tensor[[int]] | None = None,
@@ -67,18 +65,12 @@ class Rig(nn.Module):
         self.register_buffer("prior_std", qpos.new_tensor(stds))
 
         self.mount_delta = nn.Parameter(qpos.new_zeros(len(names), 6))
-        self.log_scale = nn.Parameter(initial_scales.to(qpos).log())
         self.register_buffer("initial_intrinsics", initial_intrinsics.to(qpos))
         # Pixels per unit of reprojection error, a constant per camera (default: initial focal)
         unit = initial_intrinsics[:, 0, 0] if pixel_unit is None else pixel_unit
         self.register_buffer("pixel_unit", unit.to(qpos))
         self.log_focal = nn.Parameter(qpos.new_zeros(len(names)))
         self.focal_std = focal_std
-
-    def scales(self) -> Tensor[[int]]:
-        """Metres per ARROW unit, per episode."""
-
-        return self.log_scale.exp()
 
     def intrinsics(self) -> Tensor[[int, 3, 3]]:
         """Per camera: initial intrinsics with corrected focal lengths (square pixels kept)."""

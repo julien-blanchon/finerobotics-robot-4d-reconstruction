@@ -32,10 +32,10 @@ import torch.nn.functional as F
 
 from r4r.geometry import camera, se3
 
-from .losses import cauchy
 from .rig import MOTION_THRESHOLD, Rig
 
 if TYPE_CHECKING:
+    from shape_extensions import IntVar
     from torch import Tensor
 
     from .robot import Robot
@@ -127,13 +127,11 @@ def bundle_adjust(
     obs = Observations(
         t.view[keep], t.pixel[keep].to(qpos), t.weight[keep].to(qpos), track, int(track.max()) + 1
     )
-    scales = qpos.new_ones(1)  # unused: the bundle never touches ARROW's depth
     rig = Rig(
         robot,
         qpos,
         names,
         initial_mounts.to(qpos),
-        scales,
         t.intrinsics.to(qpos),
         config.focal_std,
         pixel_unit,
@@ -193,6 +191,12 @@ def bundle_adjust(
             camera_score=per_camera,
             track_body=track_body,
         )
+
+
+def cauchy[K: IntVar](error: Tensor[[K]], scale: float) -> Tensor[[K]]:
+    """Robust cost `log(1 + (e/δ)²)`: quadratic below δ, logarithmic above (bounded influence)."""
+
+    return torch.log1p((error / scale) ** 2)
 
 
 def attach(

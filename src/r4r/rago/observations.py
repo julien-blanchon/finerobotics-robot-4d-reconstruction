@@ -11,12 +11,10 @@ timeline and carry their episode (encoding), whose ARROW scale is its own.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
-from einops import rearrange
 
 from r4r.arrow import queries
 from r4r.geometry import alignment, camera
@@ -37,7 +35,6 @@ class Observations[V: IntVar, K: IntVar, C: IntVar]:
     (same episode) at `pixel_a`/`pixel_b` with depths `depth_a`/`depth_b` (ARROW units).
     `reference_from_view` are ARROW's camera poses relative to one view of the same episode
     (ARROW units), used to initialise; `intrinsics` the initial per-camera estimate.
-    `depth_map[v, i, j]` is ARROW's depth at native pixel `(j, i) · depth_stride`.
     """
 
     view_camera: Tensor[[V]]
@@ -52,8 +49,6 @@ class Observations[V: IntVar, K: IntVar, C: IntVar]:
     weight: Tensor[[K]]
     intrinsics: Tensor[[C, 3, 3]]
     reference_from_view: Tensor[[V, 4, 4]]
-    depth_map: Tensor[[V, int, int]]
-    depth_stride: int
 
     @property
     def episodes(self) -> int:
@@ -79,7 +74,6 @@ class Observations[V: IntVar, K: IntVar, C: IntVar]:
             weight=floating(self.weight),
             intrinsics=floating(self.intrinsics),
             reference_from_view=floating(self.reference_from_view),
-            depth_map=floating(self.depth_map),
         )
 
 
@@ -110,8 +104,6 @@ def merge(parts: list[Observations], timesteps: list[int]) -> Observations:
             * (weights / weights.sum())[:, None, None, None]
         ).sum(0),
         reference_from_view=torch.cat([p.reference_from_view for p in parts]),
-        depth_map=torch.cat([p.depth_map for p in parts]),
-        depth_stride=parts[0].depth_stride,
     )
 
 
@@ -121,16 +113,16 @@ class ObservationConfig:
     grid: tuple[int, int] = (24, 14)
     # Pair each view with views this many timesteps away (both signs; 0 = other cameras)
     offsets: tuple[int, ...] = (0, 1, 2, 4, 8)
-    # Static if ARROW's source→target displacement is below this (fraction of scene size)
-    static_displacement: float = 0.01
+    # Motion thresholds on ARROW's encoded displacement ‖ρ‖ = log(1 + ‖d‖/ε) (see below). On DROID
+    # the static background is exactly 0 and a moving arm sits at ρ ≈ 3–4 (median), so the gap
+    # is wide; thresholds in ‖d‖ would hide how small ARROW's normalised displacements are.
+    static_rho: float = 0.5
     min_visibility: float = 0.5
-    # Dense depth for robot alignment: every `depth_stride`-th native pixel
-    depth_stride: int = 4
     chunk: int = 100_000
 
 
-# ARROW encodes displacement d as ρ(d) = d/‖d‖ · log(1 + ‖d‖/ε)  (ARROW App. B.1, Eq. 9)
-DISPLACEMENT_EPS = 1e-4
+# ARROW encodes displacement d as ρ(d) = d/‖d‖ · log(1 + ‖d‖/ε), ε = 1e-4 (App. B.1, Eq. 9):
+# its head outputs ρ, and ‖ρ‖ is what the motion thresholds compare.
 
 
 def observations_from_arrow(
@@ -190,7 +182,7 @@ def observations_from_arrow(
     uv = found.uv[0].reshape(-1, n, 2)
     pixel_b = camera.resize_pixels(uv * uv.new_tensor(resize.model) - 0.5, 1 / scale_x, 1 / scale_y)
     displacement = found.displacement[0].reshape(-1, n, 3).norm(dim=-1)
-    static = displacement < math.log1p(config.static_displacement / DISPLACEMENT_EPS)
+    static = displacement < config.static_rho
     visible = found.visibility_logits[0].reshape(-1, n).sigmoid() > config.min_visibility
     inside = (pixel_b >= 0).all(-1) & (pixel_b <= pixel_b.new_tensor([width - 1, height - 1])).all(
         -1
@@ -198,19 +190,6 @@ def observations_from_arrow(
     depth_b = found.points[0].reshape(-1, n, 3)[..., 2]
     keep = static & visible & inside & (depth_b > 0) & (points[source, :, 2] > 0)
     pair, pixel = keep.nonzero(as_tuple=True)
-
-    # Dense depth maps on the native lattice
-    lattice = queries.pixel_grid(height, width, config.depth_stride, device)
-    rows_d, columns_d = (
-        len(range(0, height, config.depth_stride)),
-        len(range(0, width, config.depth_stride)),
-    )
-    dense = model.decode(
-        encoding,
-        queries.per_frame(camera.resize_pixels(lattice, scale_x, scale_y), views, None),
-        config.chunk,
-    )
-    depth_map = rearrange(dense.points[0, :, 2], "(v h w) -> v h w", v=views, h=rows_d, w=columns_d)
 
     return Observations(
         view_camera=view_camera,
@@ -225,6 +204,4 @@ def observations_from_arrow(
         weight=weight[source[pair], pixel] * found.point_confidence[0].reshape(-1, n)[pair, pixel],
         intrinsics=intrinsics,
         reference_from_view=reference_from_view,
-        depth_map=depth_map,
-        depth_stride=config.depth_stride,
     )

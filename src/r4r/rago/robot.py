@@ -43,10 +43,15 @@ HINGE, SLIDE = int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE
 MUJOCO_FROM_OPENCV_CAMERA = torch.diag(torch.tensor([1.0, -1.0, -1.0, 1.0]))
 
 # Keep every URDF link as its own body (the wrist mount is often a fixed link), and skip
-# visual meshes: MuJoCo cannot read COLLADA and kinematics never needs them.
+# visual meshes: MuJoCo cannot read COLLADA and kinematics never needs them. Kinematics
+# ignores dynamics too: bound the tiny or zeroed masses and inertias some descriptions ship.
 URDF_COMPILER = (
-    '<mujoco><compiler fusestatic="false" discardvisual="true" strippath="false"/></mujoco>'
+    '<mujoco><compiler fusestatic="false" discardvisual="true" strippath="false"'
+    ' boundmass="1e-6" boundinertia="1e-12"/></mujoco>'
 )
+
+# Mesh formats MuJoCo decodes; geoms on other files (.dae, .glb collisions) are dropped
+MESH_FORMATS = {".stl", ".obj", ".msh"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +182,8 @@ def _spec(path: Path, meshdir: Path | None, cameras: tuple[CameraMount, ...]) ->
 
     spec = mujoco.MjSpec.from_string(xml)
     spec.meshdir = str(meshdir or path.parent)
+    _drop_undecodable_meshes(spec)
+    _repair_inertias(spec)
     existing = {camera.name for camera in spec.cameras}
     numerics = {numeric.name for numeric in spec.numerics}
     for mount in cameras:
@@ -193,6 +200,39 @@ def _spec(path: Path, meshdir: Path | None, cameras: tuple[CameraMount, ...]) ->
         if prior not in numerics:
             spec.add_numeric(name=prior, data=[mount.translation_std, mount.rotation_std])
     return spec
+
+
+def _drop_undecodable_meshes(spec: mujoco.MjSpec) -> None:
+    """Remove meshes MuJoCo has no decoder for, and the geoms showing them."""
+
+    dropped = {m.name for m in spec.meshes if Path(m.file).suffix.lower() not in MESH_FORMATS}
+    for geom in spec.geoms:
+        if geom.type == mujoco.mjtGeom.mjGEOM_MESH and geom.meshname in dropped:
+            spec.delete(geom)
+    for mesh in spec.meshes:
+        if mesh.name in dropped:
+            spec.delete(mesh)
+
+
+def _repair_inertias(spec: mujoco.MjSpec) -> None:
+    """Zero the inertia tensors MuJoCo rejects; `boundinertia` then makes them acceptable.
+
+    Descriptions ship tensors that are not positive definite (every entry 1e-8) or whose
+    principal moments break the triangle inequality. Kinematics never reads them.
+    """
+
+    for body in spec.bodies:
+        if not body.explicitinertial:
+            continue
+        xx, yy, zz, xy, xz, yz = body.fullinertia
+        moments = body.inertia.tolist()
+        if not math.isnan(xx):
+            tensor = torch.tensor([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]], dtype=torch.float64)
+            moments = torch.linalg.eigvalsh(tensor).tolist()
+        a, b, c = sorted(moments)
+        if not (a > 0 and a + b >= c):  # also catches NaN
+            body.fullinertia = [math.nan, 0, 0, 0, 0, 0]
+            body.inertia = [0, 0, 0]
 
 
 def load_robot(

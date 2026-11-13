@@ -125,9 +125,12 @@ class Rig(nn.Module):
         pixel_unit: Tensor[[int]] | None = None,
         episode: Tensor[[int]] | None = None,
         start_at: Tensor[[int, int, 4, 4]] | None = None,
+        bodies_at: Tensor[[int, int, 4, 4]] | None = None,
     ) -> None:
         """`start_at [C, T]`, when given: each camera's starting mount at each timestep (for
-        episode-scope cameras placed differently in each episode)."""
+        episode-scope cameras placed differently in each episode). `bodies_at [B, T]`: each
+        free body's starting correction at each timestep (free bodies in body order), e.g. a
+        mobile base's odometry since the episode's first frame."""
 
         super().__init__()
         index = [robot.camera(name) for name in names]
@@ -180,6 +183,16 @@ class Rig(nn.Module):
         self.register_buffer("free_offset", robot.parent_from_body[free].to(qpos))
         freedoms = [robot.free_bodies[robot.body_names[b]] for b in free]
         self.bodies = Corrections(list(freedoms), episode, qpos.dtype)
+        if bodies_at is not None:
+            with torch.no_grad():
+                for b in range(len(free)):
+                    rows = self.bodies.row[b]
+                    first = torch.zeros(len(self.bodies.delta), dtype=torch.long, device=device)
+                    # The first timestep of each row (scatter of the smallest time per row)
+                    time = torch.arange(len(rows), device=device)
+                    first.scatter_reduce_(0, rows, time, reduce="amin", include_self=False)
+                    used = torch.unique(rows)
+                    self.bodies.delta[used] = se3.se3_log(bodies_at[b, first[used]])
 
         self.register_buffer("initial_intrinsics", initial_intrinsics.to(qpos))
         # Pixels per unit of reprojection error, a constant per camera (default: initial focal)

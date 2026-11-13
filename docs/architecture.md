@@ -53,6 +53,11 @@ calibration solves in stages:
 
 ## Stage 1 — dataset preparation (once per dataset, a person or an agent with tools)
 
+The step-by-step guide is `docs/dataset-onboarding.md` (kept current). Settings (frames,
+episodes, RoMa pairs) are tuned there on a few episodes, then frozen for mass processing, which
+must be fast because it runs on every episode.
+
+
 Goal: a priors file good enough that the rest runs unattended.
 
 1. `r4r inspect`: joint mapping (state columns that vary but drive nothing, joints beyond

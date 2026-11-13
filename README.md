@@ -9,7 +9,7 @@ model): depth, normals, 3D tracks, camera intrinsics, poses and mounts.
   ([arXiv:2509.08813](https://arxiv.org/abs/2509.08813)): fits the unknown camera mounts, arm
   placements and scale so that ARROW's geometry agrees with forward kinematics.
 
-Status: early development. See `STYLE.md` for conventions and `docs/` (to come) for usage.
+Status: early development. See `docs/architecture.md` for how the stages fit together and `STYLE.md` for conventions.
 
 ## Setup (JUPITER)
 

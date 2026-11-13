@@ -63,11 +63,15 @@ Solve in stages (the solver refuses a free camera mount together with a free bod
 1. Moving-camera mounts, each from its own video, over a sample of episodes with consensus:
    `r4r fit <dataset> <camera> --episodes … --write` ✅. Check that most episodes agree; the
    disagreeing ones are usually poor views (zoomed, dark, little texture).
-2. Bodies and static cameras, jointly over many episodes, with the mounts frozen
-   (⬜ in the CLI; `research/rig_setup.py` for bimanual rigs today).
-3. Repeat on separate groups of episodes: the values must agree within a few millimetres /
-   tenths of a degree for dataset-scope unknowns. Residuals alone do not reveal a poorly
-   determined unknown.
+2. The whole rig: `r4r rig <dataset> --episodes … --groups 2 [--write]` ✅ runs every stage
+   from the priors: free moving mounts (skipped when the priors know them), multi-camera
+   tracks (KLT + RoMa links every `--every` timesteps), static cameras by PnP per episode,
+   then one bundle over all episodes with the free bodies and static cameras free and the
+   mounts frozen.
+3. The same bundle on separate groups of episodes (`--groups`): it prints how much they
+   disagree per free body. Dataset-scope values must agree within a few millimetres / tenths
+   of a degree. Residuals alone do not reveal a poorly determined unknown. ⬜ writing fitted
+   body offsets to the priors (printed only for now).
 
 **What to tune** (on the sample, then frozen for mass processing):
 
@@ -75,7 +79,7 @@ Solve in stages (the solver refuses a free camera mount together with a free bod
 |---|---|---|
 | frames (stride) | more frames: longer, cleaner tracks; more time and memory | every frame for KLT, subsample for the search |
 | episodes per setup fit | the main lever for dataset-scope unknowns | 5–20 |
-| RoMa pairs (`every`) | links between cameras: what pins arm bases and static cameras | every 0.3–1 s |
+| RoMa pairs (`--every`) | links between cameras: what pins arm bases and static cameras | every 0.3–1 s |
 | agreement tolerance | which episodes count as agreeing | 2 cm / 2° |
 | focal range | 0 when known | 0 |
 

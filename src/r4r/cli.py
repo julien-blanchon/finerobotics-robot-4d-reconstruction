@@ -226,6 +226,109 @@ class Fit:
 
 
 @dataclass(frozen=True, slots=True)
+class Rig:
+    """Calibrate a whole rig in stages: moving mounts, then free bodies (arm bases) and static
+    cameras over pooled episodes, checked by agreement between groups of episodes.
+
+    Cameras, links, focals and free bodies come from the priors (see
+    docs/dataset-onboarding.md, step 4).
+    """
+
+    dataset: tyro.conf.Positional[str]
+    episodes: tuple[int, ...] = (0, 1, 2, 3)
+    # Groups for the agreement check (episodes dealt round-robin)
+    groups: int = 2
+    # Frame stride when decoding (1: every frame)
+    stride: int = 1
+    # RoMa links between cameras every this many (strided) timesteps
+    every: int = 10
+    # Focal guess (× image width) for cameras the priors give none
+    focal: float = 0.7
+    # Store fitted mounts and focals in the camera priors
+    write: bool = False
+
+    def run(self) -> None:
+        import math
+        from dataclasses import replace
+
+        import torch
+
+        from r4r.data.lerobot import load_episode
+        from r4r.data.priors import write_camera
+        from r4r.geometry import se3
+        from r4r.matching import RoMaV2
+        from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
+        from r4r.rago.stages import RigConfig, RigEpisode, calibrate_rig, spread
+
+        root = dataset_root(self.dataset)
+        loaded = [load_episode(root, e, stride=self.stride) for e in self.episodes]
+        streams = loaded[0].cameras
+        names = tuple(c.name for c in streams)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
+        bodies = body_mounts(loaded[0].priors)
+        robot = load_robot(loaded[0].robot, cameras=mounts, bodies=bodies)
+        robot = robot.to(device, torch.float64)
+        k = []
+        for c in streams:
+            height, width = c.frames.shape[-2:]
+            f = c.prior.focal or self.focal * width
+            k.append([[f, 0, (width - 1) / 2], [0, f, (height - 1) / 2], [0, 0, 1]])
+        intrinsics = torch.tensor(k, dtype=torch.float64, device=device)
+        episodes = [
+            RigEpisode(
+                qpos_from_state(robot, e.state.to(device), e.joints),
+                {c.name: c.frames for c in e.cameras},
+            )
+            for e in loaded
+        ]
+        known_focal = tuple(c.prior.focal is not None for c in streams)
+        known_mount = tuple(m.body_from_camera is not None for m in mounts)
+        model = RoMaV2.from_checkpoint(device=device)
+        config = replace(RigConfig(), link_every=self.every, groups=self.groups)
+        fit = calibrate_rig(
+            robot, episodes, names, intrinsics, known_focal, known_mount, model, config
+        )
+
+        print(f"median {fit.median_error:.2f} px, inliers {fit.inlier_fraction:.0%}")
+        for c, stream in enumerate(streams):
+            pose = fit.mounts[c].cpu()
+            where = robot.body_names[robot.camera_body[robot.camera(stream.name)]]
+            print(
+                f"{stream.name} on {where}: position "
+                f"{[round(v, 4) for v in pose[:3, 3].tolist()]} m, "
+                f"focal {float(fit.intrinsics[c, 0, 0]):.1f} px"
+            )
+        free = sorted(robot.free_bodies, key=robot.body)
+        for b, (name, (cm, deg)) in enumerate(
+            zip(free, spread(fit.group_corrections), strict=True)
+        ):
+            offset = fit.group_corrections[:, b].mean(0)
+            print(
+                f"{name}: offset {[round(v, 4) for v in offset[:3, 3].tolist()]} m, "
+                f"{math.degrees(float(se3.so3_log(offset[:3, :3]).norm())):.2f} deg; "
+                f"groups disagree by {cm:.1f} cm / {deg:.2f} deg"
+            )
+        if self.write:
+            for c, stream in enumerate(streams):
+                values: dict[str, object] = {
+                    "focal": round(float(fit.intrinsics[c, 0, 0]), 2),
+                    "focal_range": stream.prior.focal_range if known_focal[c] else 0.0,
+                }
+                if stream.moving and not known_mount[c]:
+                    pose = fit.mounts[c].cpu()
+                    values |= {
+                        "mount": "moving",
+                        "link": robot.body_names[robot.camera_body[robot.camera(stream.name)]],
+                        "position": [round(v, 5) for v in pose[:3, 3].tolist()],
+                        "orientation": [
+                            round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
+                        ],
+                    }
+                print(f"wrote {write_camera(root, stream.name, values)}")
+
+
+@dataclass(frozen=True, slots=True)
 class Sheet:
     """Contact sheet: camera frames next to the robot skeleton (top, side, front views)."""
 
@@ -274,6 +377,7 @@ type Command = (
     Annotated[Inspect, tyro.conf.subcommand("inspect")]
     | Annotated[Links, tyro.conf.subcommand("links")]
     | Annotated[Fit, tyro.conf.subcommand("fit")]
+    | Annotated[Rig, tyro.conf.subcommand("rig")]
     | Annotated[Sheet, tyro.conf.subcommand("sheet")]
     | Annotated[Export, tyro.conf.subcommand("export")]
 )

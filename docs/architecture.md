@@ -25,8 +25,8 @@ leave out is a parameter of the robot description with:
 | joint mapping, signs, units, video/state offset | dataset | ✅ priors (`joints`, `state_shift`), units in the loader |
 | focal length | dataset (episode for randomising sims) | ✅ prior + fit; ⬜ preprocessing tool |
 | moving-camera mount (link, pose) | dataset | ✅ search + bundle + episode consensus |
-| static-camera pose | dataset or episode | 🔶 RoMa anchoring; ⬜ in the library |
-| arm-base placement (bimanual) | dataset or episode | ⬜ free bodies |
+| static-camera pose | dataset or episode | ✅ PnP on moving-camera points + bundle (`r4r rig`) |
+| arm-base placement (bimanual) | dataset or episode | ✅ free bodies, staged (`r4r rig`); ⬜ write-back |
 | robot base pose | frame | ⬜ free bodies (mobile, humanoid) |
 | lens distortion | dataset | ⬜ (fisheye: later, with correction tables) |
 
@@ -88,7 +88,7 @@ Goal: the dataset-scope values, and the range of the episode-scope ones.
 
 Static cameras in a setup: anchored to a calibrated moving camera — RoMa v2 matches between the
 two views (on frame pairs where it reports overlap) give pixels of static scene points the
-moving camera triangulates — then PnP and the bundle. 🔶 The focal of a static camera is weakly
+moving camera triangulates — then PnP and the bundle (`r4r.rago.stages`, `r4r rig`). ✅ The focal of a static camera is weakly
 constrained by one episode (focal ↔ distance): it comes from preparation and is shared across
 episodes. ⬜
 

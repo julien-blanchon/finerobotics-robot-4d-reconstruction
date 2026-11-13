@@ -124,7 +124,11 @@ class Rig(nn.Module):
         focal_std: float,
         pixel_unit: Tensor[[int]] | None = None,
         episode: Tensor[[int]] | None = None,
+        start_at: Tensor[[int, int, 4, 4]] | None = None,
     ) -> None:
+        """`start_at [C, T]`, when given: each camera's starting mount at each timestep (for
+        episode-scope cameras placed differently in each episode)."""
+
         super().__init__()
         index = [robot.camera(name) for name in names]
         self.names = names
@@ -140,6 +144,14 @@ class Rig(nn.Module):
         self.register_buffer("initial_mount", initial_mounts)
         self.register_buffer("default_mount", robot.body_from_camera[index].to(qpos))
         self.cameras = Corrections([robot.free_cameras.get(n) for n in names], episode, qpos.dtype)
+        if start_at is not None:
+            # Rows start at the given mounts (relative to the camera's initial mount)
+            with torch.no_grad():
+                for c in range(len(names)):
+                    for row in torch.unique(self.cameras.row[c]).tolist():
+                        time = int((self.cameras.row[c] == row).nonzero()[0, 0])
+                        relative = se3.inverse(initial_mounts[c]) @ start_at[c, time]
+                        self.cameras.delta[row] = se3.se3_log(relative)
 
         # Free bodies, root first: each correction moves its subtree
         free = sorted(robot.body(n) for n in robot.free_bodies)

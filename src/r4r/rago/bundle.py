@@ -119,12 +119,14 @@ def bundle_adjust(
     config: BundleConfig,
     pixel_unit: Tensor[[int]] | None = None,
     episode: Tensor[[int]] | None = None,
+    start_at: Tensor[[int, int, 4, 4]] | None = None,
 ) -> BundleResult:
     """Refine free mounts and focal lengths by robust reprojection of triangulated tracks.
 
     Errors are in pixels per `pixel_unit` (per camera; default: its initial focal length).
     Runs to be compared by score must share the unit. `episode [T]` says which episode each
-    timestep belongs to (for episode-scope unknowns).
+    timestep belongs to (for episode-scope unknowns); `start_at [C, T]` optional starting mounts
+    per camera and timestep (episode-scope cameras placed differently in each episode).
     """
 
     t = tracks
@@ -142,6 +144,7 @@ def bundle_adjust(
         config.focal_std,
         pixel_unit,
         episode,
+        start_at,
     )
     track_moving = torch.zeros(obs.count, dtype=torch.bool, device=qpos.device)
     track_moving[obs.track[t.moving[keep]]] = True

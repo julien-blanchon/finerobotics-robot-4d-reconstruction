@@ -22,7 +22,7 @@ import math
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 import mujoco
 import torch
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
     from r4r.data.episode import JointMap
-    from r4r.data.priors import CameraPrior
+    from r4r.data.priors import CameraPrior, DatasetPriors
 
 PRIOR_PREFIX = "r4r:"
 HINGE, SLIDE = int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)
@@ -52,6 +52,20 @@ URDF_COMPILER = (
 
 # Mesh formats MuJoCo decodes; geoms on other files (.dae, .glb collisions) are dropped
 MESH_FORMATS = {".stl", ".obj", ".msh"}
+
+
+SCOPES = ("dataset", "episode", "frame")
+type Scope = Literal["dataset", "episode", "frame"]
+
+
+@dataclass(frozen=True, slots=True)
+class Freedom:
+    """How far fitting may move an element (standard deviations, m and rad) and how often it
+    may change: once for the dataset, per episode, or per frame."""
+
+    translation_std: float
+    rotation_std: float
+    scope: Scope = "dataset"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,8 +95,8 @@ class Robot[L: IntVar, J: IntVar, C: IntVar]:
     camera_body: tuple[int, ...]
     body_from_camera: Tensor[[C, 4, 4]]
     # Free elements: name → (translation std m, rotation std rad)
-    free_cameras: dict[str, tuple[float, float]]
-    free_bodies: dict[str, tuple[float, float]]
+    free_cameras: dict[str, Freedom]
+    free_bodies: dict[str, Freedom]
     nq: int
 
     def body(self, name: str) -> int:
@@ -116,6 +130,7 @@ class CameraMount:
     translation_std: float
     rotation_std: float
     body_from_camera: tuple[tuple[float, ...], ...] | None = None  # 4×4, OpenCV camera axes
+    scope: Scope = "dataset"
 
     @classmethod
     def from_prior(cls, name: str, prior: CameraPrior, link: str | None, moving: bool) -> Self:
@@ -139,7 +154,28 @@ class CameraMount:
             prior.position_range if known else unknown[0],
             math.radians(prior.orientation_range_deg) if known else unknown[1],
             pose,
+            prior.scope,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class BodyMount:
+    """A body of the description whose placement (offset from its parent) is not exactly
+    known: e.g. a second arm's base, or a mobile robot's base per frame."""
+
+    name: str
+    translation_std: float
+    rotation_std: float
+    scope: Scope = "dataset"
+
+
+def body_mounts(priors: DatasetPriors) -> tuple[BodyMount, ...]:
+    """The free bodies a dataset's priors declare."""
+
+    return tuple(
+        BodyMount(name, b.position_range, math.radians(b.orientation_range_deg), b.scope)
+        for name, b in priors.bodies.items()
+    )
 
 
 # Priors of a moving camera's mount still to be searched (m, rad)
@@ -150,24 +186,29 @@ LOOK_ALONG_BODY_Z = (0.0, 1.0, 0.0, 0.0)
 
 
 def compile_model(
-    path: Path, meshdir: Path | None = None, cameras: tuple[CameraMount, ...] = ()
+    path: Path,
+    meshdir: Path | None = None,
+    cameras: tuple[CameraMount, ...] = (),
+    bodies: tuple[BodyMount, ...] = (),
 ) -> mujoco.MjModel:
     """Compile an MJCF or URDF file with MuJoCo, adding any `cameras` it does not define.
 
     `meshdir` overrides where meshes are read.
     """
 
-    return _spec(path, meshdir, cameras).compile()
+    return _spec(path, meshdir, cameras, bodies).compile()
 
 
-def describe(path: Path, cameras: tuple[CameraMount, ...]) -> str:
+def describe(
+    path: Path, cameras: tuple[CameraMount, ...], bodies: tuple[BodyMount, ...] = ()
+) -> str:
     """MJCF of the description with `cameras` placed and their fitting ranges (`r4r:` numerics).
 
     Meshes are referenced from the original description's directory (absolute path).
     """
 
     meshdir = path.parent.resolve()
-    spec = _spec(path, meshdir, cameras)
+    spec = _spec(path, meshdir, cameras, bodies)
     spec.compile()  # validates the result
     for mesh in spec.meshes:
         mesh.file = str(meshdir / mesh.file)
@@ -175,7 +216,12 @@ def describe(path: Path, cameras: tuple[CameraMount, ...]) -> str:
     return spec.to_xml()
 
 
-def _spec(path: Path, meshdir: Path | None, cameras: tuple[CameraMount, ...]) -> mujoco.MjSpec:
+def _spec(
+    path: Path,
+    meshdir: Path | None,
+    cameras: tuple[CameraMount, ...],
+    bodies: tuple[BodyMount, ...] = (),
+) -> mujoco.MjSpec:
     xml = path.read_text()
     if path.suffix.lower() == ".urdf" and "<mujoco>" not in xml:
         xml = re.sub(r"(<robot[^>]*>)", rf"\1{URDF_COMPILER}", xml, count=1)
@@ -198,7 +244,13 @@ def _spec(path: Path, meshdir: Path | None, cameras: tuple[CameraMount, ...]) ->
                 parent.add_camera(name=mount.name, pos=pose[:3, 3].tolist(), quat=quat)
         prior = f"{PRIOR_PREFIX}camera:{mount.name}"
         if prior not in numerics:
-            spec.add_numeric(name=prior, data=[mount.translation_std, mount.rotation_std])
+            data = [mount.translation_std, mount.rotation_std, SCOPES.index(mount.scope)]
+            spec.add_numeric(name=prior, data=data)
+    for body in bodies:
+        prior = f"{PRIOR_PREFIX}body:{body.name}"
+        if prior not in numerics:
+            data = [body.translation_std, body.rotation_std, SCOPES.index(body.scope)]
+            spec.add_numeric(name=prior, data=data)
     return spec
 
 
@@ -236,11 +288,14 @@ def _repair_inertias(spec: mujoco.MjSpec) -> None:
 
 
 def load_robot(
-    path: Path, meshdir: Path | None = None, cameras: tuple[CameraMount, ...] = ()
+    path: Path,
+    meshdir: Path | None = None,
+    cameras: tuple[CameraMount, ...] = (),
+    bodies: tuple[BodyMount, ...] = (),
 ) -> Robot:
     """Compile a robot description and extract the arrays forward kinematics needs."""
 
-    model = compile_model(path, meshdir, cameras)
+    model = compile_model(path, meshdir, cameras, bodies)
     unsupported = {int(k) for k in model.jnt_type} - {HINGE, SLIDE}
     assert not unsupported, f"only hinge/slide joints are supported, got types {unsupported}"
 
@@ -271,14 +326,14 @@ def load_robot(
         body_from_camera=(
             pose(model.cam_pos, model.cam_quat) @ MUJOCO_FROM_OPENCV_CAMERA.double()
         ).reshape(model.ncam, 4, 4),
-        free_cameras={name: std for (kind, name), std in priors.items() if kind == "camera"},
-        free_bodies={name: std for (kind, name), std in priors.items() if kind == "body"},
+        free_cameras={name: f for (kind, name), f in priors.items() if kind == "camera"},
+        free_bodies={name: f for (kind, name), f in priors.items() if kind == "body"},
         nq=int(model.nq),
     )
 
 
-def _priors(model: mujoco.MjModel) -> dict[tuple[str, str], tuple[float, float]]:
-    """`r4r:<kind>:<name>` numerics → {(kind, name): (translation std, rotation std)}."""
+def _priors(model: mujoco.MjModel) -> dict[tuple[str, str], Freedom]:
+    """`r4r:<kind>:<name>` numerics (translation std, rotation std[, scope index]) → freedoms."""
 
     priors = {}
     for i in range(model.nnumeric):
@@ -287,8 +342,9 @@ def _priors(model: mujoco.MjModel) -> dict[tuple[str, str], tuple[float, float]]
             continue
         kind, _, name = full.removeprefix(PRIOR_PREFIX).partition(":")
         assert kind in {"camera", "body"}, f"unknown r4r element kind in {full!r}"
-        translation_std, rotation_std = (float(v) for v in model.numeric(i).data)
-        priors[kind, name] = (translation_std, rotation_std)
+        data = [float(v) for v in model.numeric(i).data]
+        scope = SCOPES[int(data[2])] if len(data) > 2 else "dataset"
+        priors[kind, name] = Freedom(data[0], data[1], scope)
     return priors
 
 

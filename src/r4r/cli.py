@@ -126,7 +126,7 @@ class Fit:
             refine,
             video_tracks,
         )
-        from r4r.rago.robot import CameraMount, load_robot, qpos_from_state
+        from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
 
         root = dataset_root(self.dataset)
         loaded = [load_episode(root, e, decode=(self.camera,)) for e in self.episodes]
@@ -135,7 +135,8 @@ class Fit:
         assert bodies, f"{self.camera}: no candidate body (give --bodies)"
         device = "cuda" if torch.cuda.is_available() else "cpu"
         mount = CameraMount.from_prior(self.camera, stream.prior, bodies[0], moving=True)
-        robot = load_robot(loaded[0].robot, cameras=(mount,)).to(device, torch.float64)
+        free = body_mounts(loaded[0].priors)
+        robot = load_robot(loaded[0].robot, cameras=(mount,), bodies=free).to(device, torch.float64)
         height, width = stream.frames.shape[-2:]
         focal = stream.prior.focal or self.focal or 0.7 * width
         k = torch.tensor(
@@ -257,7 +258,7 @@ class Export:
 
     def run(self) -> None:
         from r4r.data.lerobot import load_episode
-        from r4r.rago.robot import CameraMount, describe
+        from r4r.rago.robot import CameraMount, body_mounts, describe
 
         episode = load_episode(dataset_root(self.dataset), 0, decode=())
         mounts = tuple(
@@ -265,7 +266,7 @@ class Export:
             for c in episode.cameras
             if c.prior.position is not None and c.prior.orientation is not None
         )
-        self.output.write_text(describe(episode.robot, mounts))
+        self.output.write_text(describe(episode.robot, mounts, body_mounts(episode.priors)))
         print(f"wrote {self.output} ({len(mounts)} cameras placed)")
 
 

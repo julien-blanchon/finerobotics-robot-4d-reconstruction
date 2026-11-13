@@ -93,6 +93,10 @@ class BundleResult:
     camera_score: Tensor[[int]]
     # Per track (dense ids): body it is attached to (WORLD when static), -1 when dropped
     track_body: Tensor[[int]]
+    # Scoped unknowns: `body_from_camera` per camera and timestep, and `world_from_body` with
+    # the free bodies' corrections, per timestep and body
+    mounts_at: Tensor[[int, int, 4, 4]]
+    world_from_body: Tensor[[int, int, 4, 4]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,11 +118,13 @@ def bundle_adjust(
     initial_mounts: Tensor[[int, 4, 4]],
     config: BundleConfig,
     pixel_unit: Tensor[[int]] | None = None,
+    episode: Tensor[[int]] | None = None,
 ) -> BundleResult:
     """Refine free mounts and focal lengths by robust reprojection of triangulated tracks.
 
     Errors are in pixels per `pixel_unit` (per camera; default: its initial focal length).
-    Runs to be compared by score must share the unit.
+    Runs to be compared by score must share the unit. `episode [T]` says which episode each
+    timestep belongs to (for episode-scope unknowns).
     """
 
     t = tracks
@@ -135,6 +141,7 @@ def bundle_adjust(
         t.intrinsics.to(qpos),
         config.focal_std,
         pixel_unit,
+        episode,
     )
     track_moving = torch.zeros(obs.count, dtype=torch.bool, device=qpos.device)
     track_moving[obs.track[t.moving[keep]]] = True
@@ -190,7 +197,19 @@ def bundle_adjust(
             score=score,
             camera_score=per_camera,
             track_body=track_body,
+            mounts_at=mounts_per_time(rig),
+            world_from_body=rig.world_from_body(),
         )
+
+
+def mounts_per_time(rig: Rig) -> Tensor[[int, int, 4, 4]]:
+    """`body_from_camera [C, T]` with each timestep's scoped correction."""
+
+    steps = rig.kinematics.shape[0]
+    cameras = len(rig.names)
+    camera = torch.arange(cameras, device=rig.kinematics.device).repeat_interleave(steps)
+    time = torch.arange(steps, device=rig.kinematics.device).repeat(cameras)
+    return rig.mounts_at(camera, time).reshape(cameras, steps, 4, 4)
 
 
 def cauchy[K: IntVar](error: Tensor[[K]], scale: float) -> Tensor[[K]]:
@@ -248,7 +267,7 @@ def attach(
 def moving_bodies(rig: Rig) -> list[int]:
     """Bodies whose pose changes during the episode."""
 
-    poses = rig.world_from_body
+    poses = rig.kinematics
     moved = (poses - poses[:1]).abs().flatten(-2).amax(-1).amax(0) > MOTION_THRESHOLD
     return moved.nonzero()[:, 0].tolist()
 
@@ -269,14 +288,15 @@ def reprojection(
     """
 
     t = tracks
-    world_from_view = rig.camera_poses(t.view_camera, t.view_time)
+    world_from_body = rig.world_from_body()
+    world_from_view = rig.camera_poses(t.view_camera, t.view_time, world_from_body)
     intrinsics = rig.intrinsics()
 
     # Gather per-observation pose and intrinsics through embedding (sorted backward)
     table = torch.cat((world_from_view.flatten(1), intrinsics[t.view_camera].flatten(1)), -1)
     rows = F.embedding(obs.view, table)
     world_pose, k = rows[:, :16].unflatten(-1, (4, 4)), rows[:, 16:].unflatten(-1, (3, 3))
-    pose = se3.inverse(rig.world_from_body[t.view_time[obs.view], body]) @ world_pose
+    pose = se3.inverse(world_from_body[t.view_time[obs.view], body]) @ world_pose
 
     # Rays: centre c and unit direction d in the track's frame
     pixel, weight = obs.pixel, obs.weight

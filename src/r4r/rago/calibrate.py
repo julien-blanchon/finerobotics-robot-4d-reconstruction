@@ -105,7 +105,7 @@ def fit_moving_camera(
     prior focal when `focal_range` (relative) is given, else a guess searched around.
     """
 
-    qpos, tracks = pool(episodes)
+    qpos, tracks, _ = pool(episodes)
     search = config.search
     if focal_range is not None:
         factors = (1.0,) if focal_range <= KNOWN_FOCAL else (1 - focal_range, 1.0, 1 + focal_range)
@@ -147,7 +147,7 @@ def refine(
     `unit` is the pixel unit of scores (the focal guess): fits to compare must share it.
     """
 
-    qpos, tracks = pool(episodes)
+    qpos, tracks, episode = pool(episodes)
     index = robot.camera(camera)
     # The camera on `body`, its prior centred on the start
     mounts = robot.body_from_camera.to(qpos).clone()
@@ -163,7 +163,8 @@ def refine(
     names = (camera,)
     pixel_unit = unit.to(qpos)[None]
     tracks = replace(tracks, intrinsics=intrinsics.to(qpos)[None])
-    result = bundle_adjust(on_body, qpos, tracks, names, body_from_camera[None], bundle, pixel_unit)
+    start = body_from_camera[None]
+    result = bundle_adjust(on_body, qpos, tracks, names, start, bundle, pixel_unit, episode)
 
     short = replace(bundle, iterations=config.shift_iterations)
     refined = replace(tracks, intrinsics=result.intrinsics)
@@ -179,7 +180,7 @@ def refine(
     shift = config.shifts[int(shift_scores.argmin())]
     if shift != 0:
         result = bundle_adjust(
-            on_body, shifted(episodes, shift), refined, names, starts, bundle, pixel_unit
+            on_body, shifted(episodes, shift), refined, names, starts, bundle, pixel_unit, episode
         )
     return MountFit(
         body=body,
@@ -245,8 +246,11 @@ def fit_setup(
     return SetupFit(tuple(single), agree, pooled)
 
 
-def pool(episodes: list[tuple[Tensor[[int, int]], Tracks]]) -> tuple[Tensor[[int, int]], Tracks]:
-    """Concatenate episodes: joint positions, and tracks with distinct ids and view numbers."""
+def pool(
+    episodes: list[tuple[Tensor[[int, int]], Tracks]],
+) -> tuple[Tensor[[int, int]], Tracks, Tensor[[int]]]:
+    """Concatenate episodes: joint positions, tracks with distinct ids and view numbers, and
+    the episode of each timestep."""
 
     qpos = torch.cat([q for q, _ in episodes])
     device = qpos.device
@@ -255,15 +259,22 @@ def pool(episodes: list[tuple[Tensor[[int, int]], Tracks]]) -> tuple[Tensor[[int
         parts.append(replace(tracks, track=tracks.track + offset, view=tracks.view + first))
         offset += int(tracks.track.max()) + 1
         first += len(q)
-    return qpos, replace(
-        parts[0],
-        view_camera=torch.zeros(len(qpos), dtype=torch.long, device=device),
-        view_time=torch.arange(len(qpos), device=device),
-        track=torch.cat([t.track for t in parts]),
-        view=torch.cat([t.view for t in parts]),
-        pixel=torch.cat([t.pixel for t in parts]),
-        weight=torch.cat([t.weight for t in parts]),
-        moving=torch.cat([t.moving for t in parts]),
+    episode = torch.cat(
+        [torch.full((len(q),), i, device=device) for i, (q, _) in enumerate(episodes)]
+    )
+    return (
+        qpos,
+        replace(
+            parts[0],
+            view_camera=torch.zeros(len(qpos), dtype=torch.long, device=device),
+            view_time=torch.arange(len(qpos), device=device),
+            track=torch.cat([t.track for t in parts]),
+            view=torch.cat([t.view for t in parts]),
+            pixel=torch.cat([t.pixel for t in parts]),
+            weight=torch.cat([t.weight for t in parts]),
+            moving=torch.cat([t.moving for t in parts]),
+        ),
+        episode,
     )
 
 

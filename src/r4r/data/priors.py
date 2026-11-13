@@ -16,6 +16,8 @@ take precedence over `meta/robot.json` and the camera feature info:
                    "orientation_range_deg": 1.0, "lens": "pinhole",
                    "focal": 182.0, "focal_range": 0.0}
   },
+  "bodies": {"right_arm_base": {"position_range": 0.1, "orientation_range_deg": 10,
+                                 "scope": "episode"}},
   "notes": "free text: what was checked and how"
 }
 ```
@@ -25,9 +27,12 @@ drops wrong ones; `state_shift` fixes a video/joint-state offset (frame t's stat
 from t + shift; `r4r fit --shifts` measures it). A camera's `position` and `orientation`
 (quaternion w, x, y, z of its OpenCV axes) are in the frame of `link` (moving) or of the robot
 base (static); ranges bound what fitting may change (small: fixed across episodes, fitted per
-episode within them). `focal` is the camera's focal length in pixels at the video
-resolution, a property of the lens: fixed across episodes unless `focal_range` (relative)
-says how far it may vary.
+episode within them). `scope` says how often a value may change within its ranges: once for
+the dataset, per episode (e.g. a static camera re-placed between episodes) or per frame.
+`bodies` are elements of the description whose offset from their parent is not exactly known
+(a second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the
+video resolution, a property of the lens: fixed across episodes unless `focal_range`
+(relative) says how far it may vary.
 """
 
 from __future__ import annotations
@@ -55,6 +60,18 @@ class CameraPrior:
     lens: Literal["pinhole", "fisheye"] = "pinhole"
     focal: float | None = None  # pixels at the video resolution
     focal_range: float | None = None  # relative; None: unknown (searched)
+    # How often the mount may change within its ranges: dataset, episode (e.g. a static camera
+    # re-placed between episodes) or frame
+    scope: Literal["dataset", "episode", "frame"] = "dataset"
+
+
+@dataclass(frozen=True, slots=True)
+class BodyPrior:
+    """A body whose offset from its parent is not exactly known (an arm base, a mobile base)."""
+
+    position_range: float  # metres
+    orientation_range_deg: float
+    scope: Literal["dataset", "episode", "frame"] = "dataset"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +81,7 @@ class DatasetPriors:
     removed_joints: tuple[str, ...] = ()
     state_shift: int = 0
     cameras: dict[str, CameraPrior] = field(default_factory=dict)
+    bodies: dict[str, BodyPrior] = field(default_factory=dict)
     notes: str = ""
 
     @property
@@ -112,11 +130,21 @@ def load_priors(root: Path) -> DatasetPriors:
             lens=c.get("lens", "pinhole"),
             focal=c.get("focal"),
             focal_range=c.get("focal_range"),
+            scope=c.get("scope", "dataset"),
         )
         for name, c in raw.get("cameras", {}).items()
     }
+    bodies = {
+        name: BodyPrior(
+            float(b["position_range"]),
+            float(b["orientation_range_deg"]),
+            b.get("scope", "dataset"),
+        )
+        for name, b in raw.get("bodies", {}).items()
+    }
     return DatasetPriors(
         base=raw.get("base", "fixed"),
+        bodies=bodies,
         joints=joints,
         removed_joints=tuple(raw.get("removed_joints", [])),
         state_shift=int(raw.get("state_shift", 0)),

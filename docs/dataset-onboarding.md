@@ -64,9 +64,17 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
   description. Declare it free: `"bodies": {"right_base": {"position_range": 0.2,
   "orientation_range_deg": 20, "scope": "dataset"}}` (episode scope if it moves between
   episodes). Keep the first arm as the anchor.
-- **Mobile bases**: ⬜ (per-frame base pose). Check per episode whether the base moves at all
-  (odometry, base commands, or the head camera's still share in `r4r links`); if it stays put
-  within episodes, the fixed-base pipeline applies episode by episode.
+- **Mobile bases**: declare the base free per frame (`"bodies": {"<root body>":
+  {"position_range": 0.05, "orientation_range_deg": 3, "scope": "frame"}}`, a random walk) and
+  say where its motion is recorded, as its starting trajectory ✅ (`base_odometry`):
+  `pose` (planar x, y, θ columns: simulators, odometry), `velocity` (body-frame vx, vy, ω), or
+  `caster` (wheel angles left, right[, steering] with radius, half track and steering offset
+  from the description; offset 0 and no steering for a differential drive). Validate it: the
+  translation against commanded base velocities, the turn against an on-robot camera's
+  rotation over frames where the camera's joints are still (`research/hsr_yaw_check.py`);
+  pick encoder signs that way. Commanded turn rates can be a poor reference (HSR). Without
+  any record ⬜ (visual odometry). If the base never moves within episodes, the fixed-base
+  pipeline applies episode by episode.
 - Always keep **one anchor** (a fixed arm, a known camera): with everything free, the whole
   scene can shift with no change in the images.
 

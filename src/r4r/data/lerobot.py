@@ -19,7 +19,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import decode_video_frames
 
 from .episode import CameraStream, Episode, JointMap
-from .priors import CameraPrior, load_episode_record, load_priors
+from .priors import CameraPrior, DatasetPriors, load_episode_record, load_priors
 
 IMAGE_PREFIX = "observation.images."
 
@@ -69,7 +69,26 @@ def load_episode(
         cameras=tuple(cameras),
         priors=priors,
         station=None if record is None else record.station,
+        base_motion=None if priors.base_odometry is None else _base_motion(priors, rows),
     )
+
+
+def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
+    """The base's recorded motion (see `r4r.rago.odometry`) at the loaded timesteps."""
+
+    from r4r.rago import odometry
+
+    spec = priors.base_odometry
+    assert spec is not None
+    values = rows[spec.feature].double()[:, list(spec.columns)]
+    if spec.kind == "pose":
+        return odometry.from_poses(values[:, 0], values[:, 1], values[:, 2])
+    if spec.kind == "velocity":
+        return odometry.from_velocity(values, rows["timestamp"].double())
+    assert spec.radius is not None and spec.half_track is not None, "caster: radius, half_track"
+    geometry = odometry.CasterGeometry(spec.radius, spec.half_track, spec.offset, spec.signs)
+    steering = values[:, 2] if values.shape[1] > 2 else None
+    return odometry.from_steps(odometry.caster_steps(values[:, :2], steering, geometry))
 
 
 def _camera(

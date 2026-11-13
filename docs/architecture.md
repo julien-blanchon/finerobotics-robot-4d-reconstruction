@@ -27,7 +27,7 @@ leave out is a parameter of the robot description with:
 | moving-camera mount (link, pose) | dataset | ✅ search + bundle + episode consensus |
 | static-camera pose | dataset or episode | ✅ PnP on moving-camera points + bundle (`r4r rig`) |
 | arm-base placement (bimanual) | dataset or episode | ✅ free bodies, staged (`r4r rig`), written back to the priors |
-| robot base pose | frame | ⬜ free bodies (mobile, humanoid) |
+| robot base pose | frame | ✅ free body at frame scope, started from recorded odometry (`base_odometry`); ⬜ visual odometry when none, end-to-end validation |
 | lens distortion | dataset | ⬜ (fisheye: later, with correction tables) |
 
 Values and ranges live in `priors/<family>/<dataset>.json`; `r4r export` writes them into the

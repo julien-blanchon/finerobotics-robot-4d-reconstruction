@@ -57,3 +57,6 @@ class Episode[T: IntVar, S: IntVar]:
     priors: DatasetPriors
     # Which setup (e.g. recording station) the episode belongs to, when the dataset says
     station: str | None = None
+    # A mobile base's recorded motion since the first timestep, in its own frame [T, 4, 4]
+    # (from the priors' `base_odometry`), the start of its per-frame pose
+    base_motion: Tensor[[T, 4, 4]] | None = None

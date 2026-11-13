@@ -79,6 +79,21 @@ class BodyPrior:
 
 
 @dataclass(frozen=True, slots=True)
+class BaseOdometry:
+    """Where a mobile base's motion is recorded (see `r4r.rago.odometry`): `feature` columns
+    `columns` holding planar poses (x, y, θ), body-frame velocities (vx, vy, ω), or wheel
+    angles (left, right[, steering]) of a caster or differential drive with its geometry."""
+
+    kind: Literal["pose", "velocity", "caster"]
+    feature: str
+    columns: tuple[int, ...]
+    radius: float | None = None
+    half_track: float | None = None
+    offset: float = 0.0
+    signs: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+
+@dataclass(frozen=True, slots=True)
 class DatasetPriors:
     base: Literal["fixed", "mobile"] = "fixed"
     joints: tuple[JointMap, ...] = ()
@@ -86,6 +101,7 @@ class DatasetPriors:
     state_shift: int = 0
     cameras: dict[str, CameraPrior] = field(default_factory=dict)
     bodies: dict[str, BodyPrior] = field(default_factory=dict)
+    base_odometry: BaseOdometry | None = None
     notes: str = ""
 
     @property
@@ -148,8 +164,20 @@ def load_priors(root: Path) -> DatasetPriors:
         )
         for name, b in raw.get("bodies", {}).items()
     }
+    odometry = raw.get("base_odometry")
+    if odometry is not None:
+        odometry = BaseOdometry(
+            odometry["kind"],
+            odometry["feature"],
+            tuple(odometry["columns"]),
+            odometry.get("radius"),
+            odometry.get("half_track"),
+            float(odometry.get("offset", 0.0)),
+            tuple(odometry.get("signs", (1.0, 1.0, 1.0))),
+        )
     return DatasetPriors(
         base=raw.get("base", "fixed"),
+        base_odometry=odometry,
         bodies=bodies,
         joints=joints,
         removed_joints=tuple(raw.get("removed_joints", [])),

@@ -69,7 +69,7 @@ project-excludes = ["context/**"]
 search-path = ["."]  # tests import shared helpers as `tests.*`
 python-version = "3.13"
 # Compiled extension without type information: an untyped boundary by design
-replace-imports-with-any = ["mujoco", "mujoco.*", "arrow", "arrow.*"]  # arrow: reference release, parity tests only
+replace-imports-with-any = ["mujoco", "mujoco.*", "arrow", "arrow.*", "romav2", "romav2.*"]  # arrow, romav2: reference releases, parity tests only
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

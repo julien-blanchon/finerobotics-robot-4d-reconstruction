@@ -36,7 +36,17 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
 
 - **Static or moving**, and for moving cameras **the link** it is rigid on (metadata is often
   wrong; `r4r links` gives evidence: still share, rotation residual per body group).
-- **Focal length**: from the dataset's intrinsics, the camera model's datasheet, or estimated
+- **Focal length**: look for a recorded calibration before estimating anything, in this order:
+  1. the delivered dataset (`info.json` camera fields, per-frame intrinsics columns, `meta/`);
+  2. the upstream source in `provenance.json`: raw recordings often keep it when the
+     conversion dropped it (abc-130k: `foxglove.CameraCalibration` on `/…-camera-info` in each
+     `episode.mcap`, read from the first MBs with `research/abc_calibration.py`; ROS bags:
+     `camera_info`; also the source's format docs and calibration files);
+  3. the camera model's datasheet.
+
+  Check the calibration's resolution against the video's (abc-130k: K at 848×480, videos
+  640×480, so crop vs resize must be checked). A dropped calibration goes into
+  `priors/ISSUES.md`. Only then is it estimated
   (⬜ a focal tool: ARROW pooled over many frames for static cameras; the moving-camera fit
   gives it for wrist/head cameras). Fixed by default (`focal_range: 0`); a range only for
   datasets that really vary it (randomising simulators, per-unit calibrations).

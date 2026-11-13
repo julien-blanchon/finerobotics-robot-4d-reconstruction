@@ -85,6 +85,7 @@ class Corrections(nn.Module):
         active = torch.cat(free) & ~torch.cat(held) if free else none.bool()
         self.register_buffer("active", active)
         self.delta = nn.Parameter(torch.zeros(count, 6, dtype=dtype, device=device))
+        self.free_elements = [f is not None for f in freedoms]
 
     def values(self) -> Tensor[[int, 6]]:
         """δ per row (zero where not free, or held)."""
@@ -150,6 +151,19 @@ class Rig(nn.Module):
                 while node > 0 and node != body:
                     node = robot.body_parent[node]
                 subtree[i, b] = node == body
+        # A free mount and a free body above it on the same chain trade off against each other
+        # (a base offset is absorbed by the mount): such unknowns are solved in stages
+        for i, body in enumerate(free):
+            coupled = [
+                n
+                for n, b, f in zip(names, self.camera_body, self.cameras.free_elements, strict=True)
+                if f and bool(subtree[i, b])
+            ]
+            if coupled:
+                raise ValueError(
+                    f"free body {robot.body_names[body]!r} is above free camera mounts {coupled}:"
+                    " solve the mounts first (each camera alone), freeze them, then the body"
+                )
         self.register_buffer("subtree", subtree.to(device))
         self.register_buffer("free_offset", robot.parent_from_body[free].to(qpos))
         freedoms = [robot.free_bodies[robot.body_names[b]] for b in free]

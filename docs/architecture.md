@@ -35,6 +35,22 @@ robot description (MJCF) with each camera placed and each range as an `r4r:` num
 description itself says what is known and what still varies. One solver (the kinematic
 bundle) fits whatever is free, at whatever scope.
 
+## Solving coupled unknowns in stages
+
+Two unknowns on the same kinematic chain can trade off: a wrist camera's mount and the base of
+its arm, or a static camera and a free body, can absorb each other's error and still fit the
+pixels. The solver refuses to free a camera mount together with a body above it, and setup
+calibration solves in stages:
+
+1. Each moving camera's mount from its own video. It does not depend on any body upstream: a
+   base offset moves the camera's whole trajectory rigidly and the static scene with it.
+   Frozen afterwards.
+2. Unknowns that only exist relative to others (an arm base, a static camera) jointly, over
+   many episodes, from multi-camera tracks (KLT tracks merged through RoMa links between
+   cameras), with the stage-1 mounts fixed.
+3. The same solve on separate groups of episodes: their agreement is the check, their spread
+   the uncertainty. Residuals alone do not reveal a poorly determined unknown.
+
 ## Stage 1 — dataset preparation (once per dataset, a person or an agent with tools)
 
 Goal: a priors file good enough that the rest runs unattended.

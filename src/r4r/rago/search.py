@@ -3,9 +3,9 @@
 The kinematic bundle converges from ~25 cm / 10° away, not from anywhere. Instead of trusting
 one starting point, short bundles start from the 24 axis-aligned orientations of the camera on
 its link (at the description's mount position) × a few focal-length hypotheses, on a subsample
-of the camera's own tracks, all in one batched bundle; the start with the best score is kept. Scores count dropped observations as
-outliers, so they compare across starts. Only the static world is used (no link attachment):
-on the camera's own videos, links invite spurious fits.
+of the camera's own tracks, all in one batched bundle; the start with the best score is kept.
+Scores count dropped observations as outliers, so they compare across starts. Only the static
+world is used (no link attachment): on the camera's own videos, links invite spurious fits.
 
 Ref: the 24 rotations of the cube group (octahedral group O).
 """
@@ -43,9 +43,11 @@ class SearchConfig:
 
 @dataclass(frozen=True, slots=True)
 class SearchResult:
+    # Body the best start rides on; mounts of all cameras (the searched one on `body`)
+    body: int
     body_from_camera: Tensor[[int, 4, 4]]
     intrinsics: Tensor[[int, 3, 3]]
-    # Scores of every start (orientation-major, then focal factor): lower is better
+    # Scores of every start (body-major, then orientation, then focal factor): lower is better
     scores: Tensor[[int]]
 
 
@@ -69,12 +71,15 @@ def search_mount(
     names: tuple[str, ...],
     camera: str,
     config: SearchConfig,
+    bodies: tuple[int, ...] = (),
 ) -> SearchResult:
     """Best start for `camera`'s mount and its focal length, from its own tracks only.
 
-    All starts are solved at once: each is a copy of the camera (same body, its own mount and
-    focal length) seeing its own copy of the tracks, so one bundle optimises them
-    independently (Adam's steps are per parameter) and scores them per copy.
+    Starts ride on each of `bodies` (default: the camera's own body), at the description's
+    mount position on the camera's own body and at the origin of the others. All starts are
+    solved at once: each is a copy of the camera (its own body, mount and focal length)
+    seeing its own copy of the tracks, so one bundle optimises them independently (Adam's
+    steps are per parameter) and scores them per copy.
     """
 
     c = names.index(camera)
@@ -87,16 +92,19 @@ def search_mount(
     keep &= tracks.view_time[tracks.view] % config.every == 0
     view, track = tracks.view[keep], tracks.track[keep]
 
+    index = robot.camera(camera)
+    bodies = bodies or (robot.camera_body[index],)
     rotations = cube_rotations().to(qpos)
     factors = qpos.new_tensor(config.focal_factors)
-    copies = len(rotations) * len(factors)
+    per_body = len(rotations) * len(factors)
+    copies = len(bodies) * per_body
     # Views of the camera, renumbered, then repeated once per copy
     views, view = torch.unique(view, return_inverse=True)
     _, track = torch.unique(track, return_inverse=True)
     n_views, n_tracks = len(views), int(track.max()) + 1
     offset = torch.arange(copies, device=view.device)[:, None]
     intrinsics = tracks.intrinsics[c].to(qpos).expand(copies, 3, 3).clone()
-    intrinsics[:, :2, :2] *= factors.repeat(len(rotations))[:, None, None]
+    intrinsics[:, :2, :2] *= factors.repeat(len(rotations) * len(bodies))[:, None, None]
     batch = replace(
         tracks,
         view_camera=torch.arange(copies, device=view.device).repeat_interleave(n_views),
@@ -108,21 +116,27 @@ def search_mount(
         moving=tracks.moving[keep].repeat(copies),
         intrinsics=intrinsics,
     )
-    index = robot.camera(camera)
     copy_names = tuple(f"{camera}#{i}" for i in range(copies))
+    # Prior centres: the description's mount, moved to the origin of other bodies
+    starts = robot.body_from_camera[index].to(qpos).repeat(len(bodies), 1, 1)
+    for b, body in enumerate(bodies):
+        if body != robot.camera_body[index]:
+            starts[b, :3, 3] = 0.0
     virtual = replace(
         robot,
         camera_names=copy_names,
-        camera_body=(robot.camera_body[index],) * copies,
-        body_from_camera=robot.body_from_camera[index].expand(copies, 4, 4).clone(),
+        camera_body=tuple(b for b in bodies for _ in range(per_body)),
+        body_from_camera=starts.repeat_interleave(per_body, 0),
         free_cameras=dict.fromkeys(copy_names, robot.free_cameras[camera]),
     )
     initial = virtual.body_from_camera.to(qpos).clone()
-    initial[:, :3, :3] = rotations.repeat_interleave(len(factors), 0)
+    initial[:, :3, :3] = rotations.repeat_interleave(len(factors), 0).repeat(len(bodies), 1, 1)
     result = bundle_adjust(virtual, qpos, batch, copy_names, initial, config.bundle)
     best = int(result.camera_score.argmin())
     body_from_camera = robot.body_from_camera[[robot.camera(n) for n in names]].to(qpos).clone()
     body_from_camera[c] = result.body_from_camera[best]
     best_intrinsics = tracks.intrinsics.to(qpos).clone()
     best_intrinsics[c] = result.intrinsics[best]
-    return SearchResult(body_from_camera, best_intrinsics, result.camera_score)
+    return SearchResult(
+        bodies[best // per_body], body_from_camera, best_intrinsics, result.camera_score
+    )

@@ -1,8 +1,8 @@
 """An episode in our one canonical form: camera streams, robot state, robot description.
 
-Everything dataset-specific is resolved by the loader (`lerobot.py`): what remains is images,
-the joint-state trajectory with its mapping to the description's joints, and for each camera
-the link it is rigidly mounted on (None for a camera fixed in the world).
+Everything dataset-specific is resolved by the loader (`lerobot.py`, with the dataset's priors):
+what remains is images, the joint-state trajectory with its mapping to the description's
+joints, and for each camera whether it moves and, when known, the link it is mounted on.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
+
+    from .priors import CameraPrior, DatasetPriors
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,10 +36,12 @@ class JointMap:
 @dataclass(frozen=True, slots=True)
 class CameraStream[T: IntVar, H: IntVar, W: IntVar]:
     name: str
-    frames: Tensor[[T, 3, H, W]]  # uint8 RGB
+    frames: Tensor[[T, 3, H, W]]  # uint8 RGB (no frames when not decoded: T = 0)
     role: str  # wrist, exo, ego, other
-    mount: str | None  # rigid on this link; None: fixed in the world
+    moving: bool  # on a moving body (static: fixed in the world)
+    mount: str | None  # link it is rigid on, when known
     side: str | None  # left, right, center (metadata, used as a sanity check)
+    prior: CameraPrior
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,3 +52,4 @@ class Episode[T: IntVar, S: IntVar]:
     joints: tuple[JointMap, ...]
     robot: Path  # URDF or MJCF
     cameras: tuple[CameraStream, ...]
+    priors: DatasetPriors

@@ -3,7 +3,7 @@
 The kinematic bundle converges from ~25 cm / 10° away, not from anywhere. Instead of trusting
 one starting point, short bundles start from the 24 axis-aligned orientations of the camera on
 its link (at the description's mount position) × a few focal-length hypotheses, on a subsample
-of the tracks; the start with the best score is kept. Scores count dropped observations as
+of the camera's own tracks, all in one batched bundle; the start with the best score is kept. Scores count dropped observations as
 outliers, so they compare across starts. Only the static world is used (no link attachment):
 on the camera's own videos, links invite spurious fits.
 
@@ -70,36 +70,59 @@ def search_mount(
     camera: str,
     config: SearchConfig,
 ) -> SearchResult:
-    """Best start for `camera`'s mount (others at their description) and its focal length."""
+    """Best start for `camera`'s mount and its focal length, from its own tracks only.
+
+    All starts are solved at once: each is a copy of the camera (same body, its own mount and
+    focal length) seeing its own copy of the tracks, so one bundle optimises them
+    independently (Adam's steps are per parameter) and scores them per copy.
+    """
 
     c = names.index(camera)
     generator = torch.Generator().manual_seed(config.seed)
-    ids = torch.unique(tracks.track)
+    mine = tracks.view_camera[tracks.view] == c
+    ids = torch.unique(tracks.track[mine])
     share = max(1, int(len(ids) * config.track_share))
     chosen = ids[torch.randperm(len(ids), generator=generator)[:share].to(ids.device)]
-    keep = torch.isin(tracks.track, chosen)
+    keep = mine & torch.isin(tracks.track, chosen)
     keep &= tracks.view_time[tracks.view] % config.every == 0
-    subsample = replace(
-        tracks,
-        track=tracks.track[keep],
-        view=tracks.view[keep],
-        pixel=tracks.pixel[keep],
-        weight=tracks.weight[keep],
-        moving=tracks.moving[keep],
-    )
+    view, track = tracks.view[keep], tracks.track[keep]
 
-    description = robot.body_from_camera[[robot.camera(n) for n in names]].to(qpos)
-    best, scores = None, []
-    for rotation in cube_rotations().to(qpos):
-        initial = description.clone()
-        initial[c, :3, :3] = rotation
-        for factor in config.focal_factors:
-            intrinsics = tracks.intrinsics.to(qpos).clone()
-            intrinsics[c, :2, :2] *= factor
-            run = replace(subsample, intrinsics=intrinsics)
-            result = bundle_adjust(robot, qpos, run, names, initial, config.bundle)
-            scores.append(result.score)
-            if best is None or result.score < best.score:
-                best = result
-    assert best is not None
-    return SearchResult(best.body_from_camera, best.intrinsics, torch.tensor(scores))
+    rotations = cube_rotations().to(qpos)
+    factors = qpos.new_tensor(config.focal_factors)
+    copies = len(rotations) * len(factors)
+    # Views of the camera, renumbered, then repeated once per copy
+    views, view = torch.unique(view, return_inverse=True)
+    _, track = torch.unique(track, return_inverse=True)
+    n_views, n_tracks = len(views), int(track.max()) + 1
+    offset = torch.arange(copies, device=view.device)[:, None]
+    intrinsics = tracks.intrinsics[c].to(qpos).expand(copies, 3, 3).clone()
+    intrinsics[:, :2, :2] *= factors.repeat(len(rotations))[:, None, None]
+    batch = replace(
+        tracks,
+        view_camera=torch.arange(copies, device=view.device).repeat_interleave(n_views),
+        view_time=tracks.view_time[views].repeat(copies),
+        track=(track[None] + offset * n_tracks).flatten(),
+        view=(view[None] + offset * n_views).flatten(),
+        pixel=tracks.pixel[keep].repeat(copies, 1),
+        weight=tracks.weight[keep].repeat(copies),
+        moving=tracks.moving[keep].repeat(copies),
+        intrinsics=intrinsics,
+    )
+    index = robot.camera(camera)
+    copy_names = tuple(f"{camera}#{i}" for i in range(copies))
+    virtual = replace(
+        robot,
+        camera_names=copy_names,
+        camera_body=(robot.camera_body[index],) * copies,
+        body_from_camera=robot.body_from_camera[index].expand(copies, 4, 4).clone(),
+        free_cameras=dict.fromkeys(copy_names, robot.free_cameras[camera]),
+    )
+    initial = virtual.body_from_camera.to(qpos).clone()
+    initial[:, :3, :3] = rotations.repeat_interleave(len(factors), 0)
+    result = bundle_adjust(virtual, qpos, batch, copy_names, initial, config.bundle)
+    best = int(result.camera_score.argmin())
+    body_from_camera = robot.body_from_camera[[robot.camera(n) for n in names]].to(qpos).clone()
+    body_from_camera[c] = result.body_from_camera[best]
+    best_intrinsics = tracks.intrinsics.to(qpos).clone()
+    best_intrinsics[c] = result.intrinsics[best]
+    return SearchResult(body_from_camera, best_intrinsics, result.camera_score)

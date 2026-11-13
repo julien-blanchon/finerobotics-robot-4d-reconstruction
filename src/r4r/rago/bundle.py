@@ -89,6 +89,8 @@ class BundleResult:
     # Robust cost over all observations, dropped ones counting as outliers: comparable between
     # runs from different starts (the data term only averages over the observations kept)
     score: float
+    # The same score per camera (over its own observations)
+    camera_score: Tensor[[int]]
     # Per track (dense ids): body it is attached to (WORLD when static), -1 when dropped
     track_body: Tensor[[int]]
 
@@ -160,7 +162,12 @@ def bundle_adjust(
         valid &= body >= 0
         unit = rig.initial_intrinsics[t.view_camera[obs.view], 0, 0]
         robust = torch.where(valid, cauchy(error, config.cauchy), config.outlier_cost)
-        score = float((robust.clamp_max(config.outlier_cost) * obs.weight).sum() / obs.weight.sum())
+        robust = robust.clamp_max(config.outlier_cost) * obs.weight
+        score = float(robust.sum() / obs.weight.sum())
+        camera = t.view_camera[obs.view]
+        per_camera = torch.zeros(len(names), dtype=robust.dtype, device=robust.device)
+        weight_sum = torch.zeros_like(per_camera).index_add(0, camera, obs.weight)
+        per_camera = per_camera.index_add(0, camera, robust) / weight_sum.clamp_min(1e-12)
         return BundleResult(
             body_from_camera=rig.mounts(),
             intrinsics=rig.intrinsics(),
@@ -169,6 +176,7 @@ def bundle_adjust(
             median_error=float((error * unit)[valid].median()),
             inlier_fraction=float((error[valid] < 3 * config.cauchy).float().mean()),
             score=score,
+            camera_score=per_camera,
             track_body=track_body,
         )
 

@@ -83,6 +83,7 @@ def _joints(robot: dict) -> tuple[JointMap, ...]:
             name = joint["urdf_joint"]
             joints.append(JointMap(name, joint["index"], float(signs.get(name, 1.0))))
         for gripper in arm.get("gripper", []):
-            source, target = (tuple(gripper[k]) for k in ("from", "to"))
+            # No range: the state is already in the joint's units
+            source, target = (tuple(gripper[k]) if gripper[k] else None for k in ("from", "to"))
             joints.append(JointMap(gripper["urdf_joint"], gripper["index"], 1.0, source, target))
     return tuple(joints)

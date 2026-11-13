@@ -47,10 +47,15 @@ def load_episode(
         frames = None if decode is None or name in decode else torch.empty(0, 3, 0, 0)
         prior = priors.cameras.get(name, CameraPrior())
         cameras.append(_camera(meta, root, episode, key, timestamps, links.get(key), prior, frames))
+    state = rows[robot["state"]["feature"]].double()
+    if priors.state_shift:
+        # Frame t's state from t + shift (a known video/joint-state offset), clamped
+        index = (torch.arange(len(state)) + priors.state_shift).clamp(0, len(state) - 1)
+        state = state[index]
     return Episode(
         name=f"{root.name}/episode_{episode:06d}",
         fps=meta.fps / stride,
-        state=rows[robot["state"]["feature"]].double(),
+        state=state,
         joints=priors.joint_map(_joints(robot)),
         robot=root / "meta" / robot["urdf"],
         cameras=tuple(cameras),

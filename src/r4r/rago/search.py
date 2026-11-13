@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SearchConfig:
-    focal_factors: tuple[float, ...] = (0.5, 0.75, 1.0, 1.5)
+    focal_factors: tuple[float, ...] = (0.2, 0.35, 0.5, 0.75, 1.0, 1.5)
     # Subsample: this share of the tracks, observations every `every`-th timestep, and at
     # most `max_views` timesteps (long episodes: memory grows with views × starts)
     track_share: float = 1 / 3

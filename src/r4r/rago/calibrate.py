@@ -32,8 +32,9 @@ class FitConfig:
     klt: KLTConfig = field(default_factory=KLTConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     bundle: BundleConfig = field(default_factory=lambda: BundleConfig(attach_links=False))
-    # Video/joint-state offsets tried (frames; state of frame t taken from t + shift)
-    shifts: tuple[int, ...] = (-3, -2, -1, 0, 1, 2, 3)
+    # Video/joint-state offsets tried (frames; state of frame t taken from t + shift): a
+    # diagnostic for writing a dataset's priors (its `state_shift`), not run by default
+    shifts: tuple[int, ...] = (0,)
     shift_iterations: int = 100
 
 

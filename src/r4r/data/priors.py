@@ -9,6 +9,7 @@ take precedence over `meta/robot.json` and the camera feature info:
   "base": "fixed",
   "joints": [{"index": 16, "urdf_joint": "idx11_head_joint1", "sign": 1.0}],
   "removed_joints": ["joint8"],
+  "state_shift": -1,
   "cameras": {
     "wrist_left": {"mount": "moving", "link": "panda_hand", "position": [0.05, 0.0, 0.04],
                    "position_range": 0.05, "optical_axis": [0, 0, 1],
@@ -19,8 +20,10 @@ take precedence over `meta/robot.json` and the camera feature info:
 ```
 
 `joints` add or replace (by URDF joint name) entries of the state mapping; `removed_joints`
-drops wrong ones. Camera positions and optical axes are in the frame of `link` (moving) or
-of the robot base (static); ranges bound what fitting may change.
+drops wrong ones; `state_shift` fixes a video/joint-state offset (frame t's state is taken
+from t + shift; `r4r fit --shifts` measures it). Camera positions and optical axes are in
+the frame of `link` (moving) or of the robot base (static); ranges bound what fitting may
+change.
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ class DatasetPriors:
     base: Literal["fixed", "mobile"] = "fixed"
     joints: tuple[JointMap, ...] = ()
     removed_joints: tuple[str, ...] = ()
+    state_shift: int = 0
     cameras: dict[str, CameraPrior] = field(default_factory=dict)
     notes: str = ""
 
@@ -101,6 +105,7 @@ def load_priors(root: Path) -> DatasetPriors:
         base=raw.get("base", "fixed"),
         joints=joints,
         removed_joints=tuple(raw.get("removed_joints", [])),
+        state_shift=int(raw.get("state_shift", 0)),
         cameras=cameras,
         notes=raw.get("notes", ""),
     )

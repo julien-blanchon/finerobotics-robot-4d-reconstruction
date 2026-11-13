@@ -44,7 +44,7 @@ class Links:
     dataset: tyro.conf.Positional[str]
     episode: int = 0
     cameras: tuple[str, ...] = ()  # default: all
-    # Focal length guess in pixels (searched ×0.5..1.5); default 0.7 × image width
+    # Focal length guess in pixels (searched ×0.2..1.5); default 0.7 × image width
     focal: float | None = None
     top: int = 4
 
@@ -99,10 +99,14 @@ class Fit:
     episodes: tuple[int, ...] = (0,)
     # Candidate bodies (default: the camera's prior or declared link)
     bodies: tuple[str, ...] = ()
-    # Focal length guess in pixels (searched ×0.5..1.5); default 0.7 × image width
+    # Focal length guess in pixels (searched ×0.2..1.5); default 0.7 × image width
     focal: float | None = None
+    # Video/joint-state offsets to test (frames), on top of the priors' state_shift
+    shifts: tuple[int, ...] = (0,)
 
     def run(self) -> None:
+        from dataclasses import replace
+
         import torch
 
         from r4r.data.lerobot import load_episode
@@ -134,7 +138,8 @@ class Fit:
             device=device,
         )
         ids = tuple(robot.body(b) for b in bodies)
-        fit = fit_moving_camera(robot, episodes, self.camera, ids, k, FitConfig())
+        config = replace(FitConfig(), shifts=self.shifts)
+        fit = fit_moving_camera(robot, episodes, self.camera, ids, k, config)
         for b, score in zip(bodies, fit.body_scores.tolist(), strict=True):
             print(f"  search score on {b}: {score:.3f}")
         t = fit.body_from_camera[:3, 3].tolist()
@@ -148,6 +153,14 @@ class Fit:
             f"  focal {float(fit.intrinsics[0, 0]):.1f} px; score {fit.score:.3f}, "
             f"median {fit.median_error:.2f} px, inliers {fit.inlier_fraction:.0%}"
         )
+        if len(self.shifts) > 1:
+            scores = ", ".join(
+                f"{s:+d}: {v:.3f}"
+                for s, v in zip(self.shifts, fit.shift_scores.tolist(), strict=True)
+            )
+            print(
+                f"  state shift scores ({scores}): best {fit.shift:+d} -> set state_shift in priors"
+            )
 
 
 @dataclass(frozen=True, slots=True)

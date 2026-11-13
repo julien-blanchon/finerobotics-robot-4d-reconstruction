@@ -43,6 +43,7 @@ class Rig(nn.Module):
         initial_scales: Tensor[[int]],
         initial_intrinsics: Tensor[[int, 3, 3]],
         focal_std: float,
+        pixel_unit: Tensor[[int]] | None = None,
     ) -> None:
         super().__init__()
         assert not robot.free_bodies, "free bodies (e.g. a second arm's base) are not supported yet"
@@ -68,6 +69,9 @@ class Rig(nn.Module):
         self.mount_delta = nn.Parameter(qpos.new_zeros(len(names), 6))
         self.log_scale = nn.Parameter(initial_scales.to(qpos).log())
         self.register_buffer("initial_intrinsics", initial_intrinsics.to(qpos))
+        # Pixels per unit of reprojection error, a constant per camera (default: initial focal)
+        unit = initial_intrinsics[:, 0, 0] if pixel_unit is None else pixel_unit
+        self.register_buffer("pixel_unit", unit.to(qpos))
         self.log_focal = nn.Parameter(qpos.new_zeros(len(names)))
         self.focal_std = focal_std
 

@@ -86,8 +86,8 @@ class BundleResult:
     # Median reprojection error at the end (pixels), and the fraction of inlier observations
     median_error: float
     inlier_fraction: float
-    # Robust cost over all observations, dropped ones counting as outliers: comparable between
-    # runs from different starts (the data term only averages over the observations kept)
+    # Robust cost over all observations (dropped tracks at their capped static-world fit):
+    # comparable between runs from different starts (the data term averages over kept ones)
     score: float
     # The same score per camera (over its own observations)
     camera_score: Tensor[[int]]
@@ -113,8 +113,13 @@ def bundle_adjust(
     names: tuple[str, ...],
     initial_mounts: Tensor[[int, 4, 4]],
     config: BundleConfig,
+    pixel_unit: Tensor[[int]] | None = None,
 ) -> BundleResult:
-    """Refine free mounts and focal lengths by robust reprojection of triangulated tracks."""
+    """Refine free mounts and focal lengths by robust reprojection of triangulated tracks.
+
+    Errors are in pixels per `pixel_unit` (per camera; default: its initial focal length).
+    Runs to be compared by score must share the unit.
+    """
 
     t = tracks
     keep = ~t.moving | config.use_moving
@@ -124,7 +129,14 @@ def bundle_adjust(
     )
     scales = qpos.new_ones(1)  # unused: the bundle never touches ARROW's depth
     rig = Rig(
-        robot, qpos, names, initial_mounts.to(qpos), scales, t.intrinsics.to(qpos), config.focal_std
+        robot,
+        qpos,
+        names,
+        initial_mounts.to(qpos),
+        scales,
+        t.intrinsics.to(qpos),
+        config.focal_std,
+        pixel_unit,
     )
     track_moving = torch.zeros(obs.count, dtype=torch.bool, device=qpos.device)
     track_moving[obs.track[t.moving[keep]]] = True
@@ -158,10 +170,12 @@ def bundle_adjust(
     with torch.no_grad():
         track_body = assign()
         body = track_body[obs.track]
-        error, valid, _ = reprojection(rig, t, obs, body.clamp_min(WORLD))
-        valid &= body >= 0
-        unit = rig.initial_intrinsics[t.view_camera[obs.view], 0, 0]
-        robust = torch.where(valid, cauchy(error, config.cauchy), config.outlier_cost)
+        error, in_front, _ = reprojection(rig, t, obs, body.clamp_min(WORLD))
+        # The score keeps dropped tracks at their (capped) fit to the static world: counting
+        # them as outliers would reward mounts that give more tracks parallax (long levers)
+        robust = torch.where(in_front, cauchy(error, config.cauchy), config.outlier_cost)
+        valid = in_front & (body >= 0)
+        unit = rig.pixel_unit[t.view_camera[obs.view]]
         robust = robust.clamp_max(config.outlier_cost) * obs.weight
         score = float(robust.sum() / obs.weight.sum())
         camera = t.view_camera[obs.view]
@@ -246,8 +260,8 @@ def reprojection(
     Each observation's ray is expressed in the frame of `body[m]` at its view's time (the world
     body for static tracks), where its track's point is constant.
 
-    The error is in pixels divided by the camera's *initial* focal length, a constant: dividing
-    by the current focal would reward growing it (the residual shrinks with the focal).
+    The error is in pixels divided by the camera's pixel unit, a constant (its initial focal
+    length by default): dividing by the current focal would reward growing it.
     """
 
     t = tracks
@@ -286,7 +300,7 @@ def reprojection(
     # Reproject each track's point into each view that saw it
     in_view = se3.transform_points(se3.inverse(pose), point[obs.track][:, None])[:, 0]
     projected = camera.project(k, in_view[:, None])[:, 0]
-    unit = rig.initial_intrinsics[t.view_camera[obs.view], 0, 0]
+    unit = rig.pixel_unit[t.view_camera[obs.view]]
     error = (projected - pixel).norm(dim=-1) / unit
     valid = in_view[:, 2] > MIN_DEPTH
     spread = 1 - mean_ray.norm(dim=-1) / total

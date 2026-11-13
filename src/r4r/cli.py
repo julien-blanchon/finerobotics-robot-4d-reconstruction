@@ -95,7 +95,8 @@ class Fit:
 
     dataset: tyro.conf.Positional[str]
     camera: tyro.conf.Positional[str]
-    episode: int = 0
+    # Episodes of the same setup, fitted together
+    episodes: tuple[int, ...] = (0,)
     # Candidate bodies (default: the camera's prior or declared link)
     bodies: tuple[str, ...] = ()
     # Focal length guess in pixels (searched ×0.5..1.5); default 0.7 × image width
@@ -110,14 +111,21 @@ class Fit:
         from r4r.rago.robot import CameraMount, load_robot, qpos_from_state
 
         root = dataset_root(self.dataset)
-        episode = load_episode(root, self.episode, decode=(self.camera,))
+        loaded = [load_episode(root, e, decode=(self.camera,)) for e in self.episodes]
+        episode = loaded[0]
         stream = next(c for c in episode.cameras if c.name == self.camera)
         bodies = self.bodies or ((stream.mount,) if stream.mount else ())
         assert bodies, f"{self.camera}: no candidate body (give --bodies)"
         device = "cuda" if torch.cuda.is_available() else "cpu"
         mount = CameraMount(self.camera, bodies[0], 0.05, 0.5)
         robot = load_robot(episode.robot, cameras=(mount,)).to(device, torch.float64)
-        qpos = qpos_from_state(robot, episode.state.to(device), episode.joints)
+        episodes = [
+            (
+                qpos_from_state(robot, e.state.to(device), e.joints),
+                next(c for c in e.cameras if c.name == self.camera).frames,
+            )
+            for e in loaded
+        ]
         height, width = stream.frames.shape[-2:]
         focal = self.focal or 0.7 * width
         k = torch.tensor(
@@ -126,7 +134,7 @@ class Fit:
             device=device,
         )
         ids = tuple(robot.body(b) for b in bodies)
-        fit = fit_moving_camera(robot, qpos, stream.frames, self.camera, ids, k, FitConfig())
+        fit = fit_moving_camera(robot, episodes, self.camera, ids, k, FitConfig())
         for b, score in zip(bodies, fit.body_scores.tolist(), strict=True):
             print(f"  search score on {b}: {score:.3f}")
         t = fit.body_from_camera[:3, 3].tolist()

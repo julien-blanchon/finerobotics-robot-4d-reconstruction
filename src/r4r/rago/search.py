@@ -30,9 +30,11 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SearchConfig:
     focal_factors: tuple[float, ...] = (0.5, 0.75, 1.0, 1.5)
-    # Subsample: this share of the tracks, observations every `every`-th timestep
+    # Subsample: this share of the tracks, observations every `every`-th timestep, and at
+    # most `max_views` timesteps (long episodes: memory grows with views × starts)
     track_share: float = 1 / 3
     every: int = 3
+    max_views: int = 400
     bundle: BundleConfig = field(
         default_factory=lambda: BundleConfig(
             iterations=150, learning_rate=1e-2, focal_std=0.5, reassign_every=50, attach_links=False
@@ -89,7 +91,8 @@ def search_mount(
     share = max(1, int(len(ids) * config.track_share))
     chosen = ids[torch.randperm(len(ids), generator=generator)[:share].to(ids.device)]
     keep = mine & torch.isin(tracks.track, chosen)
-    keep &= tracks.view_time[tracks.view] % config.every == 0
+    every = max(config.every, -(-len(torch.unique(tracks.view_time)) // config.max_views))
+    keep &= tracks.view_time[tracks.view] % every == 0
     view, track = tracks.view[keep], tracks.track[keep]
 
     index = robot.camera(camera)
@@ -131,7 +134,9 @@ def search_mount(
     )
     initial = virtual.body_from_camera.to(qpos).clone()
     initial[:, :3, :3] = rotations.repeat_interleave(len(factors), 0).repeat(len(bodies), 1, 1)
-    result = bundle_adjust(virtual, qpos, batch, copy_names, initial, config.bundle)
+    # One pixel unit for all starts: per-start units would favour long focal guesses
+    unit = tracks.intrinsics[c, 0, 0].to(qpos).expand(copies)
+    result = bundle_adjust(virtual, qpos, batch, copy_names, initial, config.bundle, unit)
     best = int(result.camera_score.argmin())
     body_from_camera = robot.body_from_camera[[robot.camera(n) for n in names]].to(qpos).clone()
     body_from_camera[c] = result.body_from_camera[best]

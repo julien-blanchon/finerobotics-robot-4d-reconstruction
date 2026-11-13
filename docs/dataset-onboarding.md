@@ -70,8 +70,10 @@ Solve in stages (the solver refuses a free camera mount together with a free bod
    mounts frozen.
 3. The same bundle on separate groups of episodes (`--groups`): it prints how much they
    disagree per free body. Dataset-scope values must agree within a few millimetres / tenths
-   of a degree. Residuals alone do not reveal a poorly determined unknown. ⬜ writing fitted
-   body offsets to the priors (printed only for now).
+   of a degree. Residuals alone do not reveal a poorly determined unknown. `--write` stores
+   the fitted corrections of dataset-scope bodies in the priors (`position`, `orientation`
+   of the correction, and the groups' disagreement as the remaining range); the loader and
+   `r4r export` apply them.
 
 **What to tune** (on the sample, then frozen for mass processing):
 

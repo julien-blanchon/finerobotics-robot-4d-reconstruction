@@ -26,7 +26,7 @@ leave out is a parameter of the robot description with:
 | focal length | dataset (episode for randomising sims) | ✅ prior + fit; ⬜ preprocessing tool |
 | moving-camera mount (link, pose) | dataset | ✅ search + bundle + episode consensus |
 | static-camera pose | dataset or episode | ✅ PnP on moving-camera points + bundle (`r4r rig`) |
-| arm-base placement (bimanual) | dataset or episode | ✅ free bodies, staged (`r4r rig`); ⬜ write-back |
+| arm-base placement (bimanual) | dataset or episode | ✅ free bodies, staged (`r4r rig`), written back to the priors |
 | robot base pose | frame | ⬜ free bodies (mobile, humanoid) |
 | lens distortion | dataset | ⬜ (fisheye: later, with correction tables) |
 

@@ -167,15 +167,24 @@ class BodyMount:
     translation_std: float
     rotation_std: float
     scope: Scope = "dataset"
+    # Fitted correction applied after the description's offset (`parent_from_body @ this`)
+    correction: tuple[tuple[float, ...], ...] | None = None
 
 
 def body_mounts(priors: DatasetPriors) -> tuple[BodyMount, ...]:
     """The free bodies a dataset's priors declare."""
 
-    return tuple(
-        BodyMount(name, b.position_range, math.radians(b.orientation_range_deg), b.scope)
-        for name, b in priors.bodies.items()
-    )
+    mounts = []
+    for name, b in priors.bodies.items():
+        correction = None
+        if b.position is not None and b.orientation is not None:
+            rotation = se3.quaternion_to_matrix(torch.tensor(b.orientation, dtype=torch.float64))
+            position = torch.tensor(b.position, dtype=torch.float64)
+            pose = se3.from_rotation_translation(rotation, position)
+            correction = tuple(map(tuple, pose.tolist()))
+        rotation_std = math.radians(b.orientation_range_deg)
+        mounts.append(BodyMount(name, b.position_range, rotation_std, b.scope, correction))
+    return tuple(mounts)
 
 
 # Priors of a moving camera's mount still to be searched (m, rad)
@@ -246,12 +255,31 @@ def _spec(
         if prior not in numerics:
             data = [mount.translation_std, mount.rotation_std, SCOPES.index(mount.scope)]
             spec.add_numeric(name=prior, data=data)
+    _correct_bodies(spec, [b for b in bodies if b.correction is not None])
     for body in bodies:
         prior = f"{PRIOR_PREFIX}body:{body.name}"
         if prior not in numerics:
             data = [body.translation_std, body.rotation_std, SCOPES.index(body.scope)]
             spec.add_numeric(name=prior, data=data)
     return spec
+
+
+def _correct_bodies(spec: mujoco.MjSpec, bodies: list[BodyMount]) -> None:
+    """Apply fitted corrections to bodies' offsets. The description may give an orientation in
+    any form (quaternion, Euler, axis-angle): the compiled offset is read back first."""
+
+    if not bodies:
+        return
+    model = spec.compile()
+    for body in bodies:
+        i = model.body(body.name).id
+        rotation = se3.quaternion_to_matrix(torch.tensor(model.body_quat[i]))
+        offset = se3.from_rotation_translation(rotation, torch.tensor(model.body_pos[i]))
+        offset = offset @ torch.tensor(body.correction, dtype=torch.float64)
+        target = spec.body(body.name)
+        target.alt.type = mujoco.mjtOrientation.mjORIENTATION_QUAT
+        target.pos = offset[:3, 3].tolist()
+        target.quat = se3.matrix_to_quaternion(offset[:3, :3]).tolist()
 
 
 def _drop_undecodable_meshes(spec: mujoco.MjSpec) -> None:

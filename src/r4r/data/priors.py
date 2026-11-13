@@ -72,6 +72,10 @@ class BodyPrior:
     position_range: float  # metres
     orientation_range_deg: float
     scope: Literal["dataset", "episode", "frame"] = "dataset"
+    # Fitted correction of the body's offset from its parent (applied after the description's
+    # offset, in the body's own frame): position (m) and orientation (wxyz). None: not fitted.
+    position: tuple[float, float, float] | None = None
+    orientation: tuple[float, float, float, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +143,8 @@ def load_priors(root: Path) -> DatasetPriors:
             float(b["position_range"]),
             float(b["orientation_range_deg"]),
             b.get("scope", "dataset"),
+            tuple(b["position"]) if b.get("position") else None,
+            tuple(b["orientation"]) if b.get("orientation") else None,
         )
         for name, b in raw.get("bodies", {}).items()
     }
@@ -156,9 +162,19 @@ def load_priors(root: Path) -> DatasetPriors:
 def write_camera(root: Path, camera: str, values: Mapping[str, object]) -> Path:
     """Set fields of one camera's priors (e.g. a fitted mount), keeping everything else."""
 
+    return _write(root, "cameras", camera, values)
+
+
+def write_body(root: Path, body: str, values: Mapping[str, object]) -> Path:
+    """Set fields of one free body's priors (e.g. a fitted correction), keeping the rest."""
+
+    return _write(root, "bodies", body, values)
+
+
+def _write(root: Path, kind: str, name: str, values: Mapping[str, object]) -> Path:
     path = priors_path(root)
     raw = json.loads(path.read_text()) if path.exists() else {}
-    raw.setdefault("cameras", {}).setdefault(camera, {}).update(values)
+    raw.setdefault(kind, {}).setdefault(name, {}).update(values)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(raw, indent=2) + "\n")
     return path

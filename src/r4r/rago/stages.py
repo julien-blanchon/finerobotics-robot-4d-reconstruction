@@ -72,7 +72,9 @@ class RigFit:
     bodies: Tensor[[int, int, 4, 4]]
     # Static cameras' poses per episode [E, C] (moving cameras: their mount)
     camera_poses: Tensor[[int, int, 4, 4]]
-    # Per group: the free bodies' corrections (body offset change) [G, B]
+    # The free bodies' corrections (description's offset → fitted: `parent_from_body @ this`),
+    # from all episodes [B], and per group of episodes [G, B]
+    body_corrections: Tensor[[int, 4, 4]]
     group_corrections: Tensor[[int, int, 4, 4]]
     median_error: float
     inlier_fraction: float
@@ -136,6 +138,7 @@ def calibrate_rig(
         mounts=everything.body_from_camera,
         intrinsics=everything.intrinsics,
         bodies=everything.world_from_body[first][:, free],
+        body_corrections=_body_corrections(frozen, episodes[0].qpos, everything.world_from_body),
         camera_poses=camera_poses,
         group_corrections=torch.stack(corrections),
         median_error=everything.median_error,
@@ -291,7 +294,9 @@ def _bundle(
 def _body_corrections(
     robot: Robot, qpos: Tensor[[int, int]], corrected: Tensor[[int, int, 4, 4]]
 ) -> Tensor[[int, 4, 4]]:
-    """Each free body's change of pose at the first timestep (description → fitted)."""
+    """Each free body's correction at the first timestep (description → fitted): since a
+    correction moves the body's subtree as `parent_from_body @ E`, `E` is the nominal pose's
+    inverse times the corrected one."""
 
     free = sorted(robot.body(n) for n in robot.free_bodies)
     nominal = forward_kinematics(robot, qpos[:1])[0]

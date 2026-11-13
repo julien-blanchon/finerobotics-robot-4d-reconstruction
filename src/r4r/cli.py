@@ -254,7 +254,7 @@ class Rig:
         import torch
 
         from r4r.data.lerobot import load_episode
-        from r4r.data.priors import write_camera
+        from r4r.data.priors import write_body, write_camera
         from r4r.geometry import se3
         from r4r.matching import RoMaV2
         from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
@@ -300,12 +300,11 @@ class Rig:
                 f"focal {float(fit.intrinsics[c, 0, 0]):.1f} px"
             )
         free = sorted(robot.free_bodies, key=robot.body)
-        for b, (name, (cm, deg)) in enumerate(
-            zip(free, spread(fit.group_corrections), strict=True)
-        ):
-            offset = fit.group_corrections[:, b].mean(0)
+        disagreement = spread(fit.group_corrections)
+        for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
+            offset = fit.body_corrections[b]
             print(
-                f"{name}: offset {[round(v, 4) for v in offset[:3, 3].tolist()]} m, "
+                f"{name}: correction {[round(v, 4) for v in offset[:3, 3].tolist()]} m, "
                 f"{math.degrees(float(se3.so3_log(offset[:3, :3]).norm())):.2f} deg; "
                 f"groups disagree by {cm:.1f} cm / {deg:.2f} deg"
             )
@@ -326,6 +325,21 @@ class Rig:
                         ],
                     }
                 print(f"wrote {write_camera(root, stream.name, values)}")
+            for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
+                if robot.free_bodies[name].scope != "dataset":
+                    continue
+                pose = fit.body_corrections[b].cpu()
+                body = {
+                    "position": [round(v, 5) for v in pose[:3, 3].tolist()],
+                    "orientation": [
+                        round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
+                    ],
+                    # The range left: how much independent groups disagree
+                    "position_range": round(max(cm / 100, 0.002), 4),
+                    "orientation_range_deg": round(max(deg, 0.2), 3),
+                    "fitted": {"episodes": list(self.episodes), "groups": self.groups},
+                }
+                print(f"wrote {write_body(root, name, body)}")
 
 
 @dataclass(frozen=True, slots=True)

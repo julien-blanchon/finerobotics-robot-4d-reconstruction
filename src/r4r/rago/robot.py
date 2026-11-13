@@ -18,6 +18,7 @@ rotation std (rad); `inf` leaves a component unconstrained.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
     from r4r.data.episode import JointMap
+    from r4r.data.priors import CameraPrior
 
 PRIOR_PREFIX = "r4r:"
 HINGE, SLIDE = int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)
@@ -99,15 +101,44 @@ class Robot[L: IntVar, J: IntVar, C: IntVar]:
 class CameraMount:
     """A camera the description may lack: rigid on `body` (None = world), free with a prior.
 
-    Added at its body's origin, looking along the body's +z (the usual wrist convention); the
-    prior is wide, the closed-form initialisation does the real work.
+    Added at `body_from_camera` (OpenCV axes) when known (a calibrated dataset), else at its
+    body's origin looking along the body's +z (the usual wrist convention), to be searched.
+    The prior's standard deviations bound how far fitting may move it.
     """
 
     name: str
     body: str | None
     translation_std: float
     rotation_std: float
+    body_from_camera: tuple[tuple[float, ...], ...] | None = None  # 4×4, OpenCV camera axes
 
+    @classmethod
+    def from_prior(cls, name: str, prior: CameraPrior, link: str | None, moving: bool) -> Self:
+        """The mount a dataset's priors describe; unknown parts get wide searchable priors."""
+
+        known = prior.position is not None and prior.orientation is not None
+        pose = None
+        if known:
+            rotation = se3.quaternion_to_matrix(
+                torch.tensor(prior.orientation, dtype=torch.float64)
+            )
+            position = torch.tensor(prior.position, dtype=torch.float64)
+            pose = tuple(map(tuple, se3.from_rotation_translation(rotation, position).tolist()))
+        if not moving:
+            unknown = (math.inf, math.inf)
+        else:
+            unknown = (SEARCH_TRANSLATION_STD, SEARCH_ROTATION_STD)
+        return cls(
+            name,
+            (prior.link or link) if moving else None,
+            prior.position_range if known else unknown[0],
+            math.radians(prior.orientation_range_deg) if known else unknown[1],
+            pose,
+        )
+
+
+# Priors of a moving camera's mount still to be searched (m, rad)
+SEARCH_TRANSLATION_STD, SEARCH_ROTATION_STD = 0.05, 0.5
 
 # MuJoCo camera orientation whose optical axis (OpenCV +z) is the body's +z: 180° about x
 LOOK_ALONG_BODY_Z = (0.0, 1.0, 0.0, 0.0)
@@ -121,6 +152,25 @@ def compile_model(
     `meshdir` overrides where meshes are read.
     """
 
+    return _spec(path, meshdir, cameras).compile()
+
+
+def describe(path: Path, cameras: tuple[CameraMount, ...]) -> str:
+    """MJCF of the description with `cameras` placed and their fitting ranges (`r4r:` numerics).
+
+    Meshes are referenced from the original description's directory (absolute path).
+    """
+
+    meshdir = path.parent.resolve()
+    spec = _spec(path, meshdir, cameras)
+    spec.compile()  # validates the result
+    for mesh in spec.meshes:
+        mesh.file = str(meshdir / mesh.file)
+    spec.meshdir = ""
+    return spec.to_xml()
+
+
+def _spec(path: Path, meshdir: Path | None, cameras: tuple[CameraMount, ...]) -> mujoco.MjSpec:
     xml = path.read_text()
     if path.suffix.lower() == ".urdf" and "<mujoco>" not in xml:
         xml = re.sub(r"(<robot[^>]*>)", rf"\1{URDF_COMPILER}", xml, count=1)
@@ -132,11 +182,17 @@ def compile_model(
     for mount in cameras:
         if mount.name not in existing:
             parent = spec.worldbody if mount.body is None else spec.body(mount.body)
-            parent.add_camera(name=mount.name, quat=LOOK_ALONG_BODY_Z)
+            if mount.body_from_camera is None:
+                parent.add_camera(name=mount.name, quat=LOOK_ALONG_BODY_Z)
+            else:
+                pose = torch.tensor(mount.body_from_camera, dtype=torch.float64)
+                pose = pose @ MUJOCO_FROM_OPENCV_CAMERA.double()  # its own inverse
+                quat = se3.matrix_to_quaternion(pose[:3, :3]).tolist()
+                parent.add_camera(name=mount.name, pos=pose[:3, 3].tolist(), quat=quat)
         prior = f"{PRIOR_PREFIX}camera:{mount.name}"
         if prior not in numerics:
             spec.add_numeric(name=prior, data=[mount.translation_std, mount.rotation_std])
-    return spec.compile()
+    return spec
 
 
 def load_robot(

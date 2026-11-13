@@ -91,68 +91,109 @@ class Links:
 
 @dataclass(frozen=True, slots=True)
 class Fit:
-    """Fit a moving camera's body (among candidates), mount and focal length on one episode."""
+    """Fit a moving camera's body (among candidates), mount and focal length.
+
+    Several episodes are one setup: fitted one by one, their consensus kept, then pooled.
+    """
 
     dataset: tyro.conf.Positional[str]
     camera: tyro.conf.Positional[str]
-    # Episodes of the same setup, fitted together
     episodes: tuple[int, ...] = (0,)
     # Candidate bodies (default: the camera's prior or declared link)
     bodies: tuple[str, ...] = ()
-    # Focal length guess in pixels (searched ×0.2..1.5); default 0.7 × image width
+    # Focal length guess in pixels when the priors give none (searched ×0.2..1.5);
+    # default 0.7 × image width
     focal: float | None = None
     # Video/joint-state offsets to test (frames), on top of the priors' state_shift
     shifts: tuple[int, ...] = (0,)
+    # Store the result in the camera's priors (mount, focal, ranges from episode agreement)
+    write: bool = False
 
     def run(self) -> None:
+        import math
         from dataclasses import replace
 
         import torch
 
         from r4r.data.lerobot import load_episode
+        from r4r.data.priors import write_camera
         from r4r.geometry import se3
-        from r4r.rago.calibrate import FitConfig, fit_moving_camera
+        from r4r.rago.calibrate import (
+            FitConfig,
+            MountFit,
+            fit_moving_camera,
+            fit_setup,
+            refine,
+            video_tracks,
+        )
         from r4r.rago.robot import CameraMount, load_robot, qpos_from_state
 
         root = dataset_root(self.dataset)
         loaded = [load_episode(root, e, decode=(self.camera,)) for e in self.episodes]
-        episode = loaded[0]
-        stream = next(c for c in episode.cameras if c.name == self.camera)
+        stream = next(c for c in loaded[0].cameras if c.name == self.camera)
         bodies = self.bodies or ((stream.mount,) if stream.mount else ())
         assert bodies, f"{self.camera}: no candidate body (give --bodies)"
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        mount = CameraMount(self.camera, bodies[0], 0.05, 0.5)
-        robot = load_robot(episode.robot, cameras=(mount,)).to(device, torch.float64)
-        episodes = [
-            (
-                qpos_from_state(robot, e.state.to(device), e.joints),
-                next(c for c in e.cameras if c.name == self.camera).frames,
-            )
-            for e in loaded
-        ]
+        mount = CameraMount.from_prior(self.camera, stream.prior, bodies[0], moving=True)
+        robot = load_robot(loaded[0].robot, cameras=(mount,)).to(device, torch.float64)
         height, width = stream.frames.shape[-2:]
-        focal = self.focal or 0.7 * width
+        focal = stream.prior.focal or self.focal or 0.7 * width
         k = torch.tensor(
             [[focal, 0, (width - 1) / 2], [0, focal, (height - 1) / 2], [0, 0, 1]],
             dtype=torch.float64,
             device=device,
         )
-        ids = tuple(robot.body(b) for b in bodies)
         config = replace(FitConfig(), shifts=self.shifts)
-        fit = fit_moving_camera(robot, episodes, self.camera, ids, k, config)
-        for b, score in zip(bodies, fit.body_scores.tolist(), strict=True):
-            print(f"  search score on {b}: {score:.3f}")
-        t = fit.body_from_camera[:3, 3].tolist()
-        axis = fit.body_from_camera[:3, 2].tolist()
-        quat = se3.matrix_to_quaternion(fit.body_from_camera[:3, :3]).tolist()
-        body = robot.body_names[fit.body]
-        print(
-            f"{self.camera} on {body}: position {[round(v, 4) for v in t]} m, "
-            f"optical axis {[round(v, 3) for v in axis]}, "
-            f"quaternion {[round(v, 4) for v in quat]}\n"
-            f"  focal {float(fit.intrinsics[0, 0]):.1f} px; score {fit.score:.3f}, "
-            f"median {fit.median_error:.2f} px, inliers {fit.inlier_fraction:.0%}"
-        )
+        episodes = []
+        for e in loaded:
+            frames = next(c for c in e.cameras if c.name == self.camera).frames
+            qpos = qpos_from_state(robot, e.state.to(device), e.joints)
+            episodes.append((qpos, video_tracks(frames, k, config.klt)))
+        ids = tuple(robot.body(b) for b in bodies)
+        focal_range = stream.prior.focal_range if stream.prior.focal else None
+
+        def describe(fit: MountFit) -> str:
+            t = [round(v, 4) for v in fit.body_from_camera[:3, 3].tolist()]
+            axis = [round(v, 3) for v in fit.body_from_camera[:3, 2].tolist()]
+            quat = [
+                round(v, 4) for v in se3.matrix_to_quaternion(fit.body_from_camera[:3, :3]).tolist()
+            ]
+            return (
+                f"on {robot.body_names[fit.body]}: position {t} m, optical axis {axis}, "
+                f"quaternion {quat}, focal {float(fit.intrinsics[0, 0]):.1f} px; "
+                f"score {fit.score:.3f}, median {fit.median_error:.2f} px, "
+                f"inliers {fit.inlier_fraction:.0%}"
+            )
+
+        spread = (0.005, 1.0)  # ranges written for a single episode (m, deg): indicative
+        if mount.body_from_camera is not None:
+            # Known mount (priors): refine within its ranges, no search
+            start = robot.body_from_camera[robot.camera(self.camera)]
+            body = robot.camera_body[robot.camera(self.camera)]
+            fit = refine(robot, episodes, self.camera, body, start, k, config, k[0, 0], focal_range)
+        elif len(episodes) == 1:
+            fit = fit_moving_camera(robot, episodes, self.camera, ids, k, config, focal_range)
+            for b, score in zip(bodies, fit.body_scores.tolist(), strict=True):
+                print(f"  search score on {b}: {score:.3f}")
+        else:
+            setup = fit_setup(robot, episodes, self.camera, ids, k, config, focal_range)
+            for e, single, agree in zip(
+                self.episodes, setup.episodes, setup.agree.tolist(), strict=True
+            ):
+                print(f"  episode {e} {'agrees' if agree else 'DISAGREES'}: {describe(single)}")
+            fit = setup.fit
+            deviation = [
+                se3.inverse(fit.body_from_camera) @ single.body_from_camera
+                for single, agree in zip(setup.episodes, setup.agree.tolist(), strict=True)
+                if agree and single.body == fit.body
+            ]
+            if len(deviation) > 1:
+                d = torch.stack(deviation)
+                spread = (
+                    float(d[:, :3, 3].norm(dim=-1).max()),
+                    math.degrees(float(se3.so3_log(d[:, :3, :3]).norm(dim=-1).max())),
+                )
+        print(f"{self.camera} {describe(fit)}")
         if len(self.shifts) > 1:
             scores = ", ".join(
                 f"{s:+d}: {v:.3f}"
@@ -161,6 +202,26 @@ class Fit:
             print(
                 f"  state shift scores ({scores}): best {fit.shift:+d} -> set state_shift in priors"
             )
+        if self.write:
+            pose = fit.body_from_camera.cpu()
+            values = {
+                "mount": "moving",
+                "link": robot.body_names[fit.body],
+                "position": [round(v, 5) for v in pose[:3, 3].tolist()],
+                "orientation": [
+                    round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
+                ],
+                "position_range": round(max(spread[0], 0.002), 4),
+                "orientation_range_deg": round(max(spread[1], 0.2), 3),
+                "focal": round(float(fit.intrinsics[0, 0]), 2),
+                "focal_range": focal_range if focal_range is not None else 0.0,
+                "fitted": {
+                    "episodes": list(self.episodes),
+                    "median_px": round(fit.median_error, 3),
+                    "score": round(fit.score, 4),
+                },
+            }
+            print(f"wrote {write_camera(root, self.camera, values)}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,11 +248,33 @@ class Sheet:
         print(f"wrote {self.output} ({image.shape[1]}x{image.shape[0]})")
 
 
+@dataclass(frozen=True, slots=True)
+class Export:
+    """The robot description (MJCF) with every camera whose mount the priors know placed."""
+
+    dataset: tyro.conf.Positional[str]
+    output: tyro.conf.Positional[Path]
+
+    def run(self) -> None:
+        from r4r.data.lerobot import load_episode
+        from r4r.rago.robot import CameraMount, describe
+
+        episode = load_episode(dataset_root(self.dataset), 0, decode=())
+        mounts = tuple(
+            CameraMount.from_prior(c.name, c.prior, c.mount, c.moving)
+            for c in episode.cameras
+            if c.prior.position is not None and c.prior.orientation is not None
+        )
+        self.output.write_text(describe(episode.robot, mounts))
+        print(f"wrote {self.output} ({len(mounts)} cameras placed)")
+
+
 type Command = (
     Annotated[Inspect, tyro.conf.subcommand("inspect")]
     | Annotated[Links, tyro.conf.subcommand("links")]
     | Annotated[Fit, tyro.conf.subcommand("fit")]
     | Annotated[Sheet, tyro.conf.subcommand("sheet")]
+    | Annotated[Export, tyro.conf.subcommand("export")]
 )
 
 

@@ -12,8 +12,9 @@ take precedence over `meta/robot.json` and the camera feature info:
   "state_shift": -1,
   "cameras": {
     "wrist_left": {"mount": "moving", "link": "panda_hand", "position": [0.05, 0.0, 0.04],
-                   "position_range": 0.05, "optical_axis": [0, 0, 1],
-                   "optical_axis_range_deg": 30, "lens": "pinhole"}
+                   "orientation": [0.7071, 0.0, 0.0, 0.7071], "position_range": 0.005,
+                   "orientation_range_deg": 1.0, "lens": "pinhole",
+                   "focal": 182.0, "focal_range": 0.0}
   },
   "notes": "free text: what was checked and how"
 }
@@ -21,15 +22,19 @@ take precedence over `meta/robot.json` and the camera feature info:
 
 `joints` add or replace (by URDF joint name) entries of the state mapping; `removed_joints`
 drops wrong ones; `state_shift` fixes a video/joint-state offset (frame t's state is taken
-from t + shift; `r4r fit --shifts` measures it). Camera positions and optical axes are in
-the frame of `link` (moving) or of the robot base (static); ranges bound what fitting may
-change.
+from t + shift; `r4r fit --shifts` measures it). A camera's `position` and `orientation`
+(quaternion w, x, y, z of its OpenCV axes) are in the frame of `link` (moving) or of the robot
+base (static); ranges bound what fitting may change (small: fixed across episodes, fitted per
+episode within them). `focal` is the camera's focal length in pixels at the video
+resolution, a property of the lens: fixed across episodes unless `focal_range` (relative)
+says how far it may vary.
 """
 
 from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -44,10 +49,12 @@ class CameraPrior:
     mount: Literal["static", "moving"] | None = None
     link: str | None = None
     position: tuple[float, float, float] | None = None
+    orientation: tuple[float, float, float, float] | None = None  # w, x, y, z (OpenCV axes)
     position_range: float = math.inf  # metres
-    optical_axis: tuple[float, float, float] | None = None
-    optical_axis_range_deg: float = 180.0
+    orientation_range_deg: float = 180.0
     lens: Literal["pinhole", "fisheye"] = "pinhole"
+    focal: float | None = None  # pixels at the video resolution
+    focal_range: float | None = None  # relative; None: unknown (searched)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +102,11 @@ def load_priors(root: Path) -> DatasetPriors:
             link=c.get("link"),
             position=tuple(c["position"]) if c.get("position") else None,
             position_range=float(c.get("position_range", math.inf)),
-            optical_axis=tuple(c["optical_axis"]) if c.get("optical_axis") else None,
-            optical_axis_range_deg=float(c.get("optical_axis_range_deg", 180.0)),
+            orientation=tuple(c["orientation"]) if c.get("orientation") else None,
+            orientation_range_deg=float(c.get("orientation_range_deg", 180.0)),
             lens=c.get("lens", "pinhole"),
+            focal=c.get("focal"),
+            focal_range=c.get("focal_range"),
         )
         for name, c in raw.get("cameras", {}).items()
     }
@@ -109,3 +118,14 @@ def load_priors(root: Path) -> DatasetPriors:
         cameras=cameras,
         notes=raw.get("notes", ""),
     )
+
+
+def write_camera(root: Path, camera: str, values: Mapping[str, object]) -> Path:
+    """Set fields of one camera's priors (e.g. a fitted mount), keeping everything else."""
+
+    path = priors_path(root)
+    raw = json.loads(path.read_text()) if path.exists() else {}
+    raw.setdefault("cameras", {}).setdefault(camera, {}).update(values)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(raw, indent=2) + "\n")
+    return path

@@ -12,6 +12,7 @@ dependencies = [
   "av>=15,<18",
   "tyro>=1,<2",
   "mujoco-core>=4,<5",
+  "opencv-python-headless>=4.10,<5",
 ]
 
 [project.optional-dependencies]

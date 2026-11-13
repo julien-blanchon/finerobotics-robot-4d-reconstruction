@@ -3,9 +3,11 @@
 ARROW is trained on sets of 2–24 images, so instead of one huge encoding we encode subsets of
 `subset_size` images: all cameras at a few timesteps, half of the subsets in a local time
 window (overlap for moving cameras), half spread over the episode (diverse robot motion).
-Inside a subset, every grid pixel of every view is followed into the other views; a track is
-kept only if ARROW sees its point static towards every target, and an observation only where
-the point is visible and inside the image.
+Inside a subset, every grid pixel of every view is followed into the other views. A track is
+static if ARROW sees its point static towards every target, moving if it moves towards any
+(a point on the robot, a grasped object, a person); an observation is kept where the point is
+visible and inside the image (and, for a static track, displaced by less than `static_rho`).
+Moving tracks are calibration targets once attached to the link they move with (bundle).
 
 Only ARROW's 2D answers (where the point is) enter calibration: its depth and field of view
 are unreliable on robot footage (research log). Each subset also yields ARROW's relative poses
@@ -47,6 +49,7 @@ class TrackConfig:
     static_rho: float = 0.5
     moving_rho: float = 1.0
     min_visibility: float = 0.5
+    keep_moving: bool = True
     seed: int = 0
 
 
@@ -54,7 +57,8 @@ class TrackConfig:
 class Tracks[M: IntVar, V: IntVar, C: IntVar]:
     """`M` observations of static tracks over `V` views of `C` cameras.
 
-    Observation `m` sees track `track[m]` in view `view[m]` at native `pixel[m]`.
+    Observation `m` sees track `track[m]` in view `view[m]` at native `pixel[m]`; `moving[m]`
+    when its track's point moves (it is then rigid with some link, or an outlier).
     """
 
     view_camera: Tensor[[V]]
@@ -63,6 +67,7 @@ class Tracks[M: IntVar, V: IntVar, C: IntVar]:
     view: Tensor[[M]]
     pixel: Tensor[[M, 2]]
     weight: Tensor[[M]]
+    moving: Tensor[[M]]
     intrinsics: Tensor[[C, 3, 3]]  # median of ARROW's per-view fits (initialisation only)
 
 
@@ -162,8 +167,10 @@ def tracks_from_arrow(
             > 0
         )
         inside = (pixel >= 0).all(-1) & (pixel <= pixel.new_tensor([width - 1, height - 1])).all(-1)
-        keep = (rho < config.static_rho) & (visible > config.min_visibility) & inside
-        keep &= ~moving[source]
+        seen_well = (visible > config.min_visibility) & inside
+        keep = seen_well & (rho < config.static_rho) & ~moving[source]
+        if config.keep_moving:
+            keep |= seen_well & moving[source]
         pair, pixel_index = keep.nonzero(as_tuple=True)
         track_id = next_track + source[pair] * n + pixel_index
 
@@ -176,6 +183,7 @@ def tracks_from_arrow(
                 views[source_view],
                 native[source_pixel],
                 torch.ones_like(seen, dtype=native.dtype),
+                moving.flatten()[seen - next_track],
             )
         )
         observations.append(
@@ -184,14 +192,19 @@ def tracks_from_arrow(
                 views[target_view[pair]],
                 pixel[pair, pixel_index],
                 confidence[pair, pixel_index].log(),
+                moving[source[pair], pixel_index],
             )
         )
         next_track += s * n
         del encoding
 
-    track, view, pixels, weights = (torch.cat(parts) for parts in zip(*observations, strict=True))
+    track, view, pixels, weights, is_moving = (
+        torch.cat(parts) for parts in zip(*observations, strict=True)
+    )
     intrinsics = torch.stack(
         [torch.stack(fits).median(0).values for _, fits in sorted(focal_fits.items())]
     )
-    tracks = Tracks(view_camera, view_time, track, view, pixels, weights.clamp_min(0.1), intrinsics)
+    tracks = Tracks(
+        view_camera, view_time, track, view, pixels, weights.clamp_min(0.1), is_moving, intrinsics
+    )
     return tracks, poses

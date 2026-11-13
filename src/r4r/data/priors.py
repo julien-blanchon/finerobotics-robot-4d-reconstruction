@@ -66,11 +66,16 @@ class DatasetPriors:
     cameras: dict[str, CameraPrior] = field(default_factory=dict)
     notes: str = ""
 
+    @property
+    def replaced(self) -> frozenset[str]:
+        """Joints whose metadata mapping these priors replace or remove."""
+
+        return frozenset({j.name for j in self.joints} | set(self.removed_joints))
+
     def joint_map(self, metadata: tuple[JointMap, ...]) -> tuple[JointMap, ...]:
         """The dataset's joint mapping with these priors applied."""
 
-        replaced = {j.name for j in self.joints} | set(self.removed_joints)
-        return tuple(j for j in metadata if j.name not in replaced) + self.joints
+        return tuple(j for j in metadata if j.name not in self.replaced) + self.joints
 
 
 def priors_path(root: Path) -> Path:

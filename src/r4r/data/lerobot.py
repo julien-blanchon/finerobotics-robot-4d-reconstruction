@@ -9,6 +9,7 @@ description joints and may name camera links; camera features declare their role
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -56,7 +57,7 @@ def load_episode(
         name=f"{root.name}/episode_{episode:06d}",
         fps=meta.fps / stride,
         state=state,
-        joints=priors.joint_map(_joints(robot)),
+        joints=priors.joint_map(_joints(robot, priors.replaced)),
         robot=root / "meta" / robot["urdf"],
         cameras=tuple(cameras),
         priors=priors,
@@ -98,15 +99,35 @@ def _camera(
     )
 
 
-def _joints(robot: dict) -> tuple[JointMap, ...]:
-    """Arm joints and gripper joints of every arm in `robot.json`."""
+def _joints(robot: dict, replaced: frozenset[str] = frozenset()) -> tuple[JointMap, ...]:
+    """Arm joints and gripper joints of every arm in `robot.json`, in the description's units.
 
-    signs = robot["state"].get("joint_signs", {})
+    A joint's `joint_ranges` entry (column range → joint range) applies to any joint; without
+    one, degrees are converted to radians. `normalised_percent` has no fixed mapping (it
+    depends on each robot's calibration): such joints need a mapping in the dataset's priors.
+    Joints in `replaced` (set by the priors) are skipped.
+    """
+
+    state = robot["state"]
+    signs = state.get("joint_signs", {})
+    ranges = state.get("joint_ranges", {})
     joints = []
-    for arm in robot["state"]["arms"]:
+    for arm in state["arms"]:
         for joint in arm["joints"]:
             name = joint["urdf_joint"]
-            joints.append(JointMap(name, joint["index"], float(signs.get(name, 1.0))))
+            if name in replaced:
+                continue
+            sign = float(signs.get(name, 1.0))
+            unit = joint.get("unit", state.get("joint_unit", "rad"))
+            if name in ranges:
+                source, target = tuple(ranges[name]["from"]), tuple(ranges[name]["to"])
+            elif unit == "deg":
+                source, target = (0.0, 180.0), (0.0, math.pi)
+            elif unit == "rad":
+                source = target = None
+            else:
+                raise ValueError(f"{name}: state unit {unit!r} needs a mapping in the priors")
+            joints.append(JointMap(name, joint["index"], sign, source, target))
         for gripper in arm.get("gripper", []):
             # No range: the state is already in the joint's units
             source, target = (tuple(gripper[k]) if gripper[k] else None for k in ("from", "to"))

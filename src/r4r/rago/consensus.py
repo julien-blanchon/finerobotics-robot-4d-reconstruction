@@ -43,8 +43,13 @@ def consensus_initialize(
     view_time: Tensor[[int]],
     subsets: list[SubsetPoses],
     names: tuple[str, ...],
+    anchor_mount: Tensor[[4, 4]] | None = None,
 ) -> Tensor[[int, 4, 4]]:
-    """Initial `body_from_camera` per camera (free cameras; others keep their description)."""
+    """Initial `body_from_camera` per camera (free cameras; others keep their description).
+
+    `anchor_mount`: the anchor camera's mount when already known (e.g. from its own video
+    tracks); the other cameras are then placed through the subsets around it.
+    """
 
     world_from_body = forward_kinematics(robot, qpos)
     body = [robot.camera_body[robot.camera(name)] for name in names]
@@ -66,7 +71,7 @@ def consensus_initialize(
 
     # 1. Anchor mount candidates, one per well-conditioned subset
     candidates = []
-    for subset in subsets:
+    for subset in subsets if anchor_mount is None else ():
         mine = view_camera[subset.views] == anchor
         if mine.sum() < 3:
             continue
@@ -78,8 +83,11 @@ def consensus_initialize(
         group = torch.zeros(len(robot_motion), dtype=torch.long, device=robot_motion.device)
         mount, _ = alignment.hand_eye(robot_motion, camera_motion.to(robot_motion), group)
         candidates.append(mount)
-    assert candidates, "no subset with enough robot rotation for hand-eye"
-    mounts[anchor] = robust_mean(torch.stack(candidates))
+    if anchor_mount is None:
+        assert candidates, "no subset with enough robot rotation for hand-eye"
+        mounts[anchor] = robust_mean(torch.stack(candidates))
+    else:
+        mounts[anchor] = anchor_mount.to(mounts)
 
     # 2. Per subset: metric scale and world pose of its reference frame, given the anchor mount
     placed = []

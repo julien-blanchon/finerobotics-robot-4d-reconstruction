@@ -33,6 +33,18 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - InternData-M1: upstream annotations, exact to 0.000 px;
   - DROID: ZED factory intrinsics and DROID's own per-episode extrinsics;
   - molmobot: per-frame extrinsics and render intrinsics.
+  - Upstream annotations can replace missing camera fields: InternData-M1 publishes the 2D
+    projections of a few known 3D points per camera; solving the projection from six points
+    gives exact intrinsics and poses.
+- **Measure, don't eyeball, image geometry:** robomind2's letterbox looked asymmetric in a
+  thumbnail and is symmetric when measured. Read the data-collection code for resizing
+  (FurnitureBench squashes the wrist to 224x224 but crops the front camera).
+- **End-effector columns of simulators name their frame:** M1's EE position equals FK of
+  `panda_link8` exactly, a quick check of the joint mapping.
+- **Index-like names can mislead:** RoboInter's `source_episode_name` is not DROID-3D's
+  `traj_id` (joined poses 10–120 cm apart). Verify any join against the images.
+- **Triage by feature names first:** reading each feature's `names` blocked ten Open
+  X-Embodiment sets (no joint states) in minutes.
 - **Check the calibration's resolution against the video's.** Crop vs resize differ:
   - abc: 640x480 is a centre crop of 848x480;
   - molmobot: 480x480 render shown as 512x288;
@@ -51,6 +63,11 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   Fix it in a corrected copy under `priors/descriptions/<embodiment>/`, never in the delivery.
 - **Gripper attachment angle:** check it against a view where the wrist mount is known. The
   Robotiq on the Panda flange was +90°, not the +45° chosen by eye at first.
+  Project the flange axis into that view: the jaw centre must lie on it, which separates a
+  wrong mount from a wrong gripper attachment.
+- **Grafted descriptions:** when a borrowed part has visual meshes and the original arm's
+  don't load, overlays draw the part and no arm. Point the arm's visuals at its collision
+  meshes (the overlay now also falls back per link).
 - **Simulators randomise:** mounts per episode (molmobot: 1–5 cm, 4–10°), focals, robot base
   placement (InternData-M1: ±5 cm). Use episode scope and the recorded values when they exist;
   images alone don't pin a per-episode mount.
@@ -69,6 +86,16 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 
 - **Place cameras by eye first** (`r4r preview`), then calibrate: the solver refines good
   priors, it doesn't rescue bad ones.
+  A look-at helper (camera position + target point) speeds this up. If the base lands right
+  but the hand stays off, suspect kinematics or the focal before the camera (toto).
+- **A "static" camera can move in the robot frame:** InternData-M1's cameras are fixed in the
+  scene but the robot base is re-placed ±5 cm per episode. Model the cameras fixed for the
+  dataset and the base free per episode.
+- **A per-episode reference calibration is only a start:** DROID's own calibration is off in
+  some episodes, and the rig can drift on a dark episode where it is right. Tight ranges, and
+  read every episode's overlay.
+- **A mount written in the priors is not searched by `r4r rig`:** refine a by-eye mount with
+  `r4r fit` first.
 - **Static camera starts:**
   - Don't start a dataset-scope camera from one episode's PnP: take the consensus over
     episodes (sim-panda episode 0 had few links and was 1.5 m off).
@@ -109,6 +136,7 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   episode, not every few frames.
 - Shared login GPUs fill up without warning (other users take 96 GB): queue through a slot
   runner that falls back to the second node, and retry on out-of-memory at start.
+- A rig mixing camera resolutions needs matching at a common size (fixed in `rago/cross.py`).
 
 ## Tools and models
 

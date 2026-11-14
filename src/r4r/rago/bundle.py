@@ -32,7 +32,7 @@ import torch.nn.functional as F
 
 from r4r.geometry import camera, se3
 
-from .rig import MOTION_THRESHOLD, Rig
+from .rig import MOTION_THRESHOLD, KinematicFreedom, Rig
 from .solver import LMConfig, levenberg_marquardt, supports
 
 if TYPE_CHECKING:
@@ -104,6 +104,10 @@ class BundleResult:
     # the free bodies' corrections, per timestep and body
     mounts_at: Tensor[[int, int, 4, 4]]
     world_from_body: Tensor[[int, int, 4, 4]]
+    # Kinematic refinements (zero where held): offset per joint (rad or m), time offset
+    # (timesteps: the joint values of frame t are read at t + τ)
+    joint_offset: Tensor[[int]]
+    time_offset: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +132,7 @@ def bundle_adjust(
     episode: Tensor[[int]] | None = None,
     start_at: Tensor[[int, int, 4, 4]] | None = None,
     bodies_at: Tensor[[int, int, 4, 4]] | None = None,
+    kinematic: KinematicFreedom | None = None,
     known_focal: tuple[bool, ...] | None = None,
 ) -> BundleResult:
     """Refine free mounts and focal lengths by robust reprojection of triangulated tracks.
@@ -137,7 +142,8 @@ def bundle_adjust(
     timestep belongs to (for episode-scope unknowns); `start_at [C, T]` optional starting mounts
     per camera and timestep (episode-scope cameras placed differently in each episode);
     `bodies_at [B, T]` optional starting corrections of the free bodies (e.g. odometry).
-    Cameras with `known_focal` keep their focal length.
+    Cameras with `known_focal` keep their focal length. `kinematic`: joint and time offsets to
+    refine (`rig.KinematicFreedom`).
     """
 
     t = tracks
@@ -159,6 +165,7 @@ def bundle_adjust(
         episode,
         start_at,
         bodies_at,
+        kinematic,
     )
     track_moving = torch.zeros(obs.count, dtype=torch.bool, device=qpos.device)
     track_moving[obs.track[t.moving[keep]]] = True
@@ -259,6 +266,8 @@ def _result(
             track_body=track_body,
             mounts_at=mounts_per_time(rig),
             world_from_body=rig.world_from_body(),
+            joint_offset=torch.where(rig.joint_std > 0, rig.joint_offset, 0.0).detach(),
+            time_offset=float(torch.where(rig.time_std > 0, rig.time_offset, 0.0)),
         )
 
 

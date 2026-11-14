@@ -15,11 +15,17 @@ static camera re-placed between episodes), or one per frame (`frame`: e.g. a dri
 prior is Gaussian around the description for dataset and episode scopes; per frame it is a
 random walk (each frame near the previous one), the first frame of each episode held at the
 description (the episode's world frame is where it starts).
+
+The kinematics themselves may be refined (`KinematicFreedom`, dataset scope): an offset per
+joint (encoder zeros: `q + o`) and a time offset τ between video and joint states (the joint
+values of frame t read at t + τ, linearly interpolated within the episode). Forward kinematics
+is then recomputed at each evaluation; otherwise it is computed once.
 """
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -31,6 +37,15 @@ from .kinematics import forward_kinematics
 
 # A body "moves" if its pose changes by more than this over the episode (m or rad)
 MOTION_THRESHOLD = 1e-3
+
+
+@dataclass(frozen=True, slots=True)
+class KinematicFreedom:
+    """Dataset-scope refinements of the kinematics, as prior stds (0: held)."""
+
+    joint_std: tuple[float, ...] = ()  # per joint of the robot (rad for hinges, m for slides)
+    time_std: float = 0.0  # timesteps
+
 
 if TYPE_CHECKING:
     from shape_extensions import IntVar
@@ -140,6 +155,7 @@ class Rig(nn.Module):
         episode: Tensor[[int]] | None = None,
         start_at: Tensor[[int, int, 4, 4]] | None = None,
         bodies_at: Tensor[[int, int, 4, 4]] | None = None,
+        kinematic: KinematicFreedom | None = None,
     ) -> None:
         """`start_at [C, T]`, when given: each camera's starting mount at each timestep (for
         episode-scope cameras placed differently in each episode). `bodies_at [B, T]`: each
@@ -155,8 +171,9 @@ class Rig(nn.Module):
             episode = torch.zeros(len(qpos), dtype=torch.long, device=device)
         _, episode = torch.unique(episode, return_inverse=True)
 
-        # Joint values are data: forward kinematics is computed once
+        # Joint values are data: forward kinematics is computed once (unless refined)
         self.register_buffer("kinematics", forward_kinematics(robot, qpos))
+        self._init_kinematic(robot, qpos, episode, kinematic)
         self.register_buffer("camera_body_index", torch.tensor(self.camera_body, device=device))
         self.register_buffer("initial_mount", initial_mounts)
         self.register_buffer("default_mount", robot.body_from_camera[index].to(qpos))
@@ -218,6 +235,53 @@ class Rig(nn.Module):
         std = torch.as_tensor(focal_std, dtype=qpos.dtype, device=device).expand(len(names))
         self.register_buffer("focal_std", std.clone())
 
+    def _init_kinematic(
+        self,
+        robot: Robot,
+        qpos: Tensor[[int, int]],
+        episode: Tensor[[int]],
+        kinematic: KinematicFreedom | None,
+    ) -> None:
+        joints = len(robot.joint_qpos)
+        free = kinematic or KinematicFreedom()
+        std = free.joint_std or (0.0,) * joints
+        assert len(std) == joints, f"joint_std: {len(std)} values for {joints} joints"
+        self.register_buffer("joint_std", torch.tensor(std, dtype=qpos.dtype, device=qpos.device))
+        self.register_buffer(
+            "time_std", torch.tensor([free.time_std], dtype=qpos.dtype, device=qpos.device)
+        )
+        self.joint_offset = nn.Parameter(qpos.new_zeros(joints))
+        self.time_offset = nn.Parameter(qpos.new_zeros(1))
+        self.refines = bool((self.joint_std > 0).any() or (self.time_std > 0).any())
+        self.robot = robot if self.refines else None
+        self.register_buffer("qpos", qpos)
+        self.register_buffer(
+            "joint_index", torch.tensor(robot.joint_qpos, dtype=torch.long, device=qpos.device)
+        )
+        # Each timestep's episode bounds (interpolation stays within its episode)
+        steps = torch.arange(len(qpos), device=qpos.device)
+        first = torch.zeros(int(episode.max()) + 1, dtype=torch.long, device=qpos.device)
+        first = first.scatter_reduce(0, episode, steps, "amin", include_self=False)
+        last = torch.zeros_like(first).scatter_reduce(0, episode, steps, "amax", include_self=False)
+        self.register_buffer("episode_first", first[episode])
+        self.register_buffer("episode_last", last[episode])
+
+    def joint_kinematics(self) -> Tensor[[int, int, 4, 4]]:
+        """`world_from_body [T, L]` from the joints (with the kinematic refinements)."""
+
+        if not self.refines:
+            return self.kinematics
+        time = torch.where(self.time_std > 0, self.time_offset, 0.0)
+        at = torch.arange(len(self.qpos), device=self.qpos.device, dtype=self.qpos.dtype) + time
+        at = torch.minimum(torch.maximum(at, self.episode_first.to(at)), self.episode_last.to(at))
+        below = at.floor().long()
+        above = torch.minimum(below + 1, self.episode_last)
+        fraction = (at - below.to(at))[:, None]
+        qpos = self.qpos[below] * (1 - fraction) + self.qpos[above] * fraction
+        offset = torch.where(self.joint_std > 0, self.joint_offset, 0.0)
+        qpos = qpos.index_add(1, self.joint_index, offset[None].expand(len(qpos), -1))
+        return forward_kinematics(self.robot, qpos)
+
     def intrinsics(self) -> Tensor[[int, 3, 3]]:
         """Per camera: initial intrinsics with corrected focal lengths (square pixels kept)."""
 
@@ -233,7 +297,7 @@ class Rig(nn.Module):
         `C = W_p · P_b · E · P_b⁻¹ · W_p⁻¹`, applied to b's whole subtree.
         """
 
-        world = self.kinematics
+        world = self.joint_kinematics()
         if not self.free_parent:
             return world
         correction = se3.se3_exp(self.bodies.values())  # [rows, 4, 4]
@@ -281,7 +345,7 @@ class Rig(nn.Module):
 
     def prior_residuals(self) -> Tensor[[int]]:
         """The priors as residuals (their squares sum to `prior`): camera rows, body rows,
-        then focals (zero where held)."""
+        focals, joint offsets, then the time offset (zero where held)."""
 
         owner = self.cameras.owner
         mounts = self.initial_mount[owner] @ se3.se3_exp(self.cameras.values())
@@ -289,4 +353,10 @@ class Rig(nn.Module):
         bodies = self.bodies.prior_residuals(se3.se3_exp(self.bodies.values()))
         free = self.focal_std > 0
         focal = torch.where(free, self.log_focal / self.focal_std.clamp_min(1e-12), 0.0)
-        return torch.cat((cameras.flatten(), bodies.flatten(), focal))
+        joints = torch.where(
+            self.joint_std > 0, self.joint_offset / self.joint_std.clamp_min(1e-12), 0.0
+        )
+        time = torch.where(
+            self.time_std > 0, self.time_offset / self.time_std.clamp_min(1e-12), 0.0
+        )
+        return torch.cat((cameras.flatten(), bodies.flatten(), focal, joints, time))

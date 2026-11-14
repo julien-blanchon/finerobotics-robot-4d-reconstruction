@@ -14,8 +14,9 @@ The Jacobian of the residuals comes from forward-mode products, compressed: an o
 depends on a single row of each scoped element (the dataset row, or its episode's row: tracks
 never span episodes), so all rows of one (element, degree of freedom) share one product, and
 each observation's entry is credited to its own row's column. The cost is one product per
-(element, dof) and free focal, whatever the number of episodes. Frame-scope rows (a mobile base
-per frame) break this (a track spans frames): `supports` says no, and the caller uses Adam.
+(element, dof) and free dataset-wide value (focal, joint offset, time offset), whatever the
+number of episodes. Frame-scope rows (a mobile base per frame) break this (a track spans
+frames): `supports` says no, and the caller uses Adam.
 
 Ref: Levenberg 1944; Marquardt 1963; Triggs et al., Bundle Adjustment — A Modern Synthesis,
      1999 (robust IRLS, damping); Curtis, Powell & Reid 1974 (compressed Jacobians).
@@ -67,12 +68,17 @@ def supports(rig: Rig) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class _Columns:
-    """The free unknowns as one vector: camera rows, body rows (6 each), then focals."""
+    """The free unknowns as one vector: camera rows, body rows (6 each), then the free entries
+    of the dataset-wide vectors (`VECTORS`)."""
 
     camera: Tensor[[int, 6]]  # column of each (row, dof), −1 where held
     body: Tensor[[int, 6]]
-    focal: Tensor[[int]]
+    vectors: dict[str, Tensor[[int]]]  # per vector: column of each entry, −1 where held
     count: int
+
+
+# Dataset-wide parameter vectors of the rig and the std buffer saying which entries are free
+VECTORS = {"log_focal": "focal_std", "joint_offset": "joint_std", "time_offset": "time_std"}
 
 
 def _columns(rig: Rig) -> _Columns:
@@ -85,10 +91,14 @@ def _columns(rig: Rig) -> _Columns:
         table[rows] = next_column + torch.arange(6 * len(rows), device=device).reshape(-1, 6)
         next_column += 6 * len(rows)
         tables.append(table)
-    focal = torch.full((len(rig.log_focal),), -1, dtype=torch.long, device=device)
-    free = (rig.focal_std > 0).nonzero()[:, 0]
-    focal[free] = next_column + torch.arange(len(free), device=device)
-    return _Columns(tables[0], tables[1], focal, next_column + len(free))
+    vectors = {}
+    for name, std in VECTORS.items():
+        column = torch.full((len(getattr(rig, name)),), -1, dtype=torch.long, device=device)
+        free = (getattr(rig, std) > 0).nonzero()[:, 0]
+        column[free] = next_column + torch.arange(len(free), device=device)
+        next_column += len(free)
+        vectors[name] = column
+    return _Columns(tables[0], tables[1], vectors, next_column)
 
 
 def _apply(rig: Rig, columns: _Columns, x: Tensor[[int]]) -> dict[str, Tensor]:
@@ -105,10 +115,9 @@ def _apply(rig: Rig, columns: _Columns, x: Tensor[[int]]) -> dict[str, Tensor]:
             corrections.delta.detach().flatten().index_add(0, used.nonzero()[:, 0], x[flat[used]])
         )
         out[name] = moved.view_as(corrections.delta)
-    used = columns.focal >= 0
-    out["log_focal"] = rig.log_focal.detach().index_add(
-        0, used.nonzero()[:, 0], x[columns.focal[used]]
-    )
+    for name, column in columns.vectors.items():
+        used = column >= 0
+        out[name] = getattr(rig, name).detach().index_add(0, used.nonzero()[:, 0], x[column[used]])
     return out
 
 
@@ -121,7 +130,8 @@ def _colors(
     tangents, owners = [], []
     for corrections, table in ((rig.cameras, columns.camera), (rig.bodies, columns.body)):
         _add_element_colors(corrections, table, time, track, columns.count, tangents, owners)
-    for column in columns.focal[columns.focal >= 0].tolist():
+    vector_columns = torch.cat(list(columns.vectors.values()))
+    for column in vector_columns[vector_columns >= 0].tolist():
         tangent = torch.zeros(columns.count, dtype=rig.log_focal.dtype, device=time.device)
         tangent[column] = 1
         tangents.append(tangent)
@@ -318,4 +328,5 @@ def _commit(rig: Rig, columns: _Columns, x: Tensor[[int]]) -> None:
         moved = _apply(rig, columns, x)
         rig.cameras.delta.copy_(moved["cameras.delta"])
         rig.bodies.delta.copy_(moved["bodies.delta"])
-        rig.log_focal.copy_(moved["log_focal"])
+        for name in VECTORS:
+            getattr(rig, name).copy_(moved[name])

@@ -12,6 +12,15 @@
 5. The same bundle per group of episodes: their agreement is the check on dataset-scope
    unknowns (residuals alone do not reveal a poorly determined one).
 
+Robot keypoints (`RigEpisode.keypoints`: known robot points seen in the images, see
+`keypoints.py`) start the cameras the stages above cannot: a static camera with no moving
+camera to triangulate for it (PnP on the keypoints, with the triangulated points when there
+are some), a moving camera from its keypoints pooled over episodes in its link's frame
+(instead of the search). Cameras with `RigConfig.seeds` then look for their robot points where
+their start projects them (`seed_rounds` of seeding and a new PnP start). In the bundles the
+keypoints are residuals next to the tracks, and a moving mount with keypoints stays free within
+its priors' ranges (unless a free body above it would trade off with it).
+
 Intrinsics recorded per episode (`RigEpisode.intrinsics`) that differ between episodes
 (randomising simulators) are each episode's own in every stage: the camera's intrinsics are
 the first episode's and each view is rescaled to its episode's (`Tracks.view_scaling`); a
@@ -41,6 +50,14 @@ from .bundle import BundleConfig, BundleResult, bundle_adjust
 from .calibrate import FitConfig, fit_setup, video_tracks
 from .cross import cross_matches
 from .initialize import CameraStart, Points, locate_camera, triangulate
+from .keypoints import (
+    MIN_KEYPOINTS,
+    KeypointConfig,
+    Keypoints,
+    carried,
+    join,
+    seeded,
+)
 from .kinematics import forward_kinematics
 from .klt import VideoTracks, klt_tracks, require_tracks, track_video
 from .merge import merge_tracks
@@ -51,6 +68,7 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.data.priors import RobotPoint
     from r4r.matching import RoMaV2
     from r4r.types import RGB, Mat3x3, Mat4x4
 
@@ -101,6 +119,8 @@ class RigEpisode[T: IntVar, NQ: IntVar]:
     poses: dict[str, Tensor[[*Mat4x4]]] = field(default_factory=dict)
     # Recorded intrinsics of cameras in this episode (e.g. a simulator redrawing focals)
     intrinsics: dict[str, Tensor[[*Mat3x3]]] = field(default_factory=dict)
+    # Known robot points seen by the cameras (camera index in the rig's names, timestep here)
+    keypoints: Keypoints[int] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -114,6 +134,10 @@ class RigConfig:
     groups: int = 2
     # Joint-encoder and video/joint time offsets refined in the bundles (None: held)
     kinematic: KinematicFreedom | None = None
+    # Robot points each camera looks for where its start projects them, and how
+    seeds: dict[str, tuple[RobotPoint, ...]] = field(default_factory=dict)
+    seed_rounds: int = 2
+    keypoints: KeypointConfig = field(default_factory=KeypointConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +178,8 @@ class RigFit[C: IntVar, L: IntVar, J: IntVar]:
     time_offset: float
     group_joint_offsets: Tensor[[int, J]]
     group_time_offsets: tuple[float, ...]
+    # Median reprojection error of the robot keypoints (pixels; NaN without keypoints)
+    keypoint_error: float = math.nan
 
 
 def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
@@ -199,10 +225,15 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
         robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount
     )
     starts = _recorded_mounts(robot, episodes, names, starts)
+    for _ in range(config.seed_rounds if config.seeds else 0):
+        episodes = _seeded_episodes(robot, episodes, names, starts, intrinsics, lens, config)
+        starts, intrinsics = _static_starts(
+            robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount, starts
+        )
 
     # 4-5. Bundles: all episodes, then groups. Known focals stay fixed; those found in stage 3
     # are refined
-    frozen = _freeze_moving_mounts(robot, names, starts[0])
+    frozen = _freeze_moving_mounts(robot, names, starts[0], _with_keypoints(episodes, names))
     everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config, known_focal)
     group_fits = _group_bundles(
         frozen, episodes, merged, names, intrinsics, starts, config, known_focal
@@ -236,7 +267,60 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
         time_offset=everything.time_offset,
         group_joint_offsets=torch.stack([f.joint_offset for f in fits]),
         group_time_offsets=tuple(f.time_offset for f in fits),
+        keypoint_error=everything.keypoint_error,
     )
+
+
+def _with_keypoints(episodes: list[RigEpisode[int, int]], names: tuple[str, ...]) -> set[str]:
+    """Cameras with robot keypoints in some episode."""
+
+    seen = set()
+    for e in episodes:
+        if e.keypoints is not None:
+            seen |= {names[c] for c in torch.unique(e.keypoints.camera).tolist()}
+    return seen
+
+
+def _seeded_episodes(
+    robot: Robot[int, int, int],
+    episodes: list[RigEpisode[int, int]],
+    names: tuple[str, ...],
+    starts: Tensor[[int, int, *Mat4x4]],
+    intrinsics: Tensor[[int, *Mat3x3]],
+    lens: Lens[int] | None,
+    config: RigConfig,
+) -> list[RigEpisode[int, int]]:
+    """`episodes` with their seeded keypoints renewed: each seeded camera's robot points where
+    its start (`starts [E, C]`: static pose, or mount) projects them, followed by KLT. Picks
+    (keypoints of weight 1) are kept."""
+
+    scaling = episode_scaling(episodes, names)
+    out = []
+    for i, e in enumerate(episodes):
+        world = moved_kinematics(robot, e)
+        kept = e.keypoints
+        if kept is not None:
+            kept = kept.where(kept.weight >= 1)
+        parts = [kept]
+        for name, points in config.seeds.items():
+            c = names.index(name)
+            body = robot.camera_body[robot.camera(name)]
+            k = intrinsics[c] if scaling is None else scaling[i, c].to(intrinsics) @ intrinsics[c]
+            parts.append(
+                seeded(
+                    world,
+                    world[:, body] @ starts[i, c],
+                    k,
+                    None if lens is None else lens.select(torch.tensor([c])),
+                    [(robot.body(p.body), p.offset) for p in points],
+                    e.frames[name],
+                    c,
+                    config.keypoints,
+                )
+            )
+        found = join(parts)
+        out.append(replace(e, keypoints=None if found is None else found.to(e.qpos)))
+    return out
 
 
 def _recorded_mounts[E: IntVar, C: IntVar](
@@ -267,20 +351,29 @@ def _recorded_mounts[E: IntVar, C: IntVar](
 
 
 def _freeze_moving_mounts[L: IntVar, J: IntVar, C: IntVar](
-    robot: Robot[L, J, C], names: tuple[str, ...], mounts: Tensor[[int, *Mat4x4]]
+    robot: Robot[L, J, C],
+    names: tuple[str, ...],
+    mounts: Tensor[[int, *Mat4x4]],
+    seen: set[str] | frozenset[str] = frozenset(),
 ) -> Robot[L, J, C]:
     """`robot` with `names`' cameras at `mounts`, free only where the bundles refine them: static
-    cameras, and moving ones whose mount changes between episodes (randomising simulators:
-    episode scope, refined per episode within range). Other moving mounts are frozen."""
+    cameras, moving ones whose mount changes between episodes (randomising simulators:
+    episode scope, refined per episode within range), and moving ones that see robot keypoints
+    (`seen`) with no free body above them (it would trade off with the mount). Other moving
+    mounts are frozen."""
 
     static = [robot.camera_body[robot.camera(n)] == 0 for n in names]
+    bodies = [robot.body(b) for b, f in robot.free_bodies.items() if f.scope != "frame"]
+
+    def refined(name: str, freedom: Freedom) -> bool:
+        if static[names.index(name)] or freedom.scope != "dataset":
+            return True
+        carrier = robot.camera_body[robot.camera(name)]
+        return name in seen and not any(_under(robot, carrier, b) for b in bodies)
+
     frozen = replace(
         robot,
-        free_cameras={
-            n: f
-            for n, f in robot.free_cameras.items()
-            if n in names and (static[names.index(n)] or f.scope != "dataset")
-        },
+        free_cameras={n: f for n, f in robot.free_cameras.items() if n in names and refined(n, f)},
         body_from_camera=robot.body_from_camera.to(mounts).clone(),
     )
     for c, name in enumerate(names):
@@ -337,7 +430,8 @@ def _moving_mounts[C: IntVar](
 ) -> tuple[
     Tensor[[C, *Mat4x4]], Tensor[[C, *Mat3x3]], Lens[C] | None, tuple[tuple[int, int] | None, ...]
 ]:
-    """Stage 1: each free moving camera's mount (and focal, distortion) from its own video."""
+    """Stage 1: each free moving camera's mount (and focal, distortion) from its own video, or
+    from its robot keypoints when it has enough (`_keypoint_mount`)."""
 
     index = [robot.camera(n) for n in names]
     mounts = robot.body_from_camera[index].to(episodes[0].qpos).clone()
@@ -347,6 +441,13 @@ def _moving_mounts[C: IntVar](
     for c, name in enumerate(names):
         body = robot.camera_body[index[c]]
         if body == 0 or known_mount[c] or name not in robot.free_cameras:
+            continue
+        own = None if lens is None else lens.select(torch.tensor([c], device=mounts.device))
+        width = int(episodes[0].frames[name].shape[-1])
+        found = _keypoint_mount(robot, episodes, c, body, intrinsics[c], width, known_focal[c], own)
+        if found is not None:
+            mounts[c], focal = found.world_from_camera, found.focal
+            intrinsics[c, :2, :2] *= focal / intrinsics[c, 0, 0]
             continue
         own = None if lens is None else lens.select(torch.tensor([c], device=mounts.device))
         data = _still_videos(episodes, c, name, intrinsics[c], config, tracked, own, scaling)
@@ -363,6 +464,40 @@ def _moving_mounts[C: IntVar](
             lens = lens.with_distortion(c, setup.fit.lens.distortion[0])
         agreement[c] = (int(setup.agree.sum()), len(data))
     return mounts, intrinsics, lens, tuple(agreement)
+
+
+def _keypoint_mount(
+    robot: Robot[int, int, int],
+    episodes: list[RigEpisode[int, int]],
+    camera: int,
+    body: int,
+    intrinsics: Tensor[[*Mat3x3]],
+    width: int,
+    known_focal: bool,
+    lens: Lens[1] | None,
+) -> CameraStart | None:
+    """A moving camera's mount on `body` by PnP on its robot keypoints of all episodes, carried
+    into `body`'s frame (where the mount is constant); None without enough of them. Its
+    `world_from_camera` is the mount `body_from_camera`."""
+
+    points, pixels = [], []
+    for e in episodes:
+        if e.keypoints is None:
+            continue
+        mine = e.keypoints.where(e.keypoints.camera == camera)
+        points.append(carried(moved_kinematics(robot, e), mine, body))
+        pixels.append(mine.pixel)
+    if not points or sum(len(p) for p in points) < MIN_KEYPOINTS:
+        return None
+    return locate_camera(
+        torch.cat(points),
+        torch.cat(pixels).to(points[0]),
+        intrinsics,
+        width,
+        known_focal,
+        None if lens is None else lens.distortion[0],
+        None if lens is None else lens.fisheye[0],
+    )
 
 
 def _still_videos(
@@ -444,10 +579,12 @@ def _static_starts[C: IntVar](
     intrinsics: Tensor[[C, *Mat3x3]],
     known_focal: tuple[bool, ...],
     known_mount: tuple[bool, ...] | None = None,
+    previous: Tensor[[int, C, *Mat4x4]] | None = None,
 ) -> tuple[Tensor[[int, C, *Mat4x4]], Tensor[[C, *Mat3x3]]]:
     """Stage 3: each free static camera's pose per episode (and focal, from the first episode
-    where it is found, when unknown) by PnP on points the moving cameras triangulate. Episodes
-    where PnP fails keep the description's pose. A pose recorded for the episode
+    where it is found, when unknown) by PnP on points the moving cameras triangulate and on the
+    episode's robot keypoints. Episodes where PnP fails keep the description's pose (or
+    `previous [E, C]`, an earlier start). A pose recorded for the episode
     (`RigEpisode.poses`) is used whatever the priors say; otherwise cameras the priors fix
     keep theirs, and cameras whose pose the priors give (`known_mount`) start from it: the
     bundle refines them within the priors' ranges (PnP on robot-attached tracks can land a
@@ -459,7 +596,9 @@ def _static_starts[C: IntVar](
     index = [robot.camera(n) for n in names]
     body = torch.tensor([robot.camera_body[i] for i in index], device=device)
     static = body == 0
-    starts = mounts[None].repeat(len(episodes), 1, 1, 1)  # [E, C, 4, 4]
+    starts = (
+        mounts[None].repeat(len(episodes), 1, 1, 1) if previous is None else previous.clone()
+    )  # [E, C, 4, 4]
     support = torch.zeros(len(episodes), len(names), device=device)  # PnP inliers
     focal = intrinsics[:, 0, 0].clone()
     found = [False] * len(names)
@@ -482,6 +621,9 @@ def _static_starts[C: IntVar](
                 continue
             seen = (observed == c) & (points.count[tracks.track] >= MIN_OBSERVATIONS)
             if int(seen.sum()) < MIN_POINTS:
+                seen = torch.zeros_like(seen)
+            pairs = _pairs(tracks, points, seen, world, e.keypoints, c)
+            if pairs is None:
                 continue
             width = int(e.frames[names[c]].shape[-1])
             # This episode's K: the camera's at the current focal (fx, fy scaled together),
@@ -494,7 +636,7 @@ def _static_starts[C: IntVar](
             scale = float(k[0, 0] / camera_k[0, 0])
             known = known_focal[c] or found[c]
             freedom = robot.free_cameras[names[c]]
-            start = _checked_pnp(tracks, points, seen, c, k, width, known, mounts[c], freedom)
+            start = _checked_pnp(pairs, tracks.lens, c, k, width, known, mounts[c], freedom)
             if start is not None:
                 starts[i, c] = start.world_from_camera
                 support[i, c] = start.inliers
@@ -507,10 +649,32 @@ def _static_starts[C: IntVar](
     return starts, intrinsics
 
 
-def _checked_pnp[M: IntVar, C: IntVar](
-    tracks: Tracks[M, int, C],
+def _pairs[M: IntVar](
+    tracks: Tracks[M, int, int],
     points: Points[int],
     seen: Tensor[[M]],
+    world: Tensor[[int, int, *Mat4x4]],
+    keypoints: Keypoints[int] | None,
+    camera: int,
+) -> tuple[Tensor[[int, 3]], Tensor[[int, 2]]] | None:
+    """3D–2D pairs for a static camera's PnP: its `seen` observations of triangulated `points`
+    and its robot keypoints (world points by forward kinematics); None when there are fewer
+    than `MIN_POINTS` of the first and `MIN_KEYPOINTS` of the second."""
+
+    xyz, uv = [points.point[tracks.track[seen]]], [tracks.pixel[seen]]
+    mine = None if keypoints is None else keypoints.where(keypoints.camera == camera)
+    if mine is not None and len(mine.time) >= MIN_KEYPOINTS:
+        xyz.append(carried(world, mine, 0).to(xyz[0]))
+        uv.append(mine.pixel.to(uv[0]))
+    pixel = torch.cat(uv)
+    if len(pixel) == 0:
+        return None
+    return torch.cat(xyz), pixel
+
+
+def _checked_pnp(
+    pairs: tuple[Tensor[[int, 3]], Tensor[[int, 2]]],
+    lens: Lens[int] | None,
     camera: int,
     intrinsics: Tensor[[*Mat3x3]],
     width: int,
@@ -519,13 +683,11 @@ def _checked_pnp[M: IntVar, C: IntVar](
     freedom: Freedom,
 ) -> CameraStart | None:
     """PnP start of static `camera` (seen through `intrinsics`, its focal searched unless
-    `known_focal`) from its `seen` observations of triangulated `points`; None when PnP
-    fails, is degenerate (NaN) or lands outside `_within_prior` (keep the prior)."""
+    `known_focal`) from 3D–2D `pairs`; None when PnP fails, is degenerate (NaN) or lands
+    outside `_within_prior` (keep the prior)."""
 
-    lens = tracks.lens
     start = locate_camera(
-        points.point[tracks.track[seen]],
-        tracks.pixel[seen],
+        *pairs,
         intrinsics,
         width,
         known_focal,
@@ -623,6 +785,13 @@ def _bundle[C: IntVar](
         [starts[i][:, None].expand(-1, n, 4, 4) for i, n in enumerate(steps)], 1
     )  # [C, T, 4, 4]
     qpos = torch.cat([e.qpos for e in episodes])
+    first = [sum(steps[:i]) for i in range(len(steps))]
+    keypoints = join(
+        [
+            None if e.keypoints is None else e.keypoints.shifted(f)
+            for e, f in zip(episodes, first, strict=True)
+        ]
+    )
     return bundle_adjust(
         robot,
         qpos,
@@ -635,6 +804,7 @@ def _bundle[C: IntVar](
         bodies_at=_bodies_at(robot, episodes),
         known_focal=known_focal,
         kinematic=config.kinematic,
+        keypoints=keypoints,
     )
 
 

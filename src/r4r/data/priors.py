@@ -63,6 +63,13 @@ absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...
 "time_offset_frames": 1.0}`, encoder offsets of hinges / slides (only `joints`, if given) and a
 video/joint time offset on top of `state_shift`.
 
+`robot_points` names points on the robot (`{"tip": {"body": "panda_hand", "offset": [0, 0,
+0.105]}}`, metres in the body's frame); every body's origin is also a point, named after the
+body. A camera's `robot_points` (a list of names) has `r4r rig` look for those points in its
+video where the camera's current pose projects them (`r4r.rago.keypoints`): a refinement within
+the start's basin. Pixels clicked by hand come from a picks file (`read_picks`, `r4r rig
+--picks`).
+
 Unknown keys are errors (a typo would otherwise be ignored silently), except records kept for
 people and never read: `notes`, `base_odometry_measured` (an alternative odometry record) and
 a camera's or body's `fitted` (provenance of a fit).
@@ -108,6 +115,15 @@ class PoseColumn:
 
 
 @dataclass(frozen=True, slots=True)
+class RobotPoint:
+    """A point rigid with body `body`, at `offset` (m) in the body's frame (its origin by
+    default): a link origin, the gripper tip, the flange."""
+
+    body: str
+    offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+@dataclass(frozen=True, slots=True)
 class CameraPrior:
     mount: Literal["static", "moving"] | None = None
     link: str | None = None
@@ -135,6 +151,8 @@ class CameraPrior:
     pose: PoseColumn | None = None
     # Left out of every command (a camera on no robot body, e.g. worn by a person)
     ignore: bool = False
+    # Robot points looked for in this camera's video where its current pose projects them
+    robot_points: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +217,8 @@ class DatasetPriors:
     state_feature: str | tuple[str, ...] | None = None  # several: concatenated
     # Kinematic refinement in `r4r rig` (absent: held)
     kinematics: KinematicsPrior | None = None
+    # Named points on the robot (body origins are points without being named here)
+    robot_points: dict[str, RobotPoint] = field(default_factory=dict)
     # Per-station overrides (raw priors fields `cameras`, `bodies`, set on top of the
     # dataset's, entry by entry): {station: {"cameras": {...}, "bodies": {...}}}
     stations: dict[str, JsonObject] = field(default_factory=dict)
@@ -284,6 +304,7 @@ def load_priors(root: Path) -> DatasetPriors:
         description=raw.get("description"),
         state_feature=_feature(raw.get("state_feature")),
         kinematics=_kinematics(raw.get("kinematics"), str(path)),
+        robot_points=_robot_points(raw.get("robot_points", {}), str(path)),
         stations=raw.get("stations", {}),
         raw={"cameras": raw.get("cameras", {}), "bodies": raw.get("bodies", {})},
         notes=raw.get("notes", ""),
@@ -337,6 +358,15 @@ def _kinematics(raw: JsonObject | None, where: str) -> KinematicsPrior | None:
     )
 
 
+def _robot_points(raw: Mapping[str, JsonObject], where: str) -> dict[str, RobotPoint]:
+    for name, point in raw.items():
+        _checked(point, _keys(RobotPoint), f"{where}: robot_points.{name}")
+    return {
+        name: RobotPoint(point["body"], tuple(point.get("offset", (0.0, 0.0, 0.0))))
+        for name, point in raw.items()
+    }
+
+
 def _intrinsics_column(raw: JsonObject | None, where: str) -> IntrinsicsColumn | None:
     if raw is None:
         return None
@@ -384,6 +414,7 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
             intrinsics=_intrinsics_column(c.get("intrinsics"), f"{where}: cameras.{name}"),
             pose=_pose_column(c.get("pose"), f"{where}: cameras.{name}"),
             ignore=bool(c.get("ignore", False)),
+            robot_points=tuple(c.get("robot_points", ())),
         )
         for name, c in raw.items()
     }
@@ -413,6 +444,40 @@ def _merged(
     for name, values in override.items():
         out.setdefault(name, {}).update(values)
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class Pick:
+    """Pixels of robot points clicked in one frame (the video's own frame index) of one camera
+    in one episode: point name → (x, y), pixel centres at integer coordinates."""
+
+    episode: int
+    camera: str
+    frame: int
+    pixels: dict[str, tuple[float, float]]
+
+
+def read_picks(path: Path) -> tuple[dict[str, RobotPoint], tuple[Pick, ...]]:
+    """A picks file: points it names (as the priors' `robot_points`) and its picks.
+
+    ```json
+    {"points": {"tip": {"body": "panda_hand", "offset": [0, 0, 0.105]}},
+     "picks": [{"episode": 0, "camera": "front", "frame": 40,
+                "pixels": {"tip": [120.5, 88.0], "panda_link4": [101.0, 60.5]}}]}
+    ```
+    """
+
+    raw = _checked(json.loads(path.read_text()), frozenset({"points", "picks"}), str(path))
+    picks = tuple(
+        Pick(
+            int(p["episode"]),
+            p["camera"],
+            int(p["frame"]),
+            {name: (float(xy[0]), float(xy[1])) for name, xy in p["pixels"].items()},
+        )
+        for p in (_checked(p, _keys(Pick), f"{path}: picks") for p in raw.get("picks", []))
+    )
+    return _robot_points(raw.get("points", {}), str(path)), picks
 
 
 @dataclass(frozen=True, slots=True)

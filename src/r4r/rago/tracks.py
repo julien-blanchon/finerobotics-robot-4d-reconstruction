@@ -41,7 +41,7 @@ class Tracks[M: IntVar, V: IntVar, C: IntVar]:
     weight: Tensor[[M]]
     moving: Tensor[[M]]
     intrinsics: Tensor[[C, *Mat3x3]]  # per camera: the prior or current estimate
-    lens: Lens | None = None  # distortion per camera; None: ideal pinholes
+    lens: Lens[C] | None = None  # distortion per camera; None: ideal pinholes
     view_scaling: Tensor[[V, *Mat3x3]] | None = None  # None: every view sees its camera's K
 
     def view_intrinsics(self, intrinsics: Tensor[[C, *Mat3x3]]) -> Tensor[[V, *Mat3x3]]:

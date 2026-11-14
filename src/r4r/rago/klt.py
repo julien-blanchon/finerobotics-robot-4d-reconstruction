@@ -132,7 +132,7 @@ def klt_tracks[V: IntVar, C: IntVar](
     intrinsics: Tensor[[C, *Mat3x3]],
     config: KLTConfig,
     found: list[VideoTracks[int]] | None = None,
-    lens: Lens | None = None,
+    lens: Lens[C] | None = None,
 ) -> Tracks[int, V, C]:
     """Tracks of every camera's video (frame `t` of camera `c` is view (c, t)); each track is
     rigid with an unknown body, so all are flagged `moving` (the bundle attaches them).

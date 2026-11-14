@@ -64,7 +64,7 @@ class MountFit:
     body_from_camera: Tensor[[*Mat4x4]]
     intrinsics: Tensor[[*Mat3x3]]
     # Its lens with the fitted distortion (None: an ideal pinhole)
-    lens: Lens | None
+    lens: Lens[1] | None
     # Robust score (dropped tracks at their capped static-world fit), median reprojection (px)
     score: float
     median_error: float
@@ -89,7 +89,7 @@ def video_tracks[T: IntVar, H: IntVar, W: IntVar](
     intrinsics: Tensor[[*Mat3x3]],
     config: KLTConfig,
     found: VideoTracks[int] | None = None,
-    lens: Lens | None = None,
+    lens: Lens[1] | None = None,
 ) -> Tracks[int, T, 1]:
     """KLT tracks of one camera's video (one view per frame); `found`: already tracked;
     `lens` of that one camera."""

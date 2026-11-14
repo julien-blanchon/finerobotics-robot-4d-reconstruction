@@ -67,7 +67,7 @@ class KinematicFreedom:
 
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
 
     from r4r.types import K1K2K3K4, Mat3x3, Mat4x4, Scalar, VxVyVzWxWyWz
@@ -291,7 +291,7 @@ class Rig[T: IntVar, L: IntVar, C: IntVar](nn.Module):
         self.register_buffer("focal_std", std.clone())
         self._init_lens(lens, qpos, len(names))
 
-    def _init_lens(self, lens: Lens[C] | None, qpos: Tensor[[T, int]], cameras: int) -> None:
+    def _init_lens(self, lens: Lens[C] | None, qpos: Tensor[[T, int]], cameras: Int[C]) -> None:
         if lens is None:
             self.initial_lens = self.distortion = None
             return

@@ -65,8 +65,8 @@ class BaseMotion[T: IntVar]:
         return float(self.moving.double().mean())
 
 
-def base_motion[T: IntVar](
-    video: VideoTracks,
+def base_motion[M: IntVar, T: IntVar](
+    video: VideoTracks[M],
     world_from_camera: Tensor[[T, *Mat4x4]],
     intrinsics: Tensor[[*Mat3x3]],
     gap: int = GAP,

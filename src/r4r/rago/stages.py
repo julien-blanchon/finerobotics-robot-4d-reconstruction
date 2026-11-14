@@ -128,7 +128,7 @@ class RigFit[C: IntVar, L: IntVar, J: IntVar]:
     # `intrinsics` unless a camera's recorded intrinsics change between episodes)
     episode_intrinsics: Tensor[[int, C, *Mat3x3]]
     # Distortion per camera (None: ideal pinholes)
-    lens: Lens | None
+    lens: Lens[C] | None
     # Free bodies' corrected `world_from_body` at the first timestep of every episode [E, F]
     bodies: Tensor[[int, int, *Mat4x4]]
     # Static cameras' poses per episode [E, C] (moving cameras: their mount)
@@ -165,7 +165,7 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
     known_mount: tuple[bool, ...],
     model: RoMaV2,
     config: RigConfig,
-    lens: Lens | None = None,
+    lens: Lens[C] | None = None,
 ) -> RigFit[C, L, J]:
     """Calibrate the free mounts, free bodies and static cameras of `robot` (see module doc).
 
@@ -297,7 +297,7 @@ def _group_bundles(
     starts: Tensor[[int, int, *Mat4x4]],
     config: RigConfig,
     known_focal: tuple[bool, ...],
-) -> list[tuple[list[int], BundleResult]]:
+) -> list[tuple[list[int], BundleResult[int, int, int, int]]]:
     """Stage 5: the bundle per group of episodes (every `groups`-th), the agreement check on
     dataset-scope unknowns. Fewer than two non-empty groups (0 or 1 asked, or one episode):
     none, since one group would only repeat the bundle over all episodes."""
@@ -333,9 +333,9 @@ def _moving_mounts[C: IntVar](
     known_mount: tuple[bool, ...],
     config: RigConfig,
     tracked: _Tracked | None = None,
-    lens: Lens | None = None,
+    lens: Lens[C] | None = None,
 ) -> tuple[
-    Tensor[[C, *Mat4x4]], Tensor[[C, *Mat3x3]], Lens | None, tuple[tuple[int, int] | None, ...]
+    Tensor[[C, *Mat4x4]], Tensor[[C, *Mat3x3]], Lens[C] | None, tuple[tuple[int, int] | None, ...]
 ]:
     """Stage 1: each free moving camera's mount (and focal, distortion) from its own video."""
 
@@ -372,7 +372,7 @@ def _still_videos(
     intrinsics: Tensor[[*Mat3x3]],
     config: RigConfig,
     tracked: _Tracked | None,
-    lens: Lens | None,
+    lens: Lens[1] | None,
     scaling: Tensor[[int, int, *Mat3x3]] | None,
 ) -> list[tuple[Tensor[[int, int]], Tracks[int, int, 1]]]:
     """Per episode with a long enough still base span: its joint positions and the camera's
@@ -401,7 +401,7 @@ def _multi_camera_tracks[C: IntVar](
     model: RoMaV2,
     config: RigConfig,
     found: list[VideoTracks[int]] | None = None,
-    lens: Lens | None = None,
+    lens: Lens[C] | None = None,
     scaling: Tensor[[C, *Mat3x3]] | None = None,
 ) -> Tracks[int, int, C]:
     """Stage 2: KLT tracks of every camera, merged through RoMa links at the same instants.
@@ -581,7 +581,7 @@ def _bundle[C: IntVar](
     starts: Tensor[[int, C, *Mat4x4]],
     config: RigConfig,
     known_focal: tuple[bool, ...] | None = None,
-) -> BundleResult:
+) -> BundleResult[C, int, int, int]:
     """One bundle over `episodes`: their tracks pooled (distinct ids and timesteps)."""
 
     steps = [len(e.qpos) for e in episodes]

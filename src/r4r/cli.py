@@ -262,6 +262,9 @@ class Rig:
     focal: float = 0.7
     # Store fitted mounts and focals in the camera priors
     write: bool = False
+    # Save the whole solution (per-timestep camera and body poses, intrinsics) to this file,
+    # e.g. for `research/overlay_video.py`
+    save: Path | None = None
 
     def run(self) -> None:
         from dataclasses import replace
@@ -322,6 +325,21 @@ class Rig:
         free = sorted(robot.free_bodies, key=robot.body)
         disagreement = spread(fit.group_corrections)
         _print_rig(fit, streams, robot, self.episodes, free, disagreement)
+        if self.save is not None:
+            solution = {
+                "dataset": self.dataset,
+                "episodes": list(self.episodes),
+                "stride": self.stride,
+                "names": names,
+                "lengths": [len(e.qpos) for e in episodes],
+                "intrinsics": fit.intrinsics.cpu(),
+                "world_from_body": fit.world_from_body.detach().float().cpu(),
+                "mounts_at": fit.mounts_at.detach().cpu(),
+                "camera_body": [robot.camera_body[robot.camera(n)] for n in names],
+                "median_error": fit.median_error,
+            }
+            torch.save(solution, self.save)
+            print(f"saved {self.save}")
         if self.write:
             for c, stream in enumerate(streams):
                 values: dict[str, object] = {

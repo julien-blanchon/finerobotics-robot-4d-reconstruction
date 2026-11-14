@@ -104,6 +104,10 @@ class RigFit:
     inlier_fraction: float
     # Per camera: (agreeing, searched) episodes of its stage-1 mount search (None: not searched)
     mount_agreement: tuple[tuple[int, int] | None, ...]
+    # The solution at every timestep (episodes concatenated): `world_from_body [T, L]` with the
+    # free bodies' corrections, and each camera's `body_from_camera [C, T]` (static: world pose)
+    world_from_body: Tensor[[int, int, 4, 4]]
+    mounts_at: Tensor[[int, int, 4, 4]]
     # Mobile base, per episode: how far the fitted base departs from its recorded motion
     # (median cm, max cm, max degrees); empty without a record
     base_departure: tuple[tuple[float, float, float], ...]
@@ -180,6 +184,8 @@ def calibrate_rig(
         median_error=everything.median_error,
         inlier_fraction=everything.inlier_fraction,
         mount_agreement=agreement,
+        world_from_body=everything.world_from_body,
+        mounts_at=everything.mounts_at,
         base_departure=_base_departure(frozen, episodes, everything.world_from_body),
     )
 

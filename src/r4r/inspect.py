@@ -107,7 +107,10 @@ def inspect_episode(episode: Episode, root: Path) -> Report:
 
     # State columns that vary but drive nothing
     mapped = {j.index for j in episode.joints}
-    state_feature = json.loads((root / "meta" / "robot.json").read_text())["state"]["feature"]
+    state_feature = (
+        episode.priors.state_feature
+        or json.loads((root / "meta" / "robot.json").read_text())["state"]["feature"]
+    )
     names = features[state_feature].get("names")
     count = episode.state.shape[1]
     state_names = (

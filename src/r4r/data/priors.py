@@ -23,6 +23,7 @@ take precedence over `meta/robot.json` and the camera feature info:
 }
 ```
 
+`state_feature` names the joint-state feature when `meta/robot.json` names a wrong one.
 `description` replaces the delivered robot description by a corrected one kept under
 `priors/` (fixes to the URDF/MJCF itself: wrong joints, frames, meshes). `joints` add or
 replace (by URDF joint name) entries of the state mapping; `removed_joints`
@@ -117,6 +118,8 @@ class DatasetPriors:
     # (e.g. `descriptions/<embodiment>/robot.xml`, shared by an embodiment's datasets). Meshes
     # may point back into the delivery (absolute `meshdir` / filenames).
     description: str | None = None
+    # The feature holding the joint state, when `meta/robot.json` names a wrong one
+    state_feature: str | None = None
     notes: str = ""
 
     @property
@@ -201,6 +204,7 @@ def load_priors(root: Path) -> DatasetPriors:
         state_shift=int(raw.get("state_shift", 0)),
         cameras=cameras,
         description=raw.get("description"),
+        state_feature=raw.get("state_feature"),
         notes=raw.get("notes", ""),
     )
 

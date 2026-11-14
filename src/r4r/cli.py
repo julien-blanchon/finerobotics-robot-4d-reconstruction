@@ -487,13 +487,24 @@ def _write_rig(
                 **range_fields(*INDICATIVE_RANGES),
             }
         print(f"wrote {write_camera(rig.root, stream.name, values, station)}")
+    checked = len(fit.group_corrections) > 1
     for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
         if robot.free_bodies[name].scope != "dataset":
             continue
+        prior = rig.loaded[0].priors.bodies[name]
+        # The range left: how much independent groups disagree; without two groups to compare,
+        # the priors' ranges stand
+        ranges = (
+            range_fields(cm / 100, deg)
+            if checked
+            else {
+                "position_range": prior.position_range,
+                "orientation_range_deg": prior.orientation_range_deg,
+            }
+        )
         body = {
             **pose_fields(fit.body_corrections[b].cpu()),
-            # The range left: how much independent groups disagree
-            **range_fields(cm / 100, deg),
+            **ranges,
             "fitted": {"episodes": list(episodes), "groups": groups},
         }
         print(f"wrote {write_body(rig.root, name, body, station)}")

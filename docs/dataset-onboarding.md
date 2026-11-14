@@ -125,10 +125,24 @@ Record what you chose and why in the priors' `notes`.
 
 ## 6. Check before mass processing
 
+- **Look at the overlay: required.** `r4r rig … --save solution.pt` ✅, then
+  `r4r overlay solution.pt check.png` ✅ (a grid: a few moments of every solved episode, every
+  camera) and `r4r overlay solution.pt episode.mp4 --episode 0` ✅ (a video). The robot, drawn
+  from the description's meshes with the solved kinematics and cameras, must sit on the real
+  robot in every camera, in every frame, on several episodes. An agent reads the PNG; a person
+  watches the video. Residuals and group agreement are not enough: on sim-panda a static
+  camera 145 cm off still fitted at 0.83 px (its own tracks fit any pose).
+  - Robot drawn in the right place but trailing the motion: a time offset (`state_shift`,
+    `r4r fit --shifts`).
+  - Right place at the base, wrong further along the chain, in every camera: kinematics
+    (joint mapping, sign, offset, sag, a wrong description). Fix the model: this is the
+    agent's work per dataset, not the solver's.
+  - Right in some cameras, wrong in one: that camera's mount or pose.
+  - Meshes can be wrong or missing (simplified collision meshes, absent grippers): judge
+    the skeleton and the end-effector frames as well as the surfaces.
 - ⬜ `r4r report`: per-camera residuals, inlier share, agreement across episodes, held-out
-  episodes. Today: `research/validation/` scripts and the rerun viewer
+  episodes, with the overlay. Today: `research/validation/` scripts and the rerun viewer
   (`research/viz_rerun.py`).
-- Look at a recording: the robot skeleton must sit on the robot in every camera.
 
 ## Lessons so far
 
@@ -139,3 +153,6 @@ Record what you chose and why in the priors' `notes`.
 - A blind focal guess makes the moving-camera search fail on hard datasets (wrong orientation
   with an inflated focal): give the focal.
 - One episode rarely pins down an arm base: pool episodes.
+- Most failed wrist/head mount searches on simulators come from unmodelled kinematics (a
+  video/joint lag, body sag, missing priors), not the focal: even the true focal rescues few
+  of them. Get the kinematics right first (overlay, `--shifts`).

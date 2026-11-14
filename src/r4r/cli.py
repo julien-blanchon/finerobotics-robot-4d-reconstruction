@@ -454,6 +454,71 @@ class Export:
         print(f"wrote {self.output} ({len(mounts)} cameras placed)")
 
 
+@dataclass(frozen=True, slots=True)
+class Overlay:
+    """The robot (description meshes, solved kinematics) drawn over every camera with a solution
+    saved by `r4r rig --save`: a video (`.mp4`) of one solved episode, or a still grid (`.png`)
+    of a few moments of every solved episode. The visual check of a calibration."""
+
+    solution: tyro.conf.Positional[Path]
+    output: tyro.conf.Positional[Path]
+    # Video: which solved episode (index among them), every n-th timestep
+    episode: int = 0
+    every: int = 1
+    # Still: moments per solved episode
+    moments: int = 3
+    height: int = 360
+
+    def run(self) -> None:
+        import cv2
+        import numpy as np
+        import torch
+
+        from r4r.data.lerobot import load_episode
+        from r4r.rago.robot import CameraMount, body_mounts, compile_model
+        from r4r.viz.overlay import overlay_frames, write_video
+
+        solution = torch.load(self.solution, weights_only=False)
+        root = dataset_root(solution["dataset"])
+        names, model, rows = solution["names"], None, []
+        still = self.output.suffix.lower() == ".png"
+        indices = range(len(solution["episodes"])) if still else [self.episode]
+        fps = 1.0
+        for index in indices:
+            number = solution["episodes"][index]
+            episode = load_episode(root, number, stride=solution["stride"], decode=names)
+            if model is None:
+                mounts = tuple(
+                    CameraMount.from_prior(c.name, c.prior, c.mount, c.moving)
+                    for c in episode.cameras
+                )
+                model = compile_model(episode.robot, None, mounts, body_mounts(episode.priors))
+            videos = {
+                c.name: c.frames.permute(0, 2, 3, 1).numpy()
+                for c in episode.cameras
+                if c.name in names
+            }
+            steps = solution["lengths"][index]
+            if still:
+                times = np.linspace(0, steps - 1, self.moments).round().astype(int).tolist()
+            else:
+                times = list(range(0, steps, self.every))
+            label = (
+                f"{solution['dataset']}  episode {number}  fit median "
+                f"{solution['median_error']:.2f} px"
+            )
+            frames = overlay_frames(solution, videos, model, index, times, self.height, label)
+            if not still:
+                fps = episode.fps / self.every
+                count = write_video(frames, self.output, fps)
+                print(f"wrote {self.output} ({count} frames, {fps:.1f} fps)")
+                return
+            rows.append(np.vstack(list(frames)))
+        image = np.vstack(rows)
+        cv2.imwrite(str(self.output), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        print(f"wrote {self.output} ({image.shape[1]}x{image.shape[0]})")
+
+
 type Command = (
     Annotated[Inspect, tyro.conf.subcommand("inspect")]
     | Annotated[Links, tyro.conf.subcommand("links")]
@@ -461,6 +526,7 @@ type Command = (
     | Annotated[Rig, tyro.conf.subcommand("rig")]
     | Annotated[Sheet, tyro.conf.subcommand("sheet")]
     | Annotated[Export, tyro.conf.subcommand("export")]
+    | Annotated[Overlay, tyro.conf.subcommand("overlay")]
 )
 
 

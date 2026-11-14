@@ -614,6 +614,46 @@ class Preview:
             print(f"wrote {self.output} ({count} frames)")
 
 
+class Focal:
+    """A camera's focal length from ARROW (gen2 adapter): a draft when nothing is recorded."""
+
+    dataset: tyro.conf.Positional[str]
+    camera: tyro.conf.Positional[str]
+    episodes: tuple[int, ...] = (0, 1, 2)
+    # Frames per episode, spread over it
+    frames: int = 64
+    adapter: Path = Path("/e/scratch/reformo/blanchon1/r4r-cache/arrow_gen2.safetensors")
+
+    def run(self) -> None:
+        import torch
+
+        from r4r.arrow.adapter import load_adapter
+        from r4r.arrow.focal import self_drafted_focal
+        from r4r.arrow.models.arrow import ARROW
+        from r4r.data.lerobot import load_episode
+
+        model = ARROW.from_pretrained(device="cuda")
+        encoder = load_adapter(model, self.adapter)
+        root = dataset_root(self.dataset)
+        estimates = []
+        for e in self.episodes:
+            cameras = load_episode(root, e, decode=(self.camera,)).cameras
+            stream = next(c for c in cameras if c.name == self.camera)
+            pick = torch.linspace(0, len(stream.frames) - 1, min(self.frames, len(stream.frames)))
+            first, drafted = self_drafted_focal(model, encoder, stream.frames[pick.round().long()])
+            estimates.append(drafted)
+            known = stream.intrinsics
+            recorded = "" if known is None else f", recorded {float(known[0, 0]):.1f}"
+            print(f"episode {e}: fx {drafted:.1f} px (no draft {first:.1f}{recorded})")
+        width = int(stream.frames.shape[-1])
+        pooled = float(torch.tensor(estimates).median())
+        spread = (max(estimates) - min(estimates)) / pooled
+        print(
+            f"{self.camera}: fx {pooled:.1f} px = {pooled / width:.3f} × width {width};"
+            f" spread over episodes {spread:.1%}"
+        )
+
+
 type Command = (
     Annotated[Inspect, tyro.conf.subcommand("inspect")]
     | Annotated[Links, tyro.conf.subcommand("links")]
@@ -623,6 +663,7 @@ type Command = (
     | Annotated[Export, tyro.conf.subcommand("export")]
     | Annotated[Overlay, tyro.conf.subcommand("overlay")]
     | Annotated[Preview, tyro.conf.subcommand("preview")]
+    | Annotated[Focal, tyro.conf.subcommand("focal")]
 )
 
 

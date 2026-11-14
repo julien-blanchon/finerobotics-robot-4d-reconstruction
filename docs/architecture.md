@@ -23,7 +23,7 @@ leave out is a parameter of the robot description with:
 | unknown | typical scope | status |
 |---|---|---|
 | joint mapping, signs, units, video/state offset | dataset | ✅ priors (`joints`, `state_shift`), units in the loader |
-| focal length | dataset (episode for randomising sims) | ✅ prior + fit; ⬜ preprocessing tool |
+| focal length | dataset (episode for randomising sims) | ✅ prior + fit; ✅ `r4r focal` draft (optional, ARROW + gen2) |
 | moving-camera mount (link, pose) | dataset | ✅ search + bundle + episode consensus |
 | static-camera pose | dataset or episode | ✅ PnP on moving-camera points + bundle (`r4r rig`) |
 | arm-base placement (bimanual) | dataset or episode | ✅ free bodies, staged (`r4r rig`), written back to the priors |
@@ -101,8 +101,9 @@ Goal: a priors file good enough that the rest runs unattended.
 2. `r4r sheet` (frames next to the robot skeleton) and `r4r links` (motion evidence for which
    body a camera rides on, static vs moving): decide each camera's link. ✅
 3. `r4r fit --shifts …`: the video/joint-state offset, if any. ✅
-4. Focal lengths: from the dataset's intrinsics, the camera model, or estimated (ARROW pooled
-   over many frames for static cameras, the motion fit for moving ones). Fixed by default. ⬜ tool
+4. Focal lengths: from the dataset's intrinsics, the camera model, or estimated (`r4r focal`:
+   ARROW with the gen2 adapter pooled over many frames, for static cameras; the motion fit for
+   moving ones). Fixed by default. ✅
 5. Declare the unknowns that remain, with ranges and scopes (above).
 
 ## Stage 2 — setup calibration (once per setup: episodes sharing their constants)
@@ -169,7 +170,7 @@ the robot frame.
 | KLT (OpenCV) | moving-camera tracks | every frame of the sampled episodes (cheap, CPU) |
 | batched search + bundle | mounts, focal, any free parameter | tracks of sampled windows; batched copies |
 | RoMa v2 (`r4r.matching`) | static↔moving and static↔static matches | a few dozen frame pairs per setup or episode, kept where it reports overlap |
-| ARROW | focal prior for static cameras; robot-attached tracks; dense depth and tracks | sampled frames (preparation), all frames (dense pass) |
+| ARROW | focal prior for static cameras (`r4r focal`, gen2 adapter); robot-attached tracks; dense depth and tracks (base model) | sampled frames (preparation), all frames (dense pass) |
 
 Bad frames (zoomed-in wrist, no texture, dark, motion blur) are not detected by hand-written
 rules on the image: they show up as few surviving KLT tracks, low RoMa certainty, high

@@ -52,7 +52,8 @@ class FitConfig:
     # Video/joint-state offsets tried (frames; state of frame t taken from t + shift): a
     # diagnostic for writing a dataset's priors (its `state_shift`), not run by default
     shifts: tuple[int, ...] = (0,)
-    shift_iterations: int = 100
+    shift_iterations: int = 100  # Adam steps per tried shift
+    shift_lm_iterations: int = 10  # LM iterations (one round) per tried shift
     # Episodes agree on a mount within these (m, rad)
     agreement: tuple[float, float] = (0.02, math.radians(2.0))
 
@@ -182,18 +183,24 @@ def refine[NQ: IntVar](
     start = body_from_camera[None]
     result = bundle_adjust(on_body, qpos, tracks, names, start, bundle, pixel_unit, episode)
 
-    short = replace(bundle, iterations=config.shift_iterations)
     refined = replace(tracks, intrinsics=result.intrinsics, lens=result.lens)
     starts = result.body_from_camera
-    shift_scores = torch.tensor(
-        [
-            bundle_adjust(
-                on_body, shifted(episodes, s), refined, names, starts, short, pixel_unit
-            ).score
-            for s in config.shifts
-        ]
-    )
-    shift = config.shifts[int(shift_scores.argmin())]
+    if len(config.shifts) == 1:  # nothing to compare
+        shift, shift_scores = config.shifts[0], torch.tensor([result.score])
+    else:
+        # Short bundles from the fit, to rank the offsets: `shift_iterations` Adam steps, or
+        # one LM round of `shift_lm_iterations`
+        lm = replace(bundle.lm, rounds=1, iterations=config.shift_lm_iterations)
+        short = replace(bundle, iterations=config.shift_iterations, lm=lm)
+        shift_scores = torch.tensor(
+            [
+                bundle_adjust(
+                    on_body, shifted(episodes, s), refined, names, starts, short, pixel_unit
+                ).score
+                for s in config.shifts
+            ]
+        )
+        shift = config.shifts[int(shift_scores.argmin())]
     if shift != 0:
         result = bundle_adjust(
             on_body, shifted(episodes, shift), refined, names, starts, bundle, pixel_unit, episode

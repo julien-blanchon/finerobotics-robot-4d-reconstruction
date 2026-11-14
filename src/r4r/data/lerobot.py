@@ -20,9 +20,21 @@ from lerobot.datasets.video_utils import decode_video_frames
 
 from ..geometry import se3
 from .episode import CameraStream, Episode, JointMap
-from .priors import PRIORS, CameraPrior, DatasetPriors, load_episode_record, load_priors
+from .priors import (
+    PRIORS,
+    CameraPrior,
+    DatasetPriors,
+    IntrinsicsColumn,
+    PoseColumn,
+    load_episode_record,
+    load_priors,
+)
 
 IMAGE_PREFIX = "observation.images."
+# OpenCV camera axes (x right, y down, z forward) in x-forward, y-left, z-up camera axes
+FORWARD_LEFT_UP_FROM_OPENCV = torch.tensor(
+    [[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]], dtype=torch.float64
+)
 
 
 def load_episode(
@@ -41,9 +53,10 @@ def load_episode(
     timestamps = rows["timestamp"].tolist()
 
     robot = json.loads((root / "meta" / "robot.json").read_text())
-    priors = load_priors(root)
-    links = {camera["key"]: camera["urdf_link"] for camera in robot.get("cameras", [])}
     record = load_episode_record(root, episode)
+    # A station's own mounts and bodies (priors `stations`) on top of the dataset's
+    priors = load_priors(root).for_station(None if record is None else record.station)
+    links = {camera["key"]: camera["urdf_link"] for camera in robot.get("cameras", [])}
     cameras = []
     for key in meta.video_keys:
         if meta.features[key].get("info", {}).get("is_depth_map", False):
@@ -51,22 +64,34 @@ def load_episode(
         name = key.removeprefix(IMAGE_PREFIX)
         frames = None if decode is None or name in decode else torch.empty(0, 3, 0, 0)
         prior = priors.cameras.get(name, CameraPrior())
+        if prior.ignore:
+            continue
         stream = _camera(meta, root, episode, key, timestamps, links.get(key), prior, frames)
         if record is not None and name in record.intrinsics:
             fx, fy, cx, cy = record.intrinsics[name]
             k = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
             stream = replace(stream, intrinsics=k)
-        if record is not None and name in record.poses and not stream.moving:
+        elif prior.intrinsics is not None:
+            size = meta.features[key]["shape"][:2]  # height, width
+            column = every.select_columns([prior.intrinsics.column])[:][prior.intrinsics.column]
+            k = _recorded_intrinsics(column, prior.intrinsics, size)
+            stream = replace(stream, intrinsics=k)
+        # A static camera's pose in the base frame, or a moving camera's mount on its link
+        if record is not None and name in record.poses:
             x, y, z, *q = record.poses[name]
             rotation = se3.quaternion_to_matrix(torch.tensor(q, dtype=torch.float64))
             position = torch.tensor([x, y, z], dtype=torch.float64)
             stream = replace(stream, pose=se3.from_rotation_translation(rotation, position))
+        elif prior.pose is not None:
+            text = every.select_columns([prior.pose.column])[0][prior.pose.column]
+            stream = replace(stream, pose=recorded_pose(text, prior.pose))
         cameras.append(stream)
-    state = rows[robot["state"]["feature"]].double()
+    feature = priors.state_feature or robot["state"]["feature"]
+    state = _columns(rows, feature)
     if priors.state_shift:
         # Frame t's state from t + shift (a known video/joint-state offset, in frames at the
         # dataset's rate whatever the stride), clamped
-        full = every[:][robot["state"]["feature"]].double()
+        full = _columns(every[:], feature)
         index = torch.arange(0, len(full), stride)[: len(state)] + priors.state_shift
         state = full[index.clamp(0, len(full) - 1)]
     return Episode(
@@ -82,12 +107,58 @@ def load_episode(
     )
 
 
+def _recorded_intrinsics(
+    values: torch.Tensor, source: IntrinsicsColumn, size: tuple[int, int]
+) -> torch.Tensor:
+    """A camera's K at the video resolution `size` (height, width) from its recorded column
+    (the episode's first finite, non-zero row)."""
+
+    values = values.double().flatten(1)
+    finite = values.isfinite().all(1) & (values.abs().sum(1) > 0)
+    row = values[int(finite.nonzero()[0, 0]) if finite.any() else 0]
+    if source.layout == "matrix":
+        fx, fy, cx, cy = (float(row[i]) for i in (0, 4, 2, 5))
+    else:
+        fx, fy, cx, cy = (float(v) for v in row[:4])
+    height, width = size
+    given_width, given_height = source.size or (width, height)
+    if source.resize == "height":  # same vertical field of view, centred
+        scale = height / given_height
+        fx, fy, cx, cy = fx * scale, fy * scale, width / 2, height / 2
+    else:
+        sx, sy = width / given_width, height / given_height
+        fx, fy, cx, cy = fx * sx, fy * sy, cx * sx, cy * sy
+    return torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
+
+
+def recorded_pose(text: str, source: PoseColumn) -> torch.Tensor:
+    """A camera's recorded pose (OpenCV axes) from one row of its JSON column: [4, 4]."""
+
+    item = json.loads(text)
+    for step in source.path:
+        key, _, value = step.partition("=")
+        item = next(i for i in item if str(i[key]) == value) if value else item[key]
+    q = torch.tensor(item["orientation"], dtype=torch.float64)
+    rotation = se3.quaternion_to_matrix(q / q.norm())
+    if source.axes == "forward_left_up":
+        rotation = rotation @ FORWARD_LEFT_UP_FROM_OPENCV.to(rotation)
+    position = torch.tensor(item["position"], dtype=torch.float64)
+    return se3.from_rotation_translation(rotation, position)
+
+
 def _description(root: Path, robot: dict, priors: DatasetPriors) -> Path:
     """The robot description: the corrected one of the priors, else the delivered one."""
 
     if priors.description:
         return PRIORS / priors.description
     return root / "meta" / robot["urdf"]
+
+
+def _columns(rows, feature: str | tuple[str, ...]) -> torch.Tensor:  # noqa: ANN001
+    """A vector feature's columns as float64 [T, n]; several features are concatenated."""
+
+    names = (feature,) if isinstance(feature, str) else feature
+    return torch.cat([rows[f].double().reshape(len(rows[f]), -1) for f in names], dim=1)
 
 
 def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
@@ -97,11 +168,22 @@ def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
 
     spec = priors.base_odometry
     assert spec is not None
-    values = rows[spec.feature].double()[:, list(spec.columns)]
+    values = _columns(rows, spec.feature)[:, list(spec.columns)]
+    if spec.kind == "pose" and values.shape[1] == 7:
+        return odometry.from_poses_3d(values[:, :3], values[:, 3:])
     if spec.kind == "pose":
-        return odometry.from_poses(values[:, 0], values[:, 1], values[:, 2])
+        # x, y, θ; or x, y, qz, qw (a planar heading as a quaternion about z)
+        heading = (
+            2 * torch.atan2(values[:, 2], values[:, 3]) if values.shape[1] == 4 else values[:, 2]
+        )
+        return odometry.from_poses(values[:, 0], values[:, 1], heading)
     if spec.kind == "velocity":
         return odometry.from_velocity(values, rows["timestamp"].double())
+    if spec.kind == "swerve":
+        speeds = _columns(rows, spec.speed_feature or spec.feature)[:, list(spec.speed_columns)]
+        wheels = torch.tensor(spec.wheels, dtype=torch.float64)
+        twist = odometry.swerve_twist(values, speeds, wheels)
+        return odometry.from_velocity(twist, rows["timestamp"].double())
     assert spec.radius is not None and spec.half_track is not None, "caster: radius, half_track"
     geometry = odometry.CasterGeometry(spec.radius, spec.half_track, spec.offset, spec.signs)
     steering = values[:, 2] if values.shape[1] > 2 else None

@@ -183,14 +183,7 @@ class Rig(nn.Module):
         self.register_buffer("initial_mount", initial_mounts)
         self.register_buffer("default_mount", robot.body_from_camera[index].to(qpos))
         self.cameras = Corrections([robot.free_cameras.get(n) for n in names], episode, qpos.dtype)
-        if start_at is not None:
-            # Rows start at the given mounts (relative to the camera's initial mount)
-            with torch.no_grad():
-                for c in range(len(names)):
-                    for row in torch.unique(self.cameras.row[c]).tolist():
-                        time = int((self.cameras.row[c] == row).nonzero()[0, 0])
-                        relative = se3.inverse(initial_mounts[c]) @ start_at[c, time]
-                        self.cameras.delta[row] = se3.se3_log(relative)
+        self._init_camera_starts(robot, names, initial_mounts, start_at)
 
         # Free bodies, root first: each correction moves its subtree
         free = sorted(robot.body(n) for n in robot.free_bodies)
@@ -358,6 +351,31 @@ class Rig(nn.Module):
         world = self.world_from_body() if world_from_body is None else world_from_body
         return world[time, self.camera_body_index[camera]] @ self.mounts_at(camera, time)
 
+    def _init_camera_starts(
+        self,
+        robot: Robot,
+        names: tuple[str, ...],
+        initial_mounts: Tensor[[int, 4, 4]],
+        start_at: Tensor[[int, int, 4, 4]] | None,
+    ) -> None:
+        """Each camera row's start and prior centre: the description's mount; for
+        episode-scope cameras given per-episode starts, that episode's start (a recorded or
+        estimated placement), so ranges bound the departure from it, not from the description."""
+
+        self.register_buffer("reference_mount", self.default_mount[self.cameras.owner].clone())
+        if start_at is None:
+            return
+        # Rows start at the given mounts (relative to the camera's initial mount)
+        with torch.no_grad():
+            for c, name in enumerate(names):
+                freedom = robot.free_cameras.get(name)
+                for row in torch.unique(self.cameras.row[c]).tolist():
+                    time = int((self.cameras.row[c] == row).nonzero()[0, 0])
+                    relative = se3.inverse(initial_mounts[c]) @ start_at[c, time]
+                    self.cameras.delta[row] = se3.se3_log(relative)
+                    if freedom is not None and freedom.scope == "episode":
+                        self.reference_mount[row] = start_at[c, time]
+
     def moving_cameras(self) -> Tensor[[int]]:
         """Which cameras sit on a body that moves during the episode (joints only)."""
 
@@ -375,7 +393,7 @@ class Rig(nn.Module):
 
         owner = self.cameras.owner
         mounts = self.initial_mount[owner] @ se3.se3_exp(self.cameras.values())
-        cameras = self.cameras.prior_residuals(se3.inverse(self.default_mount[owner]) @ mounts)
+        cameras = self.cameras.prior_residuals(se3.inverse(self.reference_mount) @ mounts)
         bodies = self.bodies.prior_residuals(se3.se3_exp(self.bodies.values()))
         free = self.focal_std > 0
         focal = torch.where(free, self.log_focal / self.focal_std.clamp_min(1e-12), 0.0)

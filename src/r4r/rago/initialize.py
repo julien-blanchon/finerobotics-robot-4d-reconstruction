@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from .tracks import Tracks
 
+
 RIDGE = 1e-6
 REPROJECTION_PX = 3.0
 RANSAC_ITERATIONS = 2000
@@ -48,7 +49,7 @@ def triangulate(tracks: Tracks, world_from_view: Tensor[[int, 4, 4]], use: Tenso
     """Points of every track from its observations in `use` (views with known poses)."""
 
     v = tracks.view[use]
-    k = tracks.intrinsics[tracks.view_camera[v]].to(world_from_view)
+    k = tracks.view_intrinsics(tracks.intrinsics.to(world_from_view))[v]
     pose = world_from_view[v]
     pixel = tracks.pixel[use].to(pose)[:, None]
     distortion = fisheye = None

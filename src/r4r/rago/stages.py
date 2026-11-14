@@ -12,6 +12,12 @@
 5. The same bundle per group of episodes: their agreement is the check on dataset-scope
    unknowns (residuals alone do not reveal a poorly determined one).
 
+Intrinsics recorded per episode (`RigEpisode.intrinsics`) that differ between episodes
+(randomising simulators) are each episode's own in every stage: the camera's intrinsics are
+the first episode's and each view is rescaled to its episode's (`Tracks.view_scaling`); a
+focal correction then scales all episodes alike. Cameras whose intrinsics do not change are
+solved with one K, as before.
+
 Mobile bases: an episode's recorded base motion (`RigEpisode.base_motion`, odometry) moves the
 frame-scope free body nearest the root (the base) in stage 3 and starts its per-frame
 correction in the bundles. Stage 1 needs the base still: it uses each episode's longest span
@@ -54,6 +60,8 @@ MIN_OBSERVATIONS = 3
 # Stage 1 on a mobile base: timesteps where the recorded base moves less than this per step
 # count as still (m, rad), and a mount is searched on spans of at least MIN_STILL of them
 STILL_STEP = (0.002, math.radians(0.1))
+# A static camera's PnP start farther than this from the robot base (m) is degenerate
+MAX_STATIC_DISTANCE = 10.0
 MIN_STILL = 20
 
 
@@ -80,6 +88,8 @@ class RigEpisode:
     # dataset's own per-episode calibration (per-episode table): used instead of PnP. For a
     # moving camera: its mount on its link in this episode (e.g. a simulator randomising it)
     poses: dict[str, Tensor[[4, 4]]] = field(default_factory=dict)
+    # Recorded intrinsics of cameras in this episode (e.g. a simulator redrawing focals)
+    intrinsics: dict[str, Tensor[[3, 3]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -100,6 +110,9 @@ class RigFit:
     # `body_from_camera` per camera (moving: its mount; static: its first episode's pose)
     mounts: Tensor[[int, 4, 4]]
     intrinsics: Tensor[[int, 3, 3]]
+    # Per episode [E, C]: `intrinsics` rescaled to each episode's recorded ones (all equal to
+    # `intrinsics` unless a camera's recorded intrinsics change between episodes)
+    episode_intrinsics: Tensor[[int, int, 3, 3]]
     # Distortion per camera (None: ideal pinholes)
     lens: Lens | None
     # Free bodies' corrected `world_from_body` at the first timestep of every episode [E, B]
@@ -146,18 +159,27 @@ def calibrate_rig(
     the world body are static, the others moving. Moving cameras with `known_mount` keep the
     description's mount (no search); static ones start from it (no PnP), as do those with a
     recorded pose for the episode (`RigEpisode.poses`). `lens`: the cameras' distortion
-    priors (None: ideal pinholes), refined where their std allows.
+    priors (None: ideal pinholes), refined where their std allows. `intrinsics` are the first
+    episode's where episodes record their own (`RigEpisode.intrinsics`).
     """
 
     index = [robot.camera(n) for n in names]
     static = [robot.camera_body[i] == 0 for i in index]
     tracked = _Tracked(episodes, config.fit)
+    scaling = episode_scaling(episodes, names)
     mounts, intrinsics, lens, agreement = _moving_mounts(
         robot, episodes, names, intrinsics, known_focal, known_mount, config, tracked, lens
     )
     merged = [
         _multi_camera_tracks(
-            e, names, intrinsics, model, config, [tracked(i, n) for n in names], lens
+            e,
+            names,
+            intrinsics,
+            model,
+            config,
+            [tracked(i, n) for n in names],
+            lens,
+            None if scaling is None else scaling[i],
         )
         for i, e in enumerate(episodes)
     ]
@@ -207,6 +229,9 @@ def calibrate_rig(
     return RigFit(
         mounts=everything.body_from_camera,
         intrinsics=everything.intrinsics,
+        episode_intrinsics=everything.intrinsics.expand(len(episodes), -1, 3, 3)
+        if scaling is None
+        else scaling.to(everything.intrinsics) @ everything.intrinsics,
         lens=everything.lens,
         bodies=everything.world_from_body[first][:, free],
         body_corrections=_body_corrections(frozen, episodes[0].qpos, everything.world_from_body),
@@ -246,6 +271,7 @@ def _moving_mounts(
     mounts = robot.body_from_camera[index].to(episodes[0].qpos).clone()
     intrinsics = intrinsics.clone()
     agreement: list[tuple[int, int] | None] = [None] * len(names)
+    scaling = episode_scaling(episodes, names)
     for c, name in enumerate(names):
         body = robot.camera_body[index[c]]
         if body == 0 or known_mount[c] or name not in robot.free_cameras:
@@ -260,6 +286,8 @@ def _moving_mounts(
             found = tracked(i, name) if whole and tracked is not None else None
             frames = e.frames[name][a:b]
             tracks = video_tracks(frames, intrinsics[c], config.fit.klt, found, lens=own)
+            if scaling is not None:
+                tracks = replace(tracks, view_scaling=scaling[i, c].expand(len(frames), 3, 3))
             data.append((e.qpos[a:b], tracks))
         if not data:
             raise ValueError(
@@ -284,8 +312,10 @@ def _multi_camera_tracks(
     config: RigConfig,
     found: list[VideoTracks] | None = None,
     lens: Lens | None = None,
+    scaling: Tensor[[int, 3, 3]] | None = None,
 ) -> Tracks:
-    """Stage 2: KLT tracks of every camera, merged through RoMa links at the same instants."""
+    """Stage 2: KLT tracks of every camera, merged through RoMa links at the same instants.
+    `scaling [C]`: the episode's own intrinsics relative to `intrinsics` (`episode_scaling`)."""
 
     device = episode.qpos.device
     steps = len(episode.qpos)
@@ -295,6 +325,8 @@ def _multi_camera_tracks(
     tracks = klt_tracks(
         videos, view_camera, view_time, intrinsics, config.fit.klt, found, lens=lens
     )
+    if scaling is not None:
+        tracks = replace(tracks, view_scaling=scaling[view_camera])
     pairs = [
         (a, t, b, t)
         for t in range(0, steps, config.link_every)
@@ -360,7 +392,11 @@ def _static_starts(
             if int(seen.sum()) < MIN_POINTS:
                 continue
             size = tuple(e.frames[names[c]].shape[-2:])
-            prior = float(focal[c]) if known_focal[c] or found[c] else None
+            # This episode's focal over the camera's (1 unless recorded ones change)
+            scale = 1.0
+            if tracks.view_scaling is not None:
+                scale = float(tracks.view_scaling[int((cam == c).nonzero()[0, 0]), 0, 0])
+            prior = float(focal[c]) * scale if known_focal[c] or found[c] else None
             lens = tracks.lens
             start = locate_camera(
                 points.point[tracks.track[seen]],
@@ -370,17 +406,37 @@ def _static_starts(
                 None if lens is None else lens.distortion[c],
                 None if lens is None else lens.fisheye[c],
             )
-            # A degenerate PnP (few, near-collinear points) can return NaN: keep the prior pose
-            if start is not None and bool(torch.isfinite(start.world_from_camera).all()):
+            if start is not None and not (
+                bool(torch.isfinite(start.world_from_camera).all())  # degenerate PnP: NaN
+                and _within_prior(start.world_from_camera, mounts[c], robot.free_cameras[names[c]])
+            ):
+                start = None  # keep the prior's pose
+            if start is not None:
                 starts[i, c] = start.world_from_camera
                 support[i, c] = start.inliers
-                focal[c], found[c] = start.focal, True
+                focal[c], found[c] = start.focal / scale, True
     for c, name in enumerate(names):
         if bool(static[c]) and free[c] and robot.free_cameras[name].scope == "dataset":
             starts[:, c] = _consensus(starts[:, c], support[:, c]).clone()
     intrinsics = intrinsics.clone()
     intrinsics[:, :2, :2] *= (focal / intrinsics[:, 0, 0])[:, None, None]
     return starts, intrinsics
+
+
+def _within_prior(pose: Tensor[[4, 4]], prior: Tensor[[4, 4]], freedom: Freedom) -> bool:
+    """Whether `pose` lies within twice the priors' range of the prior pose (when the priors
+    give no pose: within `MAX_STATIC_DISTANCE` of the robot base, a degenerate PnP otherwise)."""
+
+    if float(pose[:3, 3].norm()) > MAX_STATIC_DISTANCE:
+        return False
+    if math.isinf(freedom.translation_std):
+        return True
+    delta = se3.inverse(prior) @ pose
+    angle = float(se3.so3_log(delta[:3, :3]).norm())
+    return (
+        float(delta[:3, 3].norm()) <= 2 * freedom.translation_std
+        and angle <= 2 * freedom.rotation_std
+    )
 
 
 def _consensus(
@@ -415,7 +471,15 @@ def _bundle(
     device = episodes[0].qpos.device
     track_offset, time_offset = 0, 0
     track, view, pixel, weight, moving = [], [], [], [], []
+    scaling = None  # per pooled view (camera-major), when episodes' intrinsics differ
+    if any(t.view_scaling is not None for t in merged):
+        scaling = torch.eye(3, dtype=intrinsics.dtype, device=device).repeat(
+            len(names), total, 1, 1
+        )
     for tracks, n in zip(merged, steps, strict=True):
+        if scaling is not None and tracks.view_scaling is not None:
+            at = tracks.view_camera * total + tracks.view_time + time_offset
+            scaling.view(-1, 3, 3)[at] = tracks.view_scaling.to(scaling)
         cam, time = tracks.view_camera[tracks.view], tracks.view_time[tracks.view]
         track.append(tracks.track + track_offset)
         view.append(cam * total + time + time_offset)
@@ -434,6 +498,7 @@ def _bundle(
         moving=torch.cat(moving),
         intrinsics=intrinsics,
         lens=merged[0].lens,
+        view_scaling=None if scaling is None else scaling.flatten(0, 1),
     )
     episode = torch.cat([torch.full((n,), i, device=device) for i, n in enumerate(steps)])
     start_at = torch.cat(
@@ -453,6 +518,27 @@ def _bundle(
         known_focal=known_focal,
         kinematic=config.kinematic,
     )
+
+
+def episode_scaling(
+    episodes: list[RigEpisode], names: tuple[str, ...]
+) -> Tensor[[int, int, 3, 3]] | None:
+    """Per episode and camera [E, C]: its recorded intrinsics times the inverse of the first
+    episode's, for cameras recorded in every episode with intrinsics that change (identity
+    elsewhere); None when no camera's change."""
+
+    qpos = episodes[0].qpos
+    eye = torch.eye(3, dtype=qpos.dtype, device=qpos.device)
+    scaling = eye.repeat(len(episodes), len(names), 1, 1)
+    varies = False
+    for c, name in enumerate(names):
+        if not all(name in e.intrinsics for e in episodes):
+            continue
+        recorded = torch.stack([e.intrinsics[name] for e in episodes]).to(eye)
+        if bool((recorded != recorded[0]).any()):
+            scaling[:, c] = recorded @ torch.linalg.inv(recorded[0])
+            varies = True
+    return scaling if varies else None
 
 
 def still_span(motion: Tensor[[int, 4, 4]] | None) -> tuple[int, int]:

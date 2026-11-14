@@ -108,7 +108,7 @@ class Robot[L: IntVar, J: IntVar, C: IntVar]:
     def camera(self, name: str) -> int:
         return self.camera_names.index(name)
 
-    def to(self, device: torch.device | str, dtype: torch.dtype = torch.float32) -> Self:
+    def to(self, device: torch.device | str, dtype: torch.dtype = torch.float64) -> Self:
         return replace(
             self,
             parent_from_body=self.parent_from_body.to(device, dtype),

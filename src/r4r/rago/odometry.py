@@ -50,6 +50,15 @@ def from_poses(x: Tensor[[int]], y: Tensor[[int]], theta: Tensor[[int]]) -> Tens
     return se3.inverse(pose[:1]) @ pose
 
 
+def from_poses_3d(position: Tensor[[int, 3]], quaternion: Tensor[[int, 4]]) -> Tensor[[int, 4, 4]]:
+    """Base motion from full poses (position, quaternion w x y z) in any fixed world frame: a
+    recorded root pose (simulator free joint, a legged robot's state estimator)."""
+
+    rotation = se3.quaternion_to_matrix(quaternion / quaternion.norm(dim=-1, keepdim=True))
+    pose = se3.from_rotation_translation(rotation, position)
+    return se3.inverse(pose[:1]) @ pose
+
+
 def from_steps(step: Tensor[[int, 3]]) -> Tensor[[int, 4, 4]]:
     """Base motion from per-step body-frame displacements (dx, dy, dθ) between consecutive
     timesteps (row t: from t − 1 to t; row 0 ignored), each a constant-twist arc."""

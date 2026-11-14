@@ -100,6 +100,8 @@ def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
     spec = priors.base_odometry
     assert spec is not None
     values = _columns(rows, spec.feature)[:, list(spec.columns)]
+    if spec.kind == "pose" and values.shape[1] == 7:
+        return odometry.from_poses_3d(values[:, :3], values[:, 3:])
     if spec.kind == "pose":
         return odometry.from_poses(values[:, 0], values[:, 1], values[:, 2])
     if spec.kind == "velocity":

@@ -62,8 +62,9 @@ type Scope = Literal["dataset", "episode", "frame"]
 
 @dataclass(frozen=True, slots=True)
 class Freedom:
-    """How far fitting may move an element (standard deviations, m and rad) and how often it
-    may change: once for the dataset, per episode, or per frame."""
+    """How far fitting may move an element (standard deviations, m and rad; 0 holds that part,
+    inf leaves it free) and how often it may change: once for the dataset, per episode, or per
+    frame."""
 
     translation_std: float
     rotation_std: float

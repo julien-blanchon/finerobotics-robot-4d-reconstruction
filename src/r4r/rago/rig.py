@@ -31,6 +31,7 @@ values of frame t read at t + τ, linearly interpolated within the episode):
 
 with priors `o / σ_o` (rad or m) and `τ / σ_τ` (timesteps). Forward kinematics is then
 recomputed at each evaluation; otherwise it is computed once.
+
 """
 
 from __future__ import annotations
@@ -80,6 +81,7 @@ class Corrections[T: IntVar](nn.Module):
     std: Tensor[[int, 2]]  # per row: (translation std m, rotation std rad)
     previous: Tensor[[int]]  # per row: the walk's previous row, −1 where none
     active: Tensor[[int]]  # per row: free and not held
+    free_dof: Tensor[[int, *VxVyVzWxWyWz]]  # per row and dof: active, with a nonzero std
     start: Tensor[[int, *Mat4x4]]  # per row: its starting value
 
     def __init__(
@@ -121,6 +123,10 @@ class Corrections[T: IntVar](nn.Module):
         self.register_buffer("previous", torch.cat(previous) if previous else none)
         active = torch.cat(free) & ~torch.cat(held) if free else none.bool()
         self.register_buffer("active", active)
+        # A zero std holds that part (translation or rotation) of the row
+        self.register_buffer(
+            "free_dof", active[:, None] & (self.std > 0).repeat_interleave(3, dim=1)
+        )
         self.delta = nn.Parameter(torch.zeros(count, 6, dtype=dtype, device=device))
         # Each row's starting value: a frame-scope walk is costed by how far each step departs
         # from the starting trajectory's step (e.g. odometry), not from standing still
@@ -131,7 +137,7 @@ class Corrections[T: IntVar](nn.Module):
     def values(self) -> Tensor[[int, *VxVyVzWxWyWz]]:
         """δ per row (zero where not free, or held)."""
 
-        return torch.where(self.active[:, None], self.delta, 0.0)
+        return torch.where(self.free_dof, self.delta, 0.0)
 
     def prior(self, element_from_reference: Tensor[[int, *Mat4x4]]) -> Scalar:
         """Gaussian cost of each row's deviation: `Σ ‖δ‖²` over `prior_residuals`."""
@@ -143,7 +149,7 @@ class Corrections[T: IntVar](nn.Module):
     ) -> Tensor[[int, *VxVyVzWxWyWz]]:
         """Each row's deviation over its std: from the reference (the description) for dataset
         and episode scopes; for frame scope, of its step from the previous frame against the
-        starting trajectory's step. Zero for rows that are not free.
+        starting trajectory's step. Zero for rows and parts that are not free (std 0: held).
 
         `element_from_reference [rows, 4, 4]`: each row's corrected pose relative to its
         reference.
@@ -157,10 +163,8 @@ class Corrections[T: IntVar](nn.Module):
         walked = se3.inverse(expected) @ step
         relative = torch.where(walk[:, None, None], walked, pose)
         deviation = se3.se3_log(relative)
-        scaled = torch.cat(
-            (deviation[:, :3] / self.std[:, :1], deviation[:, 3:] / self.std[:, 1:]), -1
-        )
-        return torch.where(self.active[:, None], scaled, 0.0)
+        std = self.std.repeat_interleave(3, dim=1).clamp_min(1e-12)
+        return torch.where(self.free_dof, deviation / std, 0.0)
 
 
 class Rig[T: IntVar, L: IntVar, C: IntVar](nn.Module):

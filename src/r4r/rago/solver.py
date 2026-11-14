@@ -101,9 +101,9 @@ def _columns(rig: Rig[int, int, int]) -> _Columns:
     tables = []
     for corrections in (rig.cameras, rig.bodies):
         table = torch.full((len(corrections.active), 6), -1, dtype=torch.long, device=device)
-        rows = corrections.active.nonzero()[:, 0]
-        table[rows] = next_column + torch.arange(6 * len(rows), device=device).reshape(-1, 6)
-        next_column += 6 * len(rows)
+        free = corrections.free_dof
+        table[free] = next_column + torch.arange(int(free.sum()), device=device)
+        next_column += int(free.sum())
         tables.append(table)
     vectors = {}
     for name in _vectors(rig):
@@ -176,15 +176,18 @@ def _add_element_colors[M: IntVar](
         if _spanning(row_of, track):
             # A track sees several rows: compression is unsafe, one product per row and dof
             for row in rows.nonzero()[:, 0].tolist():
-                for dof in range(6):
+                for dof in (table[row] >= 0).nonzero()[:, 0].tolist():
                     tangent = torch.zeros(count, dtype=corrections.delta.dtype, device=time.device)
                     tangent[table[row, dof]] = 1
                     tangents.append(tangent)
                     owners.append(torch.full_like(time, int(table[row, dof])))
             continue
         for dof in range(6):
+            columns = table[rows, dof]
+            if not bool((columns >= 0).any()):
+                continue
             tangent = torch.zeros(count, dtype=corrections.delta.dtype, device=time.device)
-            tangent[table[rows, dof]] = 1
+            tangent[columns[columns >= 0]] = 1
             tangents.append(tangent)
             owners.append(table[row_of, dof])
 
@@ -255,6 +258,11 @@ def levenberg_marquardt[M: IntVar](
         if round_:
             reassign()
         history.append(objective(zero))
+        if not bool(torch.isfinite(history[-1]).all()):
+            raise ValueError(
+                f"bundle objective not finite at the start of round {round_}: "
+                f"(total, data, prior) = {history[-1].tolist()}"
+            )
         damping = config.damping
         for _ in range(config.iterations):
             hessian, gradient = _normal_equations(

@@ -56,7 +56,8 @@ def load_episode(
             fx, fy, cx, cy = record.intrinsics[name]
             k = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
             stream = replace(stream, intrinsics=k)
-        if record is not None and name in record.poses and not stream.moving:
+        # A static camera's pose in the base frame, or a moving camera's mount on its link
+        if record is not None and name in record.poses:
             x, y, z, *q = record.poses[name]
             rotation = se3.quaternion_to_matrix(torch.tensor(q, dtype=torch.float64))
             position = torch.tensor([x, y, z], dtype=torch.float64)

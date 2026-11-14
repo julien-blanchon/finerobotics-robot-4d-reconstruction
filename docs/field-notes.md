@@ -5,6 +5,10 @@ consolidated later into `docs/dataset-onboarding.md`. Add to it whenever somethi
 is learnt: what happened, how it showed, what fixed it, which dataset. Per-embodiment details
 stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general lessons here.
 
+| [Checking results](#checking-results) | [Inputs](#getting-the-inputs-right-before-any-solve) | [Timing](#timing) | [Cameras](#cameras) | [Bimanual and mobile](#bimanual-and-mobile) | [Compute](#compute) | [Tools](#tools-and-models) |
+|---|---|---|---|---|---|---|
+| <img src="assets/stills/before-after-droid.jpg" width="120"> | <img src="assets/stills/fail-gripper.jpg" width="120"> | <img src="assets/diagrams/onboarding-loop.svg" width="120"> | <img src="assets/diagrams/frames.svg" width="120"> | <img src="assets/gallery/hsr.gif" width="120"> | <img src="assets/diagrams/solver.svg" width="120"> | <img src="assets/stills/rig-on-droid.jpg" width="120"> |
+
 ## Checking results
 
 - **Look at the overlay, always.** Residuals and group agreement are not enough. Seen:

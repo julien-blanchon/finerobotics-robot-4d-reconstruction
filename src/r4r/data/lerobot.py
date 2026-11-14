@@ -12,23 +12,32 @@ import json
 import math
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import torch
 from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import decode_video_frames
 
-from ..geometry import se3
+from ..geometry import camera, se3
 from .episode import CameraStream, Episode, JointMap
 from .priors import (
     PRIORS,
     CameraPrior,
     DatasetPriors,
     IntrinsicsColumn,
+    JsonObject,
     PoseColumn,
     load_episode_record,
     load_priors,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from torch import Tensor
+
+    from r4r.types import RGB, Mat3x3, Mat4x4
 
 IMAGE_PREFIX = "observation.images."
 # OpenCV camera axes (x right, y down, z forward) in x-forward, y-left, z-up camera axes
@@ -39,7 +48,7 @@ FORWARD_LEFT_UP_FROM_OPENCV = torch.tensor(
 
 def load_episode(
     root: Path, episode: int, stride: int = 1, decode: tuple[str, ...] | None = None
-) -> Episode:
+) -> Episode[int, int]:
     """Every `stride`-th timestep of `episode` from the dataset root `root`.
 
     Only the cameras in `decode` get frames (all when None); the others come with none.
@@ -56,7 +65,7 @@ def load_episode(
     record = load_episode_record(root, episode)
     # A station's own mounts and bodies (priors `stations`) on top of the dataset's
     priors = load_priors(root).for_station(None if record is None else record.station)
-    links = {camera["key"]: camera["urdf_link"] for camera in robot.get("cameras", [])}
+    links = {c["key"]: c["urdf_link"] for c in robot.get("cameras", [])}
     cameras = []
     for key in meta.video_keys:
         if meta.features[key].get("info", {}).get("is_depth_map", False):
@@ -73,7 +82,10 @@ def load_episode(
             stream = replace(stream, intrinsics=k)
         elif prior.intrinsics is not None:
             size = meta.features[key]["shape"][:2]  # height, width
-            column = every.select_columns([prior.intrinsics.column])[:][prior.intrinsics.column]
+            recorded = prior.intrinsics.column
+            # A slice of a dataset is a dict of columns (the stubs also allow a Dataset)
+            table = cast("Mapping[str, Tensor]", every.select_columns([recorded])[:])
+            column = _columns(table, recorded)
             k = _recorded_intrinsics(column, prior.intrinsics, size)
             stream = replace(stream, intrinsics=k)
         # A static camera's pose in the base frame, or a moving camera's mount on its link
@@ -83,17 +95,16 @@ def load_episode(
             position = torch.tensor([x, y, z], dtype=torch.float64)
             stream = replace(stream, pose=se3.from_rotation_translation(rotation, position))
         elif prior.pose is not None:
-            text = every.select_columns([prior.pose.column])[0][prior.pose.column]
+            # One row of a dataset is a dict of values; this column holds JSON text
+            row = cast("Mapping[str, str]", every.select_columns([prior.pose.column])[0])
+            text = row[prior.pose.column]
             stream = replace(stream, pose=recorded_pose(text, prior.pose))
         cameras.append(stream)
     feature = priors.state_feature or robot["state"]["feature"]
-    state = _columns(rows, feature)
-    if priors.state_shift:
-        # Frame t's state from t + shift (a known video/joint-state offset, in frames at the
-        # dataset's rate whatever the stride), clamped
-        full = _columns(every[:], feature)
-        index = torch.arange(0, len(full), stride)[: len(state)] + priors.state_shift
-        state = full[index.clamp(0, len(full) - 1)]
+    # The whole episode's columns (a slice of a dataset is a dict of columns)
+    state, base_motion = _measurements(
+        cast("Mapping[str, Tensor]", every[:]), priors, feature, stride
+    )
     return Episode(
         name=f"{root.name}/episode_{episode:06d}",
         fps=meta.fps / stride,
@@ -103,36 +114,59 @@ def load_episode(
         cameras=tuple(cameras),
         priors=priors,
         station=None if record is None else record.station,
-        base_motion=None if priors.base_odometry is None else _base_motion(priors, rows),
+        base_motion=base_motion,
     )
 
 
-def _recorded_intrinsics(
-    values: torch.Tensor, source: IntrinsicsColumn, size: tuple[int, int]
-) -> torch.Tensor:
-    """A camera's K at the video resolution `size` (height, width) from its recorded column
-    (the episode's first finite, non-zero row)."""
+def _measurements(
+    every: Mapping[str, Tensor], priors: DatasetPriors, feature: str | tuple[str, ...], stride: int
+) -> tuple[Tensor[[int, int]], Tensor[[int, *Mat4x4]] | None]:
+    """The robot's state and base motion at every `stride`-th frame of the episode `every`.
 
-    values = values.double().flatten(1)
+    Both are measured with the joints: frame t's come from frame t + `state_shift` (a known
+    video/joint-state offset, in frames at the dataset's rate whatever the stride), clamped.
+    """
+
+    count = len(every["timestamp"])
+    index = (torch.arange(0, count, stride) + priors.state_shift).clamp(0, count - 1)
+    # Text columns (e.g. JSON records) come as lists: only tensors are measurements
+    rows = {name: column[index] for name, column in every.items() if torch.is_tensor(column)}
+    motion = None if priors.base_odometry is None else _base_motion(priors, rows)
+    return _columns(rows, feature), motion
+
+
+def _recorded_intrinsics(
+    values: Tensor[[int, int]], source: IntrinsicsColumn, size: tuple[int, int]
+) -> Tensor[[*Mat3x3]]:
+    """A camera's K at the video resolution `size` (height, width) from its recorded column
+    (rows: flattened K or fx, fy, cx, cy; the episode's first finite, non-zero row is used).
+
+    `stretch`: each axis resized, `f' = f · s`, `c' = (c + ½) · s − ½`, `s = video / given`;
+    `height`: one scale `s = H / H_given` on both focals, the principal point at the image
+    centre `((W − 1)/2, (H − 1)/2)` (same vertical FOV). Pixel centres at integer coordinates.
+    """
+
     finite = values.isfinite().all(1) & (values.abs().sum(1) > 0)
-    row = values[int(finite.nonzero()[0, 0]) if finite.any() else 0]
+    if not finite.any():
+        raise ValueError(f"{source.column}: no finite, non-zero intrinsics in this episode")
+    row = values[int(finite.nonzero()[0, 0])]
     if source.layout == "matrix":
         fx, fy, cx, cy = (float(row[i]) for i in (0, 4, 2, 5))
     else:
         fx, fy, cx, cy = (float(v) for v in row[:4])
+    recorded = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
     height, width = size
     given_width, given_height = source.size or (width, height)
-    if source.resize == "height":  # same vertical field of view, centred
-        scale = height / given_height
-        fx, fy, cx, cy = fx * scale, fy * scale, width / 2, height / 2
-    else:
-        sx, sy = width / given_width, height / given_height
-        fx, fy, cx, cy = fx * sx, fy * sy, cx * sx, cy * sy
-    return torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
+    if source.resize == "stretch":
+        return camera.resize_intrinsics(recorded, width / given_width, height / given_height)
+    scale = height / given_height
+    intrinsics = camera.resize_intrinsics(recorded, scale, scale)
+    intrinsics[0, 2], intrinsics[1, 2] = (width - 1) / 2, (height - 1) / 2
+    return intrinsics
 
 
-def recorded_pose(text: str, source: PoseColumn) -> torch.Tensor:
-    """A camera's recorded pose (OpenCV axes) from one row of its JSON column: [4, 4]."""
+def recorded_pose(text: str, source: PoseColumn) -> Tensor[[*Mat4x4]]:
+    """A camera's recorded `world_from_camera` (OpenCV axes) from one row of its JSON column."""
 
     item = json.loads(text)
     for step in source.path:
@@ -146,7 +180,7 @@ def recorded_pose(text: str, source: PoseColumn) -> torch.Tensor:
     return se3.from_rotation_translation(rotation, position)
 
 
-def _description(root: Path, robot: dict, priors: DatasetPriors) -> Path:
+def _description(root: Path, robot: JsonObject, priors: DatasetPriors) -> Path:
     """The robot description: the corrected one of the priors, else the delivered one."""
 
     if priors.description:
@@ -154,14 +188,17 @@ def _description(root: Path, robot: dict, priors: DatasetPriors) -> Path:
     return root / "meta" / robot["urdf"]
 
 
-def _columns(rows, feature: str | tuple[str, ...]) -> torch.Tensor:  # noqa: ANN001
-    """A vector feature's columns as float64 [T, n]; several features are concatenated."""
+def _columns(rows: Mapping[str, Tensor], feature: str | tuple[str, ...]) -> Tensor[[int, int]]:
+    """A vector feature's columns as float64 [T, n]; several features are concatenated.
+
+    `rows` is a slice of the dataset: its columns have any rank (bare `Tensor`).
+    """
 
     names = (feature,) if isinstance(feature, str) else feature
     return torch.cat([rows[f].double().reshape(len(rows[f]), -1) for f in names], dim=1)
 
 
-def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
+def _base_motion(priors: DatasetPriors, rows: Mapping[str, Tensor]) -> Tensor[[int, *Mat4x4]]:
     """The base's recorded motion (see `r4r.rago.odometry`) at the loaded timesteps."""
 
     from r4r.rago import odometry
@@ -198,8 +235,8 @@ def _camera(
     timestamps: list[float],
     link: str | None,
     prior: CameraPrior,
-    frames: torch.Tensor | None,
-) -> CameraStream:
+    frames: Tensor[[int, *RGB, int, int]] | None,
+) -> CameraStream[int, int, int]:
     info = meta.features[key].get("info", {})
     if frames is None:
         assert meta.episodes is not None, f"{root}: episode metadata missing"
@@ -225,7 +262,7 @@ def _camera(
     )
 
 
-def _joints(robot: dict, replaced: frozenset[str] = frozenset()) -> tuple[JointMap, ...]:
+def _joints(robot: JsonObject, replaced: frozenset[str] = frozenset()) -> tuple[JointMap, ...]:
     """Arm joints and gripper joints of every arm in `robot.json`, in the description's units.
 
     A joint's `joint_ranges` entry (column range → joint range) applies to any joint; without

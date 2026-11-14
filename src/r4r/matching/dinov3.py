@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.types import RGB
+
 PATCH_SIZE = 16
 WIDTH = 1024
 NUM_HEADS = 16
@@ -36,8 +38,8 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(3, WIDTH, PATCH_SIZE, PATCH_SIZE)
 
     def forward[S: IntVar, H: IntVar, W: IntVar](
-        self, images: Tensor[[S, 3, H, W]]
-    ) -> Tensor[[S, int, 1024]]:
+        self, images: Tensor[[S, *RGB, H, W]]
+    ) -> Tensor[[S, (H // 16) * (W // 16), 1024]]:
         return rearrange(self.proj(images), "s c h w -> s (h w) c")
 
 
@@ -60,7 +62,7 @@ class DINOv3(nn.Module):
         self.norm = nn.LayerNorm(WIDTH, eps=NORM_EPS)
 
     def forward[S: IntVar, H: IntVar, W: IntVar](
-        self, images: Tensor[[S, 3, H, W]]
+        self, images: Tensor[[S, *RGB, H, W]]
     ) -> Tensor[[S, H // 16, W // 16, 2048]]:
         s, _, h, w = images.shape
         patches = self.patch_embed(images)

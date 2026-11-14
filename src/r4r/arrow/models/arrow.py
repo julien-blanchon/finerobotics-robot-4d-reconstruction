@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Final, Self, cast
 
 import torch
 import torch.nn.functional as F
@@ -25,27 +25,30 @@ from .encoder import PATCH_SIZE, Encoder, SlotHook
 from .query_embed import ID_WIDTH, QueryEmbedding
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
+
+    from r4r.types import RGB, UV, XYZ
 
     from ..queries import Queries
 
 PRETRAINED = "ifradlin/arrow"
-DECODER_WIDTH = 1280
-DECODER_DEPTH = 8
-DECODER_HEADS = 16
-RGB_CROP = 9
+DECODER_WIDTH: Final = 1280
+DECODER_DEPTH: Final = 8
+DECODER_HEADS: Final = 16
+RGB_CROP: Final = 9
 OUTPUTS = ("points", "point_confidence", "uv", "visibility_logits", "normals", "displacement")
 
 
 @dataclass(frozen=True, slots=True)
 class Encoding[B: IntVar, S: IntVar, H: IntVar, W: IntVar, N: IntVar]:
-    """Everything the decoder needs: input images, ID tokens and cached per-block keys/values."""
+    """Everything the decoder needs: input images, ID tokens and cached per-block keys/values
+    (`[blocks, B, heads, N context tokens, head width]`)."""
 
-    images: Tensor[[B, S, 3, H, W]]
+    images: Tensor[[B, S, *RGB, H, W]]
     id_tokens: Tensor[[B, S, 3072]]
-    keys: Tensor[[int, B, int, N, int]]
-    values: Tensor[[int, B, int, N, int]]
+    keys: Tensor[[8, B, 16, N, 80]]
+    values: Tensor[[8, B, 16, N, 80]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,28 +59,33 @@ class Predictions[B: IntVar, Q: IntVar]:
     position (`pixel = uv · [W, H] − ½`); visibility is `sigmoid(visibility_logits)`.
     """
 
-    points: Tensor[[B, Q, 3]]
+    points: Tensor[[B, Q, *XYZ]]
     point_confidence: Tensor[[B, Q]]
-    uv: Tensor[[B, Q, 2]]
+    uv: Tensor[[B, Q, *UV]]
     visibility_logits: Tensor[[B, Q]]
-    normals: Tensor[[B, Q, 3]]
-    displacement: Tensor[[B, Q, 3]]
+    normals: Tensor[[B, Q, *XYZ]]
+    displacement: Tensor[[B, Q, *XYZ]]
 
     @staticmethod
-    def concat(parts: list[Predictions]) -> Predictions:
+    def concat[B2: IntVar](parts: list[Predictions[B2, int]]) -> Predictions[B2, int]:
+        """Join query chunks, in order."""
+
         return Predictions(*(torch.cat([getattr(p, name) for p in parts], 1) for name in OUTPUTS))
 
 
-def head(width: int, out: int) -> nn.Sequential:
+def head[D: IntVar, Out: IntVar](
+    width: Int[D], out: Int[Out]
+) -> nn.Sequential[nn.LayerNorm, nn.Linear[D, D // 2], nn.GELU, nn.Linear[D // 2, Out]]:
     return nn.Sequential(
         nn.LayerNorm(width), nn.Linear(width, width // 2), nn.GELU(), nn.Linear(width // 2, out)
     )
 
 
-class Heads(nn.Module):
-    """One small MLP per output, with the output activations."""
+class Heads[D: IntVar](nn.Module):
+    """One small MLP per output, with the output activations: confidence `1 + exp(·)`,
+    unit normals."""
 
-    def __init__(self, width: int) -> None:
+    def __init__(self, width: Int[D]) -> None:
         super().__init__()
         self.points = head(width, 3)
         self.point_confidence = head(width, 1)
@@ -86,7 +94,7 @@ class Heads(nn.Module):
         self.normals = head(width, 3)
         self.displacement = head(width, 3)
 
-    def forward[B: IntVar, Q: IntVar](self, tokens: Tensor[[B, Q, int]]) -> Predictions[B, Q]:
+    def forward[B: IntVar, Q: IntVar](self, tokens: Tensor[[B, Q, D]]) -> Predictions[B, Q]:
         return Predictions(
             points=self.points(tokens),
             point_confidence=1 + self.point_confidence(tokens)[..., 0].exp(),
@@ -123,9 +131,10 @@ class ARROW(nn.Module):
 
     @torch.inference_mode()
     def encode[B: IntVar, S: IntVar, H: IntVar, W: IntVar](
-        self, images: Tensor[[B, S, 3, H, W]], slot: SlotHook | None = None
+        self, images: Tensor[[B, S, *RGB, H, W]], slot: SlotHook | None = None
     ) -> Encoding[B, S, H, W, int]:
-        """Encode RGB in [0, 1]; any size (replicate-padded to a multiple of 14 internally).
+        """Encode RGB in [0, 1]; any size (replicate-padded to a multiple of 14 internally,
+        hence a context length `S · ⌈H/14⌉ · ⌈W/14⌉` left `int`).
 
         `slot` optionally rewrites the encoder's block-13 special tokens (pose conditioning).
         """
@@ -163,14 +172,15 @@ class ARROW(nn.Module):
         the same noise the reference shows across chunk sizes.
         """
 
-        parts = []
+        parts: list[Predictions[B, int]] = []
         for start in range(0, max(queries.count, 1), chunk):
-            part = queries.slice(start, start + chunk)
+            part = queries.slice(start, min(start + chunk, queries.count))
             with self.autocast(encoding.images.device):
                 tokens = self.query_embed(encoding.images, encoding.id_tokens, part)
                 tokens = self.decoder(tokens, encoding.keys, encoding.values)
             parts.append(self.heads(tokens))  # heads run in fp32, outside autocast
-        return parts[0] if len(parts) == 1 else Predictions.concat(parts)
+        # The chunks' lengths sum to Q
+        return cast("Predictions[B, Q]", parts[0] if len(parts) == 1 else Predictions.concat(parts))
 
     @staticmethod
     def autocast(device: torch.device) -> torch.autocast:

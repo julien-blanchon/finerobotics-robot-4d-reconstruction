@@ -3,7 +3,8 @@
 A camera is rigidly mounted on a body of the kinematic tree (a wrist camera on the hand, an
 exterior camera on the world body). Its pose at time t is `world_from_body(q_t) · body_from_camera`.
 Each camera's focal length is corrected by a factor `exp(φ)` with a log-normal prior (std
-`focal_std`): wide when the initial intrinsics are a guess, tight when the dataset knows them.
+`focal_std`, residual `φ / σ_f`): wide when the initial intrinsics are a guess, tight when the
+dataset knows them.
 Distortion coefficients (`lens.Lens`) are corrected additively, with a Gaussian prior per
 coefficient (`Lens.std`, 0: held).
 
@@ -16,12 +17,28 @@ A correction is one value for the whole data (`dataset`), one per episode (`epis
 static camera re-placed between episodes), or one per frame (`frame`: e.g. a driving base). The
 prior is Gaussian around the description for dataset and episode scopes; per frame it is a
 random walk (each frame near the previous one), the first frame of each episode held at the
-description (the episode's world frame is where it starts).
+description (the episode's world frame is where it starts). Each prior is a residual vector
+whose squares sum to the negative log-prior, `δ = (v, ω)` scaled to `(v / σ_t, ω / σ_r)`:
+
+    dataset, episode:  δ = log(E_ref⁻¹ E)
+    frame:             δ = log((S_{f−1}⁻¹ S_f)⁻¹ · E_{f−1}⁻¹ E_f)   (S: starting trajectory)
 
 The kinematics themselves may be refined (`KinematicFreedom`, dataset scope): an offset per
 joint (encoder zeros: `q + o`) and a time offset τ between video and joint states (the joint
-values of frame t read at t + τ, linearly interpolated within the episode). Forward kinematics
-is then recomputed at each evaluation; otherwise it is computed once.
+values of frame t read at t + τ, linearly interpolated within the episode):
+
+    q(t + τ) = (1 − α) q_i + α q_{i+1},   i = ⌊t + τ⌋,  α = t + τ − i   (clamped to the episode)
+
+with priors `o / σ_o` (rad or m) and `τ / σ_τ` (timesteps). Forward kinematics is then
+recomputed at each evaluation; otherwise it is computed once.
+
+τ shifts the joint values only, not the free bodies' starting trajectory (`bodies_at`, e.g. a
+mobile base's odometry, recorded on the joints' clock). Dataset- and episode-scope bodies use
+only its value at their row's first timestep, a start that any correction moves away from. A
+frame-scope body's walk prior compares each step with the start's step at the same frame, so
+with τ ≠ 0 it centres on odometry read τ frames off: its cost is the base's motion over |τ|
+frames against the walk std. Not interpolated: it would make the prior depend on τ, and no
+dataset refines τ with a frame-scope base.
 """
 
 from __future__ import annotations
@@ -50,21 +67,32 @@ class KinematicFreedom:
 
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
+
+    from r4r.types import K1K2K3K4, Mat3x3, Mat4x4, Scalar, VxVyVzWxWyWz
 
     from .lens import Lens
     from .robot import Freedom, Robot
 
 
-class Corrections(nn.Module):
+class Corrections[T: IntVar](nn.Module):
     """`exp(δ)` corrections of several elements, each with its scope (rows per element).
 
-    `row [elements, T]` says which row applies to each element at each timestep.
+    `row [elements, T]` says which row applies to each element at each timestep. Row counts
+    depend on the scopes and the episodes: they stay `int`.
     """
 
+    row: Tensor[[int, T]]
+    owner: Tensor[[int]]  # per row: its element
+    std: Tensor[[int, 2]]  # per row: (translation std m, rotation std rad)
+    previous: Tensor[[int]]  # per row: the walk's previous row, −1 where none
+    active: Tensor[[int]]  # per row: free and not held
+    free_dof: Tensor[[int, *VxVyVzWxWyWz]]  # per row and dof: active, with a nonzero std
+    start: Tensor[[int, *Mat4x4]]  # per row: its starting value
+
     def __init__(
-        self, freedoms: list[Freedom | None], episode: Tensor[[int]], dtype: torch.dtype
+        self, freedoms: list[Freedom | None], episode: Tensor[[T]], dtype: torch.dtype
     ) -> None:
         super().__init__()
         steps, device = len(episode), episode.device
@@ -102,6 +130,10 @@ class Corrections(nn.Module):
         self.register_buffer("previous", torch.cat(previous) if previous else none)
         active = torch.cat(free) & ~torch.cat(held) if free else none.bool()
         self.register_buffer("active", active)
+        # A zero std holds that part (translation or rotation) of the row
+        self.register_buffer(
+            "free_dof", active[:, None] & (self.std > 0).repeat_interleave(3, dim=1)
+        )
         self.delta = nn.Parameter(torch.zeros(count, 6, dtype=dtype, device=device))
         # Each row's starting value: a frame-scope walk is costed by how far each step departs
         # from the starting trajectory's step (e.g. odometry), not from standing still
@@ -109,20 +141,22 @@ class Corrections(nn.Module):
         self.register_buffer("start", eye.repeat(count, 1, 1))
         self.free_elements = [f is not None for f in freedoms]
 
-    def values(self) -> Tensor[[int, 6]]:
+    def values(self) -> Tensor[[int, *VxVyVzWxWyWz]]:
         """δ per row (zero where not free, or held)."""
 
-        return torch.where(self.active[:, None], self.delta, 0.0)
+        return torch.where(self.free_dof, self.delta, 0.0)
 
-    def prior(self, element_from_reference: Tensor[[int, 4, 4]]) -> Tensor[[]]:
-        """Gaussian cost of each row's deviation (the squared `prior_residuals`)."""
+    def prior(self, element_from_reference: Tensor[[int, *Mat4x4]]) -> Scalar:
+        """Gaussian cost of each row's deviation: `Σ ‖δ‖²` over `prior_residuals`."""
 
         return (self.prior_residuals(element_from_reference) ** 2).sum()
 
-    def prior_residuals(self, element_from_reference: Tensor[[int, 4, 4]]) -> Tensor[[int, 6]]:
+    def prior_residuals(
+        self, element_from_reference: Tensor[[int, *Mat4x4]]
+    ) -> Tensor[[int, *VxVyVzWxWyWz]]:
         """Each row's deviation over its std: from the reference (the description) for dataset
         and episode scopes; for frame scope, of its step from the previous frame against the
-        starting trajectory's step. Zero for rows that are not free.
+        starting trajectory's step. Zero for rows and parts that are not free (std 0: held).
 
         `element_from_reference [rows, 4, 4]`: each row's corrected pose relative to its
         reference.
@@ -136,30 +170,50 @@ class Corrections(nn.Module):
         walked = se3.inverse(expected) @ step
         relative = torch.where(walk[:, None, None], walked, pose)
         deviation = se3.se3_log(relative)
-        scaled = torch.cat(
-            (deviation[:, :3] / self.std[:, :1], deviation[:, 3:] / self.std[:, 1:]), -1
-        )
-        return torch.where(self.active[:, None], scaled, 0.0)
+        std = self.std.repeat_interleave(3, dim=1).clamp_min(1e-12)
+        return torch.where(self.free_dof, deviation / std, 0.0)
 
 
-class Rig(nn.Module):
+class Rig[T: IntVar, L: IntVar, C: IntVar](nn.Module):
     """Cameras `names` on `robot`, joint trajectory `qpos [T, Q]` (all episodes concatenated,
     `episode [T]` saying which episode each timestep belongs to)."""
 
+    kinematics: Tensor[[T, L, *Mat4x4]]  # forward kinematics of `qpos` (no refinements)
+    qpos: Tensor[[T, int]]
+    camera_body_index: Tensor[[C]]
+    initial_mount: Tensor[[C, *Mat4x4]]
+    default_mount: Tensor[[C, *Mat4x4]]  # the description's
+    reference_mount: Tensor[[int, *Mat4x4]]  # per camera row: its prior centre
+    subtree: Tensor[[int, L]]  # per free body: the bodies it moves
+    free_offset: Tensor[[int, *Mat4x4]]
+    initial_intrinsics: Tensor[[C, *Mat3x3]]
+    pixel_unit: Tensor[[C]]
+    focal_std: Tensor[[C]]
+    joint_std: Tensor[[int]]
+    time_std: Tensor[[1]]
+    joint_index: Tensor[[int]]
+    episode_first: Tensor[[T]]
+    episode_last: Tensor[[T]]
+    distortion_std: Tensor[[C, *K1K2K3K4]]
+    cameras: Corrections[T]
+    bodies: Corrections[T]
+    robot: Robot[L, int, int] | None  # kept only when forward kinematics is re-evaluated
+    initial_lens: Lens[C] | None
+
     def __init__(
         self,
-        robot: Robot,
-        qpos: Tensor[[int, int]],
+        robot: Robot[L, int, int],
+        qpos: Tensor[[T, int]],
         names: tuple[str, ...],
-        initial_mounts: Tensor[[int, 4, 4]],
-        initial_intrinsics: Tensor[[int, 3, 3]],
-        focal_std: float | Tensor[[int]],
-        pixel_unit: Tensor[[int]] | None = None,
-        episode: Tensor[[int]] | None = None,
-        start_at: Tensor[[int, int, 4, 4]] | None = None,
-        bodies_at: Tensor[[int, int, 4, 4]] | None = None,
+        initial_mounts: Tensor[[C, *Mat4x4]],
+        initial_intrinsics: Tensor[[C, *Mat3x3]],
+        focal_std: float | Tensor[[C]],
+        pixel_unit: Tensor[[C]] | None = None,
+        episode: Tensor[[T]] | None = None,
+        start_at: Tensor[[C, T, *Mat4x4]] | None = None,
+        bodies_at: Tensor[[int, T, *Mat4x4]] | None = None,
         kinematic: KinematicFreedom | None = None,
-        lens: Lens | None = None,
+        lens: Lens[C] | None = None,
     ) -> None:
         """`start_at [C, T]`, when given: each camera's starting mount at each timestep (for
         episode-scope cameras placed differently in each episode). `bodies_at [B, T]`: each
@@ -237,19 +291,19 @@ class Rig(nn.Module):
         self.register_buffer("focal_std", std.clone())
         self._init_lens(lens, qpos, len(names))
 
-    def _init_lens(self, lens: Lens | None, qpos: Tensor[[int, int]], cameras: int) -> None:
-        self.initial_lens = None if lens is None else lens.to(qpos)
-        self.distortion = (
-            None if lens is None else nn.Parameter(qpos.new_zeros(cameras, lens.std.shape[1]))
-        )
-        if lens is not None:
-            self.register_buffer("distortion_std", self.initial_lens.std.clone())
+    def _init_lens(self, lens: Lens[C] | None, qpos: Tensor[[T, int]], cameras: Int[C]) -> None:
+        if lens is None:
+            self.initial_lens = self.distortion = None
+            return
+        self.initial_lens = initial = lens.to(qpos)
+        self.distortion = nn.Parameter(qpos.new_zeros(cameras, lens.std.shape[1]))
+        self.register_buffer("distortion_std", initial.std.clone())
 
     def _init_kinematic(
         self,
-        robot: Robot,
-        qpos: Tensor[[int, int]],
-        episode: Tensor[[int]],
+        robot: Robot[L, int, int],
+        qpos: Tensor[[T, int]],
+        episode: Tensor[[T]],
         kinematic: KinematicFreedom | None,
     ) -> None:
         joints = len(robot.joint_qpos)
@@ -276,10 +330,10 @@ class Rig(nn.Module):
         self.register_buffer("episode_first", first[episode])
         self.register_buffer("episode_last", last[episode])
 
-    def joint_kinematics(self) -> Tensor[[int, int, 4, 4]]:
+    def joint_kinematics(self) -> Tensor[[T, L, *Mat4x4]]:
         """`world_from_body [T, L]` from the joints (with the kinematic refinements)."""
 
-        if not self.refines:
+        if self.robot is None:  # nothing refined
             return self.kinematics
         time = torch.where(self.time_std > 0, self.time_offset, 0.0)
         at = torch.arange(len(self.qpos), device=self.qpos.device, dtype=self.qpos.dtype) + time
@@ -292,15 +346,16 @@ class Rig(nn.Module):
         qpos = qpos.index_add(1, self.joint_index, offset[None].expand(len(qpos), -1))
         return forward_kinematics(self.robot, qpos)
 
-    def intrinsics(self) -> Tensor[[int, 3, 3]]:
-        """Per camera: initial intrinsics with corrected focal lengths (square pixels kept)."""
+    def intrinsics(self) -> Tensor[[C, *Mat3x3]]:
+        """Per camera: initial intrinsics with corrected focal lengths `f = f₀ · exp(φ)` (square
+        pixels kept)."""
 
         factor = torch.ones_like(self.initial_intrinsics)
         log_focal = torch.where(self.focal_std > 0, self.log_focal, 0.0)
         factor[:, [0, 1], [0, 1]] = log_focal.exp()[:, None]
         return self.initial_intrinsics * factor
 
-    def lens(self) -> Lens | None:
+    def lens(self) -> Lens[C] | None:
         """Per camera: initial distortion with its corrections (held coefficients kept)."""
 
         if self.initial_lens is None or self.distortion is None:
@@ -309,7 +364,7 @@ class Rig(nn.Module):
         correction = torch.where(lens.std > 0, self.distortion, 0.0)
         return replace(lens, distortion=lens.distortion + correction)
 
-    def world_from_body(self) -> Tensor[[int, int, 4, 4]]:
+    def world_from_body(self) -> Tensor[[T, L, *Mat4x4]]:
         """`world_from_body [T, L]`: the kinematics with the free bodies' corrections.
 
         A free body b with parent p: `W_b' = W_p · P_b · E · J_b = C · W_b` with
@@ -328,14 +383,14 @@ class Rig(nn.Module):
             world = torch.where(self.subtree[i][None, :, None, None], moved, world)
         return world
 
-    def mounts(self) -> Tensor[[int, 4, 4]]:
+    def mounts(self) -> Tensor[[C, *Mat4x4]]:
         """`body_from_camera` per camera (its value at the first timestep)."""
 
         camera = torch.arange(len(self.names), device=self.kinematics.device)
         return self.mounts_at(camera, torch.zeros_like(camera))
 
-    def mounts_at[V: IntVar](self, camera: Tensor[[V]], time: Tensor[[V]]) -> Tensor[[V, 4, 4]]:
-        """`body_from_camera` of each view (with its scope's correction)."""
+    def mounts_at[V: IntVar](self, camera: Tensor[[V]], time: Tensor[[V]]) -> Tensor[[V, *Mat4x4]]:
+        """`body_from_camera` of each view: `initial · exp(δ)`, δ of its scope's row."""
 
         delta = self.cameras.values()[self.cameras.row[camera, time]]
         return self.initial_mount[camera] @ se3.se3_exp(delta)
@@ -344,19 +399,19 @@ class Rig(nn.Module):
         self,
         camera: Tensor[[V]],
         time: Tensor[[V]],
-        world_from_body: Tensor[[int, int, 4, 4]] | None = None,
-    ) -> Tensor[[V, 4, 4]]:
-        """`world_from_camera` of each view, from kinematics and the mounts."""
+        world_from_body: Tensor[[T, L, *Mat4x4]] | None = None,
+    ) -> Tensor[[V, *Mat4x4]]:
+        """`world_from_camera` of each view: `world_from_body(q_t) · body_from_camera`."""
 
         world = self.world_from_body() if world_from_body is None else world_from_body
         return world[time, self.camera_body_index[camera]] @ self.mounts_at(camera, time)
 
     def _init_camera_starts(
         self,
-        robot: Robot,
+        robot: Robot[L, int, int],
         names: tuple[str, ...],
-        initial_mounts: Tensor[[int, 4, 4]],
-        start_at: Tensor[[int, int, 4, 4]] | None,
+        initial_mounts: Tensor[[C, *Mat4x4]],
+        start_at: Tensor[[C, T, *Mat4x4]] | None,
     ) -> None:
         """Each camera row's start and prior centre: the description's mount; for
         episode-scope cameras given per-episode starts, that episode's start (a recorded or
@@ -376,14 +431,9 @@ class Rig(nn.Module):
                     if freedom is not None and freedom.scope == "episode":
                         self.reference_mount[row] = start_at[c, time]
 
-    def moving_cameras(self) -> Tensor[[int]]:
-        """Which cameras sit on a body that moves during the episode (joints only)."""
-
-        body = self.kinematics[:, self.camera_body]
-        return (body - body[:1]).abs().flatten(-2).amax(-1).amax(0) > MOTION_THRESHOLD
-
-    def prior(self) -> Tensor[[]]:
-        """Priors of the free camera mounts (around the description), free bodies and focals."""
+    def prior(self) -> Scalar:
+        """Negative log-prior `Σ e²` of the free mounts, bodies, focals, kinematic offsets and
+        distortion (`prior_residuals`)."""
 
         return (self.prior_residuals() ** 2).sum()
 

@@ -19,7 +19,7 @@ from einops import rearrange
 from torch import nn
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
 
 PATCH_SIZE = 16
@@ -30,9 +30,9 @@ HIDDEN = 32
 OUTPUTS = 3  # warp x, warp y, overlap logit
 
 
-def resize[S: IntVar, C: IntVar](
-    x: Tensor[[S, C, int, int]], size: tuple[int, int]
-) -> Tensor[[S, C, int, int]]:
+def resize[S: IntVar, C: IntVar, Ho: IntVar, Wo: IntVar](
+    x: Tensor[[S, C, int, int]], size: tuple[Int[Ho], Int[Wo]]
+) -> Tensor[[S, C, Ho, Wo]]:
     return F.interpolate(x, size=size, mode="bilinear", align_corners=True)
 
 
@@ -58,12 +58,12 @@ class FusionBlock(nn.Module):
         self.resConfUnit1 = ResidualConvUnit() if has_skip else None
         self.resConfUnit2 = ResidualConvUnit()
 
-    def forward[S: IntVar](
+    def forward[S: IntVar, Ho: IntVar, Wo: IntVar](
         self,
         x: Tensor[[S, 256, int, int]],
         skip: Tensor[[S, 256, int, int]] | None,
-        size: tuple[int, int],
-    ) -> Tensor[[S, 256, int, int]]:
+        size: tuple[Int[Ho], Int[Wo]],
+    ) -> Tensor[[S, 256, Ho, Wo]]:
         if self.resConfUnit1 is not None and skip is not None:
             x = x + self.resConfUnit1(skip)
         return self.out_conv(resize(self.resConfUnit2(x), size))
@@ -89,8 +89,8 @@ class Scratch(nn.Module):
         )
 
 
-class DPTHead(nn.Module):
-    def __init__(self, dim: int) -> None:
+class DPTHead[D: IntVar](nn.Module):
+    def __init__(self, dim: Int[D]) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(dim)
         # Heterogeneous layers: typed as plain modules, applied with `level`
@@ -108,7 +108,7 @@ class DPTHead(nn.Module):
         self.scratch = Scratch()
 
     def forward[S: IntVar, H: IntVar, W: IntVar](
-        self, shallow: Tensor[[S, H, W, int]], deep: Tensor[[S, H, W, int]]
+        self, shallow: Tensor[[S, H, W, D]], deep: Tensor[[S, H, W, D]]
     ) -> Tensor[[S, H * 4, W * 4, 3]]:
         """Token maps (DINOv3 block 11; block 17 + matching) → `[S, 4h, 4w, 3]`."""
 

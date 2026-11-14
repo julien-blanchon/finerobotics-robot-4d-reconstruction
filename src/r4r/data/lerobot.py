@@ -63,11 +63,12 @@ def load_episode(
             position = torch.tensor([x, y, z], dtype=torch.float64)
             stream = replace(stream, pose=se3.from_rotation_translation(rotation, position))
         cameras.append(stream)
-    state = rows[robot["state"]["feature"]].double()
+    feature = priors.state_feature or robot["state"]["feature"]
+    state = _columns(rows, feature)
     if priors.state_shift:
         # Frame t's state from t + shift (a known video/joint-state offset, in frames at the
         # dataset's rate whatever the stride), clamped
-        full = every[:][robot["state"]["feature"]].double()
+        full = _columns(every[:], feature)
         index = torch.arange(0, len(full), stride)[: len(state)] + priors.state_shift
         state = full[index.clamp(0, len(full) - 1)]
     return Episode(
@@ -91,6 +92,13 @@ def _description(root: Path, robot: dict, priors: DatasetPriors) -> Path:
     return root / "meta" / robot["urdf"]
 
 
+def _columns(rows, feature: str | tuple[str, ...]) -> torch.Tensor:  # noqa: ANN001
+    """A vector feature's columns as float64 [T, n]; several features are concatenated."""
+
+    names = (feature,) if isinstance(feature, str) else feature
+    return torch.cat([rows[f].double().reshape(len(rows[f]), -1) for f in names], dim=1)
+
+
 def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
     """The base's recorded motion (see `r4r.rago.odometry`) at the loaded timesteps."""
 
@@ -98,7 +106,9 @@ def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
 
     spec = priors.base_odometry
     assert spec is not None
-    values = rows[spec.feature].double()[:, list(spec.columns)]
+    values = _columns(rows, spec.feature)[:, list(spec.columns)]
+    if spec.kind == "pose" and values.shape[1] == 7:
+        return odometry.from_poses_3d(values[:, :3], values[:, 3:])
     if spec.kind == "pose":
         # x, y, θ; or x, y, qz, qw (a planar heading as a quaternion about z)
         heading = (
@@ -108,7 +118,7 @@ def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
     if spec.kind == "velocity":
         return odometry.from_velocity(values, rows["timestamp"].double())
     if spec.kind == "swerve":
-        speeds = rows[spec.speed_feature or spec.feature].double()[:, list(spec.speed_columns)]
+        speeds = _columns(rows, spec.speed_feature or spec.feature)[:, list(spec.speed_columns)]
         wheels = torch.tensor(spec.wheels, dtype=torch.float64)
         twist = odometry.swerve_twist(values, speeds, wheels)
         return odometry.from_velocity(twist, rows["timestamp"].double())

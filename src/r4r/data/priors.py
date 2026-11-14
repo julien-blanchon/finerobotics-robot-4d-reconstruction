@@ -23,6 +23,8 @@ take precedence over `meta/robot.json` and the camera feature info:
 }
 ```
 
+`state_feature` names the joint-state feature when `meta/robot.json` names a wrong one (a list:
+the features' columns concatenated, e.g. leg joints recorded apart from the arms).
 `description` replaces the delivered robot description by a corrected one kept under
 `priors/` (fixes to the URDF/MJCF itself: wrong joints, frames, meshes). `joints` add or
 replace (by URDF joint name) entries of the state mapping; `removed_joints`
@@ -96,14 +98,15 @@ class BodyPrior:
 @dataclass(frozen=True, slots=True)
 class BaseOdometry:
     """Where a mobile base's motion is recorded (see `r4r.rago.odometry`): `feature` columns
-    `columns` holding planar poses (x, y, θ or x, y, qz, qw), body-frame velocities
-    (vx, vy, ω), wheel angles (left, right[, steering]) of a caster or differential drive
-    with its geometry, or a swerve drive's steering angles (`columns`) and wheel ground speeds
-    (m/s, `speed_columns` of `speed_feature`, default `feature`) with each wheel's contact
-    point (x, y) in the base frame (`wheels`)."""
+    `columns` holding planar poses (x, y, θ or x, y, qz, qw), full poses (x, y, z, qw, qx, qy,
+    qz: list the columns in that order), body-frame velocities (vx, vy, ω), wheel angles (left,
+    right[, steering]) of a caster or differential drive with its geometry, or a swerve drive's
+    steering angles (`columns`) and wheel ground speeds (m/s, `speed_columns` of
+    `speed_feature`, default `feature`) with each wheel's contact point (x, y) in the base
+    frame (`wheels`)."""
 
     kind: Literal["pose", "velocity", "caster", "swerve"]
-    feature: str
+    feature: str | tuple[str, ...]  # several: their columns concatenated
     columns: tuple[int, ...]
     radius: float | None = None
     half_track: float | None = None
@@ -127,6 +130,8 @@ class DatasetPriors:
     # (e.g. `descriptions/<embodiment>/robot.xml`, shared by an embodiment's datasets). Meshes
     # may point back into the delivery (absolute `meshdir` / filenames).
     description: str | None = None
+    # The feature holding the joint state, when `meta/robot.json` names a wrong one
+    state_feature: str | tuple[str, ...] | None = None  # several: concatenated
     # Kinematic refinement in `r4r rig` (prior stds; absent: held): joint-encoder offsets
     # (`joint_offset_deg` for hinges, `joint_offset_mm` for slides, optionally only `joints`)
     # and a video/joint time offset on top of `state_shift` (`time_offset_frames`)
@@ -200,7 +205,7 @@ def load_priors(root: Path) -> DatasetPriors:
     if odometry is not None:
         odometry = BaseOdometry(
             odometry["kind"],
-            odometry["feature"],
+            _feature(odometry["feature"]),
             tuple(odometry["columns"]),
             odometry.get("radius"),
             odometry.get("half_track"),
@@ -219,9 +224,14 @@ def load_priors(root: Path) -> DatasetPriors:
         state_shift=int(raw.get("state_shift", 0)),
         cameras=cameras,
         description=raw.get("description"),
+        state_feature=_feature(raw.get("state_feature")),
         kinematics=raw.get("kinematics"),
         notes=raw.get("notes", ""),
     )
+
+
+def _feature(value: str | list[str] | None) -> str | tuple[str, ...] | None:
+    return tuple(value) if isinstance(value, list) else value
 
 
 @dataclass(frozen=True, slots=True)

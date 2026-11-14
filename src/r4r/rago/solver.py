@@ -278,11 +278,13 @@ def _damped_step(
     """The first damping (from `damping` up) whose step lowers the objective: (step, its
     objective, the next damping); None if none does."""
 
-    diagonal = torch.diag(hessian.diagonal().clamp_min(1e-12))
+    # Parameters the data do not constrain (zero rows) keep a damping relative to the others,
+    # so the damped system stays solvable
+    scale = hessian.diagonal().abs().max().clamp_min(1e-12)
+    diagonal = torch.diag(hessian.diagonal().clamp_min(1e-9 * scale))
     while damping <= config.max_damping:
-        try:
-            candidate = torch.linalg.solve(hessian + damping * diagonal, -gradient)
-        except torch.linalg.LinAlgError:  # singular at this damping (e.g. an unobserved unknown)
+        candidate, info = torch.linalg.solve_ex(hessian + damping * diagonal, -gradient)
+        if int(info) != 0 or not bool(torch.isfinite(candidate).all()):
             damping *= 4
             continue
         value = objective(candidate)

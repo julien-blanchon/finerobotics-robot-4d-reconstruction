@@ -57,6 +57,8 @@ def load_episode(
         name = key.removeprefix(IMAGE_PREFIX)
         frames = None if decode is None or name in decode else torch.empty(0, 3, 0, 0)
         prior = priors.cameras.get(name, CameraPrior())
+        if prior.ignore:
+            continue
         stream = _camera(meta, root, episode, key, timestamps, links.get(key), prior, frames)
         if record is not None and name in record.intrinsics:
             fx, fy, cx, cy = record.intrinsics[name]

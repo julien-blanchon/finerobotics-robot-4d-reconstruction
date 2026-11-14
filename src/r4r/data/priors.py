@@ -44,7 +44,8 @@ intrinsics from a column of the dataset itself, per episode (simulators that ran
 focal): `{"column": "publisher.<name>_intrinsics", "layout": "fx_fy_cx_cy" | "matrix",
 "size": [w, h], "resize": "stretch" | "height"}`: `size` is the resolution the values are
 given at (default: the video's), `resize` how they map to the video (`stretch`: each axis
-scaled; `height`: the same vertical field of view, centred).
+scaled; `height`: the same vertical field of view, centred). `ignore` leaves a camera out (one
+that rides on no robot body, e.g. worn by a person).
 """
 
 from __future__ import annotations
@@ -92,6 +93,8 @@ class CameraPrior:
     scope: Literal["dataset", "episode", "frame"] = "dataset"
     # Intrinsics recorded in the dataset's own columns (per episode), if any
     intrinsics: IntrinsicsColumn | None = None
+    # Left out of every command (a camera on no robot body, e.g. worn by a person)
+    ignore: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +192,7 @@ def load_priors(root: Path) -> DatasetPriors:
             distortion_range=c.get("distortion_range"),
             scope=c.get("scope", "dataset"),
             intrinsics=_intrinsics_column(c.get("intrinsics")),
+            ignore=bool(c.get("ignore", False)),
         )
         for name, c in raw.get("cameras", {}).items()
     }

@@ -93,7 +93,11 @@ def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
     assert spec is not None
     values = rows[spec.feature].double()[:, list(spec.columns)]
     if spec.kind == "pose":
-        return odometry.from_poses(values[:, 0], values[:, 1], values[:, 2])
+        # x, y, θ; or x, y, qz, qw (a planar heading as a quaternion about z)
+        heading = (
+            2 * torch.atan2(values[:, 2], values[:, 3]) if values.shape[1] == 4 else values[:, 2]
+        )
+        return odometry.from_poses(values[:, 0], values[:, 1], heading)
     if spec.kind == "velocity":
         return odometry.from_velocity(values, rows["timestamp"].double())
     assert spec.radius is not None and spec.half_track is not None, "caster: radius, half_track"

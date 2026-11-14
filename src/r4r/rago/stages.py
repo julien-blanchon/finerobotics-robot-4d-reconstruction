@@ -295,9 +295,13 @@ def _group_bundles(
     known_focal: tuple[bool, ...],
 ) -> list[tuple[list[int], BundleResult]]:
     """Stage 5: the bundle per group of episodes (every `groups`-th), the agreement check on
-    dataset-scope unknowns; 0 groups: none (reconstruction with frozen priors)."""
+    dataset-scope unknowns. Fewer than two non-empty groups (0 or 1 asked, or one episode):
+    none, since one group would only repeat the bundle over all episodes."""
 
     groups = [list(range(g, len(episodes), config.groups)) for g in range(config.groups)]
+    groups = [g for g in groups if g]
+    if len(groups) < 2:
+        return []
     return [
         (
             group,
@@ -312,7 +316,7 @@ def _group_bundles(
                 known_focal,
             ),
         )
-        for group in filter(None, groups)
+        for group in groups
     ]
 
 

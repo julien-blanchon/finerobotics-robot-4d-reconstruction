@@ -620,10 +620,12 @@ def _print_rig(
         if robot.free_bodies[name].scope == "frame":
             continue  # held at each episode's first frame: see the departure above
         offset = fit.body_corrections[b]
+        # Groups check dataset-scope bodies only (an episode-scope one differs by design)
+        checked = robot.free_bodies[name].scope == "dataset" and len(fit.group_corrections) > 1
         print(
             f"{name}: correction {[round(v, 4) for v in offset[:3, 3].tolist()]} m, "
-            f"{math.degrees(float(se3.so3_log(offset[:3, :3]).norm())):.2f} deg; "
-            f"groups disagree by {cm:.1f} cm / {deg:.2f} deg"
+            f"{math.degrees(float(se3.so3_log(offset[:3, :3]).norm())):.2f} deg"
+            + (f"; groups disagree by {cm:.1f} cm / {deg:.2f} deg" if checked else "")
         )
 
 

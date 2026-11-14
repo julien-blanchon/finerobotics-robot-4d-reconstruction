@@ -17,9 +17,12 @@ metres**, plus corrected kinematics and timing. Dense depth and 3D tracks come l
 <td><img src="docs/assets/gallery/xvla-softfold.gif" alt="X-VLA soft-fold overlay"><br><sub><b>X-VLA soft-fold</b> (real bimanual AgileX) · 1.30 px</sub></td>
 <td><img src="docs/assets/gallery/hsr.gif" alt="HSR overlay"><br><sub><b>HSR</b> (airoa-moma-5k, mobile base from its record), head camera · 0.62 px</sub></td>
 </tr>
+<tr>
+<td colspan="2"><img src="docs/assets/stills/syngrasp-preview.jpg" alt="SynGrasp-1B previews"><br><sub><b>SynGrasp-1B</b> (11,292 h, 4.9M episodes): no solve needed, every episode's cameras come from its recorded scene config</sub></td>
+</tr>
 </table>
 
-<sub>The robot description, drawn with the solved kinematics and cameras over the real video
+<sub>The robot description, drawn with the solved kinematics and cameras over the video
 (`r4r overlay`). Numbers are the median reprojection error of each `r4r rig` solve.</sub>
 
 ## How it works

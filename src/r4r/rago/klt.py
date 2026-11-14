@@ -23,6 +23,7 @@ import torch
 if TYPE_CHECKING:
     from torch import Tensor
 
+    from .lens import Lens
     from .tracks import Tracks
 
 
@@ -109,6 +110,7 @@ def klt_tracks(
     intrinsics: Tensor[[int, 3, 3]],
     config: KLTConfig,
     found: list[VideoTracks] | None = None,
+    lens: Lens | None = None,
 ) -> Tracks:
     """Tracks of every camera's video (frame `t` of camera `c` is view (c, t)); each track is
     rigid with an unknown body, so all are flagged `moving` (the bundle attaches them).
@@ -131,4 +133,4 @@ def klt_tracks(
     track, view, pixel = torch.cat(tracks), torch.cat(views), torch.cat(pixels)
     assert bool((view >= 0).all()), "every video frame must be a view"
     ones = torch.ones(len(track), dtype=pixel.dtype, device=pixel.device)
-    return Tracks(view_camera, view_time, track, view, pixel, ones, ones > 0, intrinsics)
+    return Tracks(view_camera, view_time, track, view, pixel, ones, ones > 0, intrinsics, lens)

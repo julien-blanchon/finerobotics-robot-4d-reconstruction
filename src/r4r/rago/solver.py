@@ -78,7 +78,16 @@ class _Columns:
 
 
 # Dataset-wide parameter vectors of the rig and the std buffer saying which entries are free
-VECTORS = {"log_focal": "focal_std", "joint_offset": "joint_std", "time_offset": "time_std"}
+VECTORS = {
+    "log_focal": "focal_std",
+    "joint_offset": "joint_std",
+    "time_offset": "time_std",
+    "distortion": "distortion_std",  # [C, k], absent for ideal pinholes
+}
+
+
+def _vectors(rig: Rig) -> list[str]:
+    return [name for name in VECTORS if getattr(rig, name, None) is not None]
 
 
 def _columns(rig: Rig) -> _Columns:
@@ -92,9 +101,10 @@ def _columns(rig: Rig) -> _Columns:
         next_column += 6 * len(rows)
         tables.append(table)
     vectors = {}
-    for name, std in VECTORS.items():
-        column = torch.full((len(getattr(rig, name)),), -1, dtype=torch.long, device=device)
-        free = (getattr(rig, std) > 0).nonzero()[:, 0]
+    for name in _vectors(rig):
+        std = VECTORS[name]
+        column = torch.full((getattr(rig, name).numel(),), -1, dtype=torch.long, device=device)
+        free = (getattr(rig, std).flatten() > 0).nonzero()[:, 0]
         column[free] = next_column + torch.arange(len(free), device=device)
         next_column += len(free)
         vectors[name] = column
@@ -117,7 +127,9 @@ def _apply(rig: Rig, columns: _Columns, x: Tensor[[int]]) -> dict[str, Tensor]:
         out[name] = moved.view_as(corrections.delta)
     for name, column in columns.vectors.items():
         used = column >= 0
-        out[name] = getattr(rig, name).detach().index_add(0, used.nonzero()[:, 0], x[column[used]])
+        value = getattr(rig, name).detach()
+        moved = value.flatten().index_add(0, used.nonzero()[:, 0], x[column[used]])
+        out[name] = moved.view_as(value)
     return out
 
 
@@ -328,5 +340,5 @@ def _commit(rig: Rig, columns: _Columns, x: Tensor[[int]]) -> None:
         moved = _apply(rig, columns, x)
         rig.cameras.delta.copy_(moved["cameras.delta"])
         rig.bodies.delta.copy_(moved["bodies.delta"])
-        for name in VECTORS:
+        for name in columns.vectors:
             getattr(rig, name).copy_(moved[name])

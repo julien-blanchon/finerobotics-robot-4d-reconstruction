@@ -64,7 +64,8 @@ def load_episode(
             stream = replace(stream, intrinsics=k)
         elif prior.intrinsics is not None:
             size = meta.features[key]["shape"][:2]  # height, width
-            k = _recorded_intrinsics(every[prior.intrinsics.column], prior.intrinsics, size)
+            column = every.select_columns([prior.intrinsics.column])[:][prior.intrinsics.column]
+            k = _recorded_intrinsics(column, prior.intrinsics, size)
             stream = replace(stream, intrinsics=k)
         cameras.append(stream)
     state = rows[robot["state"]["feature"]].double()

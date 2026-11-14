@@ -4,7 +4,7 @@ Every view's pose is `world_from_body(q_t) · mount` (hard constraint, metric by
 Each track's 3D point is triangulated in closed form from its observations' rays under the
 current poses (weighted least squares on the rays: no point parameters, differentiable), then
 reprojected into every view that saw it. We minimise a robust reprojection error over the free
-mounts and the focal lengths.
+mounts, the focal lengths and, when the lenses say so, their distortion.
 
 A static track lives in the world frame. A moving track (a point on the robot, or on a grasped
 object) is rigid with some link: expressed in that link's frame its point is constant, so the
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from .lens import Lens
     from .robot import Robot
     from .tracks import Tracks
 
@@ -108,6 +109,8 @@ class BundleResult:
     # (timesteps: the joint values of frame t are read at t + τ)
     joint_offset: Tensor[[int]]
     time_offset: float
+    # Distortion per camera with its corrections (None: ideal pinholes)
+    lens: Lens | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +169,7 @@ def bundle_adjust(
         start_at,
         bodies_at,
         kinematic,
+        t.lens,
     )
     track_moving = torch.zeros(obs.count, dtype=torch.bool, device=qpos.device)
     track_moving[obs.track[t.moving[keep]]] = True
@@ -268,6 +272,7 @@ def _result(
             world_from_body=rig.world_from_body(),
             joint_offset=torch.where(rig.joint_std > 0, rig.joint_offset, 0.0).detach(),
             time_offset=float(torch.where(rig.time_std > 0, rig.time_offset, 0.0)),
+            lens=rig.lens(),
         )
 
 
@@ -374,6 +379,11 @@ def residuals(
     world_from_body = rig.world_from_body()
     world_from_view = rig.camera_poses(t.view_camera, t.view_time, world_from_body)
     intrinsics = rig.intrinsics()
+    lens = rig.lens()
+    distortion = fisheye = None
+    if lens is not None:
+        distortion = lens.distortion[t.view_camera[obs.view]]
+        fisheye = lens.fisheye[t.view_camera[obs.view]]
 
     # Gather per-observation pose and intrinsics through embedding (sorted backward)
     table = torch.cat((world_from_view.flatten(1), intrinsics[t.view_camera].flatten(1)), -1)
@@ -383,7 +393,7 @@ def residuals(
 
     # Rays: centre c and unit direction d in the track's frame
     pixel, weight = obs.pixel, obs.weight
-    local = camera.backproject(k, pixel[:, None], torch.ones_like(pixel[:, :1]))[:, 0]
+    local = camera.rays(k, pixel[:, None], distortion, fisheye)[:, 0]
     direction = F.normalize((pose[:, :3, :3] @ local[:, :, None])[..., 0], dim=-1)
     centre = pose[:, :3, 3]
 
@@ -406,7 +416,7 @@ def residuals(
 
     # Reproject each track's point into each view that saw it
     in_view = se3.transform_points(se3.inverse(pose), point[obs.track][:, None])[:, 0]
-    projected = camera.project(k, in_view[:, None])[:, 0]
+    projected = camera.project(k, in_view[:, None], distortion, fisheye)[:, 0]
     unit = rig.pixel_unit[t.view_camera[obs.view]]
     valid = in_view[:, 2] > MIN_DEPTH
     difference = torch.where(valid[:, None], (projected - pixel) / unit[:, None], 0.0)

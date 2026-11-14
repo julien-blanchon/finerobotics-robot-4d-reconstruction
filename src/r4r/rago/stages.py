@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
     from r4r.matching import RoMaV2
 
+    from .lens import Lens
     from .robot import Robot
 
 # A static camera needs this many points seen by moving cameras (≥ 3 observations each)
@@ -92,6 +93,8 @@ class RigFit:
     # `body_from_camera` per camera (moving: its mount; static: its first episode's pose)
     mounts: Tensor[[int, 4, 4]]
     intrinsics: Tensor[[int, 3, 3]]
+    # Distortion per camera (None: ideal pinholes)
+    lens: Lens | None
     # Free bodies' corrected `world_from_body` at the first timestep of every episode [E, B]
     bodies: Tensor[[int, int, 4, 4]]
     # Static cameras' poses per episode [E, C] (moving cameras: their mount)
@@ -122,22 +125,26 @@ def calibrate_rig(
     known_mount: tuple[bool, ...],
     model: RoMaV2,
     config: RigConfig,
+    lens: Lens | None = None,
 ) -> RigFit:
     """Calibrate the free mounts, free bodies and static cameras of `robot` (see module doc).
 
     `intrinsics` are the focal priors (or guesses where `known_focal` is False); cameras on
     the world body are static, the others moving. Moving cameras with `known_mount` keep the
-    description's mount (no search).
+    description's mount (no search). `lens`: the cameras' distortion priors (None: ideal
+    pinholes), refined where their std allows.
     """
 
     index = [robot.camera(n) for n in names]
     static = [robot.camera_body[i] == 0 for i in index]
     tracked = _Tracked(episodes, config.fit)
-    mounts, intrinsics, agreement = _moving_mounts(
-        robot, episodes, names, intrinsics, known_focal, known_mount, config, tracked
+    mounts, intrinsics, lens, agreement = _moving_mounts(
+        robot, episodes, names, intrinsics, known_focal, known_mount, config, tracked, lens
     )
     merged = [
-        _multi_camera_tracks(e, names, intrinsics, model, config, [tracked(i, n) for n in names])
+        _multi_camera_tracks(
+            e, names, intrinsics, model, config, [tracked(i, n) for n in names], lens
+        )
         for i, e in enumerate(episodes)
     ]
     starts, intrinsics = _static_starts(
@@ -177,6 +184,7 @@ def calibrate_rig(
     return RigFit(
         mounts=everything.body_from_camera,
         intrinsics=everything.intrinsics,
+        lens=everything.lens,
         bodies=everything.world_from_body[first][:, free],
         body_corrections=_body_corrections(frozen, episodes[0].qpos, everything.world_from_body),
         camera_poses=camera_poses,
@@ -199,8 +207,11 @@ def _moving_mounts(
     known_mount: tuple[bool, ...],
     config: RigConfig,
     tracked: _Tracked | None = None,
-) -> tuple[Tensor[[int, 4, 4]], Tensor[[int, 3, 3]], tuple[tuple[int, int] | None, ...]]:
-    """Stage 1: each free moving camera's mount (and focal) from its own video alone."""
+    lens: Lens | None = None,
+) -> tuple[
+    Tensor[[int, 4, 4]], Tensor[[int, 3, 3]], Lens | None, tuple[tuple[int, int] | None, ...]
+]:
+    """Stage 1: each free moving camera's mount (and focal, distortion) from its own video."""
 
     index = [robot.camera(n) for n in names]
     mounts = robot.body_from_camera[index].to(episodes[0].qpos).clone()
@@ -211,6 +222,7 @@ def _moving_mounts(
         if body == 0 or known_mount[c] or name not in robot.free_cameras:
             continue
         data = []
+        own = None if lens is None else lens.select(torch.tensor([c], device=mounts.device))
         for i, e in enumerate(episodes):
             a, b = still_span(e.base_motion)
             if b - a < MIN_STILL:
@@ -218,7 +230,8 @@ def _moving_mounts(
             whole = a == 0 and b >= len(e.qpos)  # the whole video: its tracks are shared
             found = tracked(i, name) if whole and tracked is not None else None
             frames = e.frames[name][a:b]
-            data.append((e.qpos[a:b], video_tracks(frames, intrinsics[c], config.fit.klt, found)))
+            tracks = video_tracks(frames, intrinsics[c], config.fit.klt, found, lens=own)
+            data.append((e.qpos[a:b], tracks))
         if not data:
             raise ValueError(
                 f"{name}: no span of {MIN_STILL} timesteps with the base still in any episode;"
@@ -228,8 +241,10 @@ def _moving_mounts(
         focal_range = 0.0 if known_focal[c] else None
         setup = fit_setup(alone, data, name, (body,), intrinsics[c], config.fit, focal_range)
         mounts[c], intrinsics[c] = setup.fit.body_from_camera, setup.fit.intrinsics
+        if lens is not None and setup.fit.lens is not None:
+            lens = lens.with_distortion(c, setup.fit.lens.distortion[0])
         agreement[c] = (int(setup.agree.sum()), len(data))
-    return mounts, intrinsics, tuple(agreement)
+    return mounts, intrinsics, lens, tuple(agreement)
 
 
 def _multi_camera_tracks(
@@ -239,6 +254,7 @@ def _multi_camera_tracks(
     model: RoMaV2,
     config: RigConfig,
     found: list[VideoTracks] | None = None,
+    lens: Lens | None = None,
 ) -> Tracks:
     """Stage 2: KLT tracks of every camera, merged through RoMa links at the same instants."""
 
@@ -247,7 +263,9 @@ def _multi_camera_tracks(
     view_camera = torch.arange(len(names), device=device).repeat_interleave(steps)
     view_time = torch.arange(steps, device=device).repeat(len(names))
     videos = [episode.frames[n] for n in names]
-    tracks = klt_tracks(videos, view_camera, view_time, intrinsics, config.fit.klt, found)
+    tracks = klt_tracks(
+        videos, view_camera, view_time, intrinsics, config.fit.klt, found, lens=lens
+    )
     pairs = [
         (a, t, b, t)
         for t in range(0, steps, config.link_every)
@@ -304,14 +322,22 @@ def _static_starts(
                 continue
             size = tuple(e.frames[names[c]].shape[-2:])
             prior = float(focal[c]) if known_focal[c] or found[c] else None
-            start = locate_camera(points.point[tracks.track[seen]], tracks.pixel[seen], size, prior)
+            lens = tracks.lens
+            start = locate_camera(
+                points.point[tracks.track[seen]],
+                tracks.pixel[seen],
+                size,
+                prior,
+                None if lens is None else lens.distortion[c],
+                None if lens is None else lens.fisheye[c],
+            )
             if start is not None:
                 starts[i, c] = start.world_from_camera
                 support[i, c] = start.inliers
                 focal[c], found[c] = start.focal, True
     for c, name in enumerate(names):
         if bool(static[c]) and free[c] and robot.free_cameras[name].scope == "dataset":
-            starts[:, c] = _consensus(starts[:, c], support[:, c])
+            starts[:, c] = _consensus(starts[:, c], support[:, c]).clone()
     intrinsics = intrinsics.clone()
     intrinsics[:, :2, :2] *= (focal / intrinsics[:, 0, 0])[:, None, None]
     return starts, intrinsics
@@ -367,6 +393,7 @@ def _bundle(
         weight=torch.cat(weight),
         moving=torch.cat(moving),
         intrinsics=intrinsics,
+        lens=merged[0].lens,
     )
     episode = torch.cat([torch.full((n,), i, device=device) for i, n in enumerate(steps)])
     start_at = torch.cat(

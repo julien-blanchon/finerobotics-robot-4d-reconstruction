@@ -213,7 +213,8 @@ def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
     """One episode's known values; None when the dataset has no table or no row for it.
 
     The table has one row per (episode, camera): `episode, camera, fx, fy, cx, cy` and an
-    optional `station`.
+    optional `station`. Intrinsics may be null (station known, focal not): such rows give
+    the station only.
     """
 
     path = episode_table_path(root)
@@ -228,7 +229,11 @@ def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
     station = rows[0].get("station")
     return EpisodeRecord(
         None if station is None else str(station),
-        {r["camera"]: (r["fx"], r["fy"], r["cx"], r["cy"]) for r in rows},
+        {
+            r["camera"]: (r["fx"], r["fy"], r["cx"], r["cy"])
+            for r in rows
+            if r.get("fx") is not None
+        },
     )
 
 

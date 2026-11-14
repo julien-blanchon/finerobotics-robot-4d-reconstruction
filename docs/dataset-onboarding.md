@@ -8,6 +8,26 @@ reuses the result with no further choices.
 Keep this guide current: when a tool, a default or a lesson changes, update it here.
 Legend: ✅ tool exists · ⬜ planned (do it by hand or with `research/` scripts until then).
 
+## The agent works first
+
+Agents now have good physical grounding and image understanding: the first and main step for
+a dataset is the agent itself looking at the data and the simulation, and setting as priors
+everything that can be set that way, before any optimisation. Concretely:
+- Look at the videos and at the robot simulated at the recorded joint states:
+  `r4r preview <dataset> check.png` ✅ draws the description's meshes at the recorded joints over
+  every camera, with the cameras where the priors put them (no solve). Place each camera by
+  eye (which link, roughly where, which way it looks), check joint signs, units and timing,
+  the focal (does the drawn robot have the right size?), the arm bases of a bimanual robot,
+  then re-render and iterate until the drawn robot sits close to the real one.
+- Write ad-hoc scripts freely for this (state plots, simulated motions, frame grids, quick
+  fits): they live in the agent's scratchpad, not in the library. One shared tool cannot fit
+  every dataset; the library provides the solver and the checks.
+- Record what was found in the standard format: `priors/<family>/<dataset>.json` (the values)
+  and `priors/onboarding/<embodiment>.md` (the record: what was checked, how, evidence;
+  template `priors/onboarding/TEMPLATE.md`).
+
+Only then calibrate (section 4): the solver refines good priors; it does not rescue bad ones.
+
 ## 0. Is it in scope?
 
 - Robot data with joint states and a robot description. Handheld grippers (UMI-style) and

@@ -519,6 +519,83 @@ class Overlay:
         print(f"wrote {self.output} ({image.shape[1]}x{image.shape[0]})")
 
 
+@dataclass(frozen=True, slots=True)
+class Preview:
+    """The robot drawn over every camera from the priors alone (no solve): the description at
+    the recorded joint states, each camera where the priors (or the description) put it, with
+    the priors' focal (else `--focal` × width). The agent's first tool on a new dataset: place
+    cameras, check joints, signs, timing and focal by eye, then calibrate. `.png`: a grid of
+    moments; `.mp4`: the episode."""
+
+    dataset: tyro.conf.Positional[str]
+    output: tyro.conf.Positional[Path]
+    episode: int = 0
+    moments: int = 4
+    stride: int = 1
+    focal: float = 0.7
+    height: int = 360
+
+    def run(self) -> None:
+        import cv2
+        import numpy as np
+        import torch
+
+        from r4r.data.lerobot import load_episode
+        from r4r.rago.kinematics import forward_kinematics
+        from r4r.rago.robot import (
+            CameraMount,
+            body_mounts,
+            compile_model,
+            load_robot,
+            qpos_from_state,
+        )
+        from r4r.viz.overlay import overlay_frames, write_video
+
+        episode = load_episode(dataset_root(self.dataset), self.episode, stride=self.stride)
+        streams = episode.cameras
+        mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
+        bodies = body_mounts(episode.priors)
+        robot = load_robot(episode.robot, cameras=mounts, bodies=bodies).to("cpu", torch.float64)
+        qpos = qpos_from_state(robot, episode.state, episode.joints)
+        names = tuple(c.name for c in streams)
+        index = [robot.camera(n) for n in names]
+        k = []
+        for c in streams:
+            height, width = c.frames.shape[-2:]
+            if c.intrinsics is not None:
+                k.append(c.intrinsics.tolist())
+                continue
+            f = c.prior.focal or self.focal * width
+            k.append([[f, 0, (width - 1) / 2], [0, f, (height - 1) / 2], [0, 0, 1]])
+        steps = len(qpos)
+        solution = {
+            "dataset": self.dataset,
+            "names": names,
+            "lengths": [steps],
+            "world_from_body": forward_kinematics(robot, qpos),
+            "mounts_at": robot.body_from_camera[index][:, None].expand(-1, steps, 4, 4),
+            "camera_body": [robot.camera_body[i] for i in index],
+            "intrinsics": torch.tensor(k, dtype=torch.float64),
+        }
+        model = compile_model(episode.robot, None, mounts, bodies)
+        videos = {c.name: c.frames.permute(0, 2, 3, 1).numpy() for c in streams}
+        label = f"{self.dataset}  episode {self.episode}  PRIORS ONLY (no solve)"
+        still = self.output.suffix.lower() == ".png"
+        times = (
+            np.linspace(0, steps - 1, self.moments).round().astype(int).tolist()
+            if still
+            else list(range(steps))
+        )
+        frames = overlay_frames(solution, videos, model, 0, times, self.height, label)
+        if still:
+            image = np.vstack(list(frames))
+            cv2.imwrite(str(self.output), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+            print(f"wrote {self.output} ({image.shape[1]}x{image.shape[0]})")
+        else:
+            count = write_video(frames, self.output, episode.fps)
+            print(f"wrote {self.output} ({count} frames)")
+
+
 type Command = (
     Annotated[Inspect, tyro.conf.subcommand("inspect")]
     | Annotated[Links, tyro.conf.subcommand("links")]
@@ -527,6 +604,7 @@ type Command = (
     | Annotated[Sheet, tyro.conf.subcommand("sheet")]
     | Annotated[Export, tyro.conf.subcommand("export")]
     | Annotated[Overlay, tyro.conf.subcommand("overlay")]
+    | Annotated[Preview, tyro.conf.subcommand("preview")]
 )
 
 

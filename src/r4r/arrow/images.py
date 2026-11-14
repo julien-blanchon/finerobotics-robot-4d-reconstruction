@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.types import RGB
+
 LONG_SIDE = 504
 
 
@@ -28,10 +30,14 @@ class Resize:
 
     @property
     def scale(self) -> tuple[float, float]:
+        """(model / native) per axis, for `camera.resize_pixels` / `resize_intrinsics`."""
+
         return self.model[0] / self.native[0], self.model[1] / self.native[1]
 
     @classmethod
     def for_size(cls, width: int, height: int) -> Resize:
+        """Sides `max(14, round(n · 504 / long side) to the nearest multiple of 14)`."""
+
         factor = LONG_SIDE / max(width, height)
 
         def side(n: int) -> int:
@@ -41,8 +47,8 @@ class Resize:
 
 
 def model_images[N: IntVar, H: IntVar, W: IntVar](
-    frames: Tensor[[N, 3, H, W]], resize: Resize
-) -> Tensor[[N, 3, int, int]]:
+    frames: Tensor[[N, *RGB, H, W]], resize: Resize
+) -> Tensor[[N, *RGB, int, int]]:
     """uint8 frames → float RGB in [0, 1] at model size (antialiased bilinear)."""
 
     width, height = resize.model

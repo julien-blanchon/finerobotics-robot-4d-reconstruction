@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from shape_extensions import IntTuple, IntVar
     from torch import Tensor
 
+    from r4r.types import UV, XYZ, Mat3x3
+
 MIN_DEPTH = 1e-6
 # Distortion coefficients per camera (k1..k4)
 COEFFICIENTS = 4
@@ -47,7 +49,11 @@ def project[Bs: IntTuple, N: IntVar](
     fisheye: Tensor[[*Bs]] | None = None,
 ) -> Tensor[[*Bs, N, 2]]:
     """Pixel coordinates of camera-frame points (depth clamped away from zero), through the
-    lens `distortion` (`fisheye`: Kannala–Brandt, else radial; None: ideal pinhole)."""
+    lens `distortion` (`fisheye`: Kannala–Brandt, else radial; None: ideal pinhole).
+
+    `p = f · d(s) · (x, y)/r + c`, `r = ‖(x, y)‖`, `s = r/z` (radial) or `atan2(r, z)` (fisheye);
+    the ideal pinhole is `p = f · (x, y)/z + c`. Points in metres, pixels in pixels.
+    """
 
     focal, centre = intrinsics[..., None, [0, 1], [0, 1]], intrinsics[..., None, :2, 2]
     if distortion is None or fisheye is None:
@@ -64,7 +70,8 @@ def project[Bs: IntTuple, N: IntVar](
 def backproject[Bs: IntTuple, N: IntVar](
     intrinsics: Tensor[[*Bs, 3, 3]], pixels: Tensor[[*Bs, N, 2]], depth: Tensor[[*Bs, N]]
 ) -> Tensor[[*Bs, N, 3]]:
-    """Camera-frame points at the given z-depth along each pixel's ray."""
+    """Camera-frame points at the given z-depth along each pixel's ray (ideal pinhole):
+    `X = z · ((u − cx)/fx, (v − cy)/fy, 1)`."""
 
     focal, centre = intrinsics[..., None, [0, 1], [0, 1]], intrinsics[..., None, :2, 2]
     rays = torch.cat(((pixels - centre) / focal, torch.ones_like(pixels[..., :1])), -1)
@@ -124,9 +131,10 @@ def _newton_step[Bs: IntTuple, N: IntVar](
 
 
 def fit_intrinsics[N: IntVar](
-    points: Tensor[[N, 3]], pixels: Tensor[[N, 2]], weight: Tensor[[N]]
-) -> Tensor[[3, 3]]:
-    """Weighted least squares of `x = fx · X/Z + cx` (and y) from camera-frame points.
+    points: Tensor[[N, *XYZ]], pixels: Tensor[[N, *UV]], weight: Tensor[[N]]
+) -> Tensor[[*Mat3x3]]:
+    """Weighted least squares of `x = fx · X/Z + cx` (and y) from camera-frame points:
+    `min Σ w_i (fx X_i/Z_i + cx − x_i)²` per axis, in fp64. Points in any unit (only X/Z enters).
 
     Ref: ARROW arXiv:2610.01314, App. C.3 (per-axis pinhole fit), here weighted.
     """

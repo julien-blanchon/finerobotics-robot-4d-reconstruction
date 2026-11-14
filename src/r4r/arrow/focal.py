@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.types import RGB
+
     from .models.arrow import ARROW
     from .models.camera_encoder import CameraEncoder
     from .models.encoder import SlotHook
@@ -32,10 +34,11 @@ SET_SIZE = 16
 GRID_STRIDE = 12  # native pixels between queried pixels
 
 
-def frame_focals[N: IntVar](
-    model: ARROW, frames: Tensor[[N, 3, int, int]], slot: SlotHook | None = None
+def frame_focals[N: IntVar, H: IntVar, W: IntVar](
+    model: ARROW, frames: Tensor[[N, *RGB, H, W]], slot: SlotHook | None = None
 ) -> Tensor[[N]]:
-    """fx in native pixels of each frame (uint8 frames of one camera)."""
+    """fx in native pixels of each frame (uint8 frames of one camera): the weighted fit of
+    `x = fx · X/Z + cx` to the frame's own-camera points (`camera.fit_intrinsics`)."""
 
     count, _, height, width = frames.shape
     device = next(model.parameters()).device
@@ -55,8 +58,8 @@ def frame_focals[N: IntVar](
     return focal
 
 
-def self_drafted_focal[N: IntVar](
-    model: ARROW, encoder: CameraEncoder, frames: Tensor[[N, 3, int, int]]
+def self_drafted_focal[N: IntVar, H: IntVar, W: IntVar](
+    model: ARROW, encoder: CameraEncoder, frames: Tensor[[N, *RGB, H, W]]
 ) -> tuple[float, float]:
     """(no-draft focal, focal with the no-draft focal as draft): medians over frames."""
 

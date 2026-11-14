@@ -15,15 +15,18 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.types import RGB, Mat3x3, Mat4x4
+
     from .priors import CameraPrior, DatasetPriors
 
 
 @dataclass(frozen=True, slots=True)
 class JointMap:
-    """Description joint `name` ← state column `index`, optionally rescaled linearly.
+    """Description joint `name` ← state column `index`, optionally rescaled linearly:
+    `q = t0 + (sign · x − s0) · (t1 − t0) / (s1 − s0)`, `source = (s0, s1)`, `target = (t0, t1)`.
 
-    `source` → `target` maps a column range onto the joint range (e.g. a gripper command in
-    [0, 1] onto finger travel in metres); `sign` flips the column first.
+    Maps a column range onto the joint range (e.g. a gripper command in [0, 1] onto finger
+    travel in metres); without a range, `q = sign · x`.
     """
 
     name: str
@@ -36,30 +39,31 @@ class JointMap:
 @dataclass(frozen=True, slots=True)
 class CameraStream[T: IntVar, H: IntVar, W: IntVar]:
     name: str
-    frames: Tensor[[T, 3, H, W]]  # uint8 RGB (no frames when not decoded: T = 0)
+    frames: Tensor[[T, *RGB, H, W]]  # uint8 RGB (no frames when not decoded: T = 0)
     role: str  # wrist, exo, ego, other
     moving: bool  # on a moving body (static: fixed in the world)
     mount: str | None  # link it is rigid on, when known
     side: str | None  # left, right, center (metadata, used as a sanity check)
     prior: CameraPrior
     # Known intrinsics of this episode at the video resolution (per-episode table), if any
-    intrinsics: Tensor[[3, 3]] | None = None
+    intrinsics: Tensor[[*Mat3x3]] | None = None
     # Recorded pose in this episode (OpenCV axes), if any: a static camera's pose in the base
     # frame, a moving camera's mount on its link
-    pose: Tensor[[4, 4]] | None = None
+    pose: Tensor[[*Mat4x4]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class Episode[T: IntVar, S: IntVar]:
+class Episode[T: IntVar, NState: IntVar]:
     name: str
     fps: float
-    state: Tensor[[T, S]]
+    state: Tensor[[T, NState]]
     joints: tuple[JointMap, ...]
     robot: Path  # URDF or MJCF
-    cameras: tuple[CameraStream, ...]
+    # Frames per camera: T when decoded, 0 when not (image sizes differ between cameras)
+    cameras: tuple[CameraStream[int, int, int], ...]
     priors: DatasetPriors
     # Which setup (e.g. recording station) the episode belongs to, when the dataset says
     station: str | None = None
     # A mobile base's recorded motion since the first timestep, in its own frame [T, 4, 4]
     # (from the priors' `base_odometry`), the start of its per-frame pose
-    base_motion: Tensor[[T, 4, 4]] | None = None
+    base_motion: Tensor[[T, *Mat4x4]] | None = None

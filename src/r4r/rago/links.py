@@ -18,6 +18,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import einops
 import torch
 
 from r4r.geometry import alignment, se3
@@ -26,6 +27,8 @@ from r4r.geometry.epipolar import relative_rotations
 if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
+
+    from r4r.types import UV, XYZ, Mat3x3, Mat4x4
 
     from .klt import VideoTracks
 
@@ -50,7 +53,9 @@ class BodyEvidence:
 
 
 def body_evidence[T: IntVar, L: IntVar](
-    video: VideoTracks, world_from_body: Tensor[[T, L, 4, 4]], intrinsics: Tensor[[3, 3]]
+    video: VideoTracks[int],
+    world_from_body: Tensor[[T, L, *Mat4x4]],
+    intrinsics: Tensor[[*Mat3x3]],
 ) -> BodyEvidence:
     """Still share and body ranking of one camera (focal searched around `intrinsics`)."""
 
@@ -81,7 +86,7 @@ def body_evidence[T: IntVar, L: IntVar](
     start, end = torch.tensor(times).T
     # Body motion b_from_a in its own frame, like the camera rotations below
     motion = se3.inverse(se3.inverse(world_from_body[start]) @ world_from_body[end])
-    body_log = se3.so3_log(motion[..., :3, :3].double().cpu())  # [P, L, 3]
+    body_log = se3.so3_log(motion[..., :3, :3].double().cpu())  # [M, L, 3]
     best = None
     for factor in FOCAL_FACTORS.tolist():
         k = intrinsics.double().clone()
@@ -106,23 +111,24 @@ def body_evidence[T: IntVar, L: IntVar](
     )
 
 
-def _residuals[P: IntVar, L: IntVar](
-    camera_log: Tensor[[P, 3]], body_log: Tensor[[P, L, 3]]
+def _residuals[M: IntVar, L: IntVar](
+    camera_log: Tensor[[M, *XYZ]], body_log: Tensor[[M, L, *XYZ]]
 ) -> Tensor[[L]]:
-    """Per body: median ‖log R_A − R_X log R_B‖ for the best R_X (rad)."""
+    """Per body: `median_m ‖R_X a_m − b_m‖` (rad) over frame pairs m, with `a = log R_camera`,
+    `b = log R_body` and the best `R_X = argmax_R Σ_m b_mᵀ R a_m` (closest rotation)."""
 
     keep = camera_log.norm(dim=-1) > MIN_ANGLE
     camera_log, body_log = camera_log[keep], body_log[keep]
-    covariance = torch.einsum("pi,plj->lij", camera_log, body_log)
+    covariance = einops.einsum(camera_log, body_log, "m i, m l j -> l i j")
     rotation = alignment.closest_rotation(covariance)
-    predicted = torch.einsum("lij,pj->pli", rotation, camera_log)
+    predicted = einops.einsum(rotation, camera_log, "l i j, m j -> m l i")
     return (predicted - body_log).norm(dim=-1).median(0).values
 
 
 def _pad(
-    pairs: list[tuple[Tensor, Tensor]], device: torch.device
-) -> tuple[Tensor[[int, int, 2]], Tensor[[int, int, 2]], Tensor[[int, int]]]:
-    """Pairs of matched pixels, subsampled to `MAX_POINTS` and padded into batches."""
+    pairs: list[tuple[Tensor[[int, *UV]], Tensor[[int, *UV]]]], device: torch.device
+) -> tuple[Tensor[[int, int, *UV]], Tensor[[int, int, *UV]], Tensor[[int, int]]]:
+    """Pairs of matched pixels `[M, N]`, subsampled to N ≤ `MAX_POINTS` and padded (mask)."""
 
     generator = torch.Generator().manual_seed(0)
     n = min(MAX_POINTS, max(len(a) for a, _ in pairs))

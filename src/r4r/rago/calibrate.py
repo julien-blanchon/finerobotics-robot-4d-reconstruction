@@ -10,7 +10,9 @@ factors within its range and the bundle keeps it there. Its distortion (`Tracks.
 refined by the bundle within its prior. A setup (episodes sharing one mount)
 is calibrated episode by episode first: the mount most episodes agree with is the
 consensus, disagreeing episodes are set aside, and one bundle over the agreeing episodes
-(more motion: it pins down what one short episode leaves loose) gives the answer.
+(more motion: it pins down what one short episode leaves loose) gives the answer. Episodes i
+and j agree when `Δ = M_i⁻¹ M_j` has `‖t_Δ‖ < agreement[0]` (m) and `‖log R_Δ‖ < agreement[1]`
+(rad); the consensus is the episode with most agreeing (ties: lowest score).
 """
 
 from __future__ import annotations
@@ -29,7 +31,10 @@ from .klt import KLTConfig, VideoTracks, klt_tracks
 from .search import SearchConfig, search_mount
 
 if TYPE_CHECKING:
+    from shape_extensions import IntVar
     from torch import Tensor
+
+    from r4r.types import RGB, Mat3x3, Mat4x4, Scalar
 
     from .lens import Lens
     from .robot import Robot
@@ -47,7 +52,8 @@ class FitConfig:
     # Video/joint-state offsets tried (frames; state of frame t taken from t + shift): a
     # diagnostic for writing a dataset's priors (its `state_shift`), not run by default
     shifts: tuple[int, ...] = (0,)
-    shift_iterations: int = 100
+    shift_iterations: int = 100  # Adam steps per tried shift
+    shift_lm_iterations: int = 10  # LM iterations (one round) per tried shift
     # Episodes agree on a mount within these (m, rad)
     agreement: tuple[float, float] = (0.02, math.radians(2.0))
 
@@ -55,10 +61,10 @@ class FitConfig:
 @dataclass(frozen=True, slots=True)
 class MountFit:
     body: int
-    body_from_camera: Tensor[[4, 4]]
-    intrinsics: Tensor[[3, 3]]
+    body_from_camera: Tensor[[*Mat4x4]]
+    intrinsics: Tensor[[*Mat3x3]]
     # Its lens with the fitted distortion (None: an ideal pinhole)
-    lens: Lens | None
+    lens: Lens[1] | None
     # Robust score (dropped tracks at their capped static-world fit), median reprojection (px)
     score: float
     median_error: float
@@ -72,19 +78,19 @@ class MountFit:
 
 @dataclass(frozen=True, slots=True)
 class SetupFit:
-    # Each episode on its own, which agree with the consensus, and the pooled fit over those
+    # Each episode on its own, which agree with the consensus (mask), and the pooled fit
     episodes: tuple[MountFit, ...]
     agree: Tensor[[int]]
     fit: MountFit
 
 
-def video_tracks(
-    frames: Tensor[[int, 3, int, int]],
-    intrinsics: Tensor[[3, 3]],
+def video_tracks[T: IntVar, H: IntVar, W: IntVar](
+    frames: Tensor[[T, *RGB, H, W]],
+    intrinsics: Tensor[[*Mat3x3]],
     config: KLTConfig,
-    found: VideoTracks | None = None,
-    lens: Lens | None = None,
-) -> Tracks:
+    found: VideoTracks[int] | None = None,
+    lens: Lens[1] | None = None,
+) -> Tracks[int, T, 1]:
     """KLT tracks of one camera's video (one view per frame); `found`: already tracked;
     `lens` of that one camera."""
 
@@ -101,12 +107,12 @@ def video_tracks(
     )
 
 
-def fit_moving_camera(
-    robot: Robot,
-    episodes: list[tuple[Tensor[[int, int]], Tracks]],
+def fit_moving_camera[NQ: IntVar](
+    robot: Robot[int, int, int],
+    episodes: list[tuple[Tensor[[int, NQ]], Tracks[int, int, 1]]],
     camera: str,
     bodies: tuple[int, ...],
-    intrinsics: Tensor[[3, 3]],
+    intrinsics: Tensor[[*Mat3x3]],
     config: FitConfig,
     focal_range: float | None = None,
 ) -> MountFit:
@@ -142,15 +148,15 @@ def fit_moving_camera(
     return replace(fit, body_scores=found.scores.unflatten(0, (len(bodies), per_body)).amin(1))
 
 
-def refine(
-    robot: Robot,
-    episodes: list[tuple[Tensor[[int, int]], Tracks]],
+def refine[NQ: IntVar](
+    robot: Robot[int, int, int],
+    episodes: list[tuple[Tensor[[int, NQ]], Tracks[int, int, 1]]],
     camera: str,
     body: int,
-    body_from_camera: Tensor[[4, 4]],
-    intrinsics: Tensor[[3, 3]],
+    body_from_camera: Tensor[[*Mat4x4]],
+    intrinsics: Tensor[[*Mat3x3]],
     config: FitConfig,
-    unit: Tensor[[]],
+    unit: Scalar,
     focal_range: float | None = None,
 ) -> MountFit:
     """Bundle from a known start (and, when asked, the video/joint-state offset scores).
@@ -177,18 +183,24 @@ def refine(
     start = body_from_camera[None]
     result = bundle_adjust(on_body, qpos, tracks, names, start, bundle, pixel_unit, episode)
 
-    short = replace(bundle, iterations=config.shift_iterations)
     refined = replace(tracks, intrinsics=result.intrinsics, lens=result.lens)
     starts = result.body_from_camera
-    shift_scores = torch.tensor(
-        [
-            bundle_adjust(
-                on_body, shifted(episodes, s), refined, names, starts, short, pixel_unit
-            ).score
-            for s in config.shifts
-        ]
-    )
-    shift = config.shifts[int(shift_scores.argmin())]
+    if len(config.shifts) == 1:  # nothing to compare
+        shift, shift_scores = config.shifts[0], torch.tensor([result.score])
+    else:
+        # Short bundles from the fit, to rank the offsets: `shift_iterations` Adam steps, or
+        # one LM round of `shift_lm_iterations`
+        lm = replace(bundle.lm, rounds=1, iterations=config.shift_lm_iterations)
+        short = replace(bundle, iterations=config.shift_iterations, lm=lm)
+        shift_scores = torch.tensor(
+            [
+                bundle_adjust(
+                    on_body, shifted(episodes, s), refined, names, starts, short, pixel_unit
+                ).score
+                for s in config.shifts
+            ]
+        )
+        shift = config.shifts[int(shift_scores.argmin())]
     if shift != 0:
         result = bundle_adjust(
             on_body, shifted(episodes, shift), refined, names, starts, bundle, pixel_unit, episode
@@ -207,12 +219,12 @@ def refine(
     )
 
 
-def fit_setup(
-    robot: Robot,
-    episodes: list[tuple[Tensor[[int, int]], Tracks]],
+def fit_setup[NQ: IntVar](
+    robot: Robot[int, int, int],
+    episodes: list[tuple[Tensor[[int, NQ]], Tracks[int, int, 1]]],
     camera: str,
     bodies: tuple[int, ...],
-    intrinsics: Tensor[[3, 3]],
+    intrinsics: Tensor[[*Mat3x3]],
     config: FitConfig,
     focal_range: float | None = None,
 ) -> SetupFit:
@@ -261,9 +273,9 @@ def fit_setup(
     return SetupFit(tuple(single), agree, pooled)
 
 
-def pool(
-    episodes: list[tuple[Tensor[[int, int]], Tracks]],
-) -> tuple[Tensor[[int, int]], Tracks, Tensor[[int]]]:
+def pool[NQ: IntVar](
+    episodes: list[tuple[Tensor[[int, NQ]], Tracks[int, int, 1]]],
+) -> tuple[Tensor[[int, NQ]], Tracks[int, int, 1], Tensor[[int]]]:
     """Concatenate episodes: joint positions, tracks with distinct ids and view numbers, and
     the episode of each timestep."""
 
@@ -303,8 +315,11 @@ def pool(
     )
 
 
-def shifted(episodes: list[tuple[Tensor[[int, int]], Tracks]], shift: int) -> Tensor[[int, int]]:
-    """Concatenated joint positions, each episode's frame t taken from t + shift (clamped)."""
+def shifted[NQ: IntVar](
+    episodes: list[tuple[Tensor[[int, NQ]], Tracks[int, int, 1]]], shift: int
+) -> Tensor[[int, NQ]]:
+    """Concatenated joint positions, each episode's frame t taken from t + shift:
+    `q'_t = q_clamp(t + shift, 0, T − 1)`."""
 
     parts = []
     for q, _ in episodes:

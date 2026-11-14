@@ -3,8 +3,7 @@
 Rows are moments of the episode. Each row shows every camera's frame, then the robot's
 skeleton (body origins joined to their parents, from forward kinematics) in three
 orthographic views of the base frame: top (x→right, y→up), side (x→right, z→up) and front
-(y→left, z→up). Bodies carrying a declared camera, branch points and leaves are labelled;
-camera frusta are drawn for mounts given in `mounts`.
+(y→left, z→up). Bodies carrying a declared camera, branch points and leaves are labelled.
 """
 
 from __future__ import annotations
@@ -15,32 +14,26 @@ import cv2
 import numpy as np
 import torch
 
-from r4r.geometry import se3
 from r4r.rago.kinematics import forward_kinematics
 from r4r.rago.robot import qpos_from_state
 
 if TYPE_CHECKING:
+    from torch import Tensor
+
     from r4r.data.episode import Episode
     from r4r.rago.robot import Robot
+    from r4r.types import RGB, XYZ
 
 TILE = 240  # pixels per camera tile side
 VIEW = 360  # pixels per skeleton view side
-LABEL_GAP = 12  # pixels: a label is skipped when one is already this close
-FRUSTUM_DEPTH = 0.1  # metres
 VIEWS = (("top", 0, 1), ("side", 0, 2), ("front", 1, 2))  # (name, horizontal axis, vertical axis)
-WHITE, GREY, YELLOW, CYAN = (255, 255, 255), (130, 130, 130), (255, 210, 0), (0, 220, 255)
+WHITE, GREY, YELLOW = (255, 255, 255), (130, 130, 130), (255, 210, 0)
 
 
 def contact_sheet(
-    episode: Episode,
-    robot: Robot,
-    moments: int = 4,
-    mounts: dict[str, tuple[int, torch.Tensor]] | None = None,
+    episode: Episode[int, int], robot: Robot[int, int, int], moments: int = 4
 ) -> np.ndarray:
-    """RGB image: one row per moment, camera tiles then the three skeleton views.
-
-    `mounts` maps camera names to (body, body_from_camera) to draw their frusta.
-    """
+    """RGB image: one row per moment, camera tiles then the three skeleton views."""
 
     qpos = qpos_from_state(robot, episode.state, episode.joints)
     world_from_body = forward_kinematics(robot, qpos).double().cpu()
@@ -63,7 +56,7 @@ def contact_sheet(
             tile = np.zeros((VIEW, VIEW, 3), np.uint8)
 
             def to_pixel(
-                point: torch.Tensor,
+                point: Tensor[[*XYZ]],
                 h: int = horizontal,
                 v: int = vertical,
                 mirror: bool = name == "front",
@@ -97,22 +90,6 @@ def contact_sheet(
                     1,
                     cv2.LINE_AA,
                 )
-            for camera, (body, body_from_camera) in (mounts or {}).items():
-                pose = world_from_body[t, body] @ body_from_camera.double().cpu()
-                corners = torch.tensor(
-                    [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]], dtype=torch.float64
-                )
-                tips = se3.transform_points(
-                    pose,
-                    corners * FRUSTUM_DEPTH * torch.tensor([0.6, 0.4, 1.0], dtype=torch.float64),
-                )
-                apex = to_pixel(pose[:3, 3])
-                for i in range(4):
-                    cv2.line(tile, apex, to_pixel(tips[i]), CYAN, 1, cv2.LINE_AA)
-                    cv2.line(
-                        tile, to_pixel(tips[i]), to_pixel(tips[(i + 1) % 4]), CYAN, 1, cv2.LINE_AA
-                    )
-                cv2.putText(tile, camera, apex, cv2.FONT_HERSHEY_PLAIN, 0.7, CYAN, 1, cv2.LINE_AA)
             cv2.putText(
                 tile, f"{name} t={t}", (4, 12), cv2.FONT_HERSHEY_PLAIN, 0.8, YELLOW, 1, cv2.LINE_AA
             )
@@ -123,7 +100,7 @@ def contact_sheet(
     return np.concatenate(rows, 0)
 
 
-def _camera_tile(frame: torch.Tensor | None, name: str) -> np.ndarray:
+def _camera_tile(frame: Tensor[[*RGB, int, int]] | None, name: str) -> np.ndarray:
     tile = np.zeros((TILE, TILE, 3), np.uint8)
     if frame is not None:
         image = frame.permute(1, 2, 0).cpu().numpy()
@@ -137,7 +114,7 @@ def _camera_tile(frame: torch.Tensor | None, name: str) -> np.ndarray:
     return tile
 
 
-def _labelled_bodies(robot: Robot, episode: Episode) -> dict[int, str]:
+def _labelled_bodies(robot: Robot[int, int, int], episode: Episode[int, int]) -> dict[int, str]:
     """Bodies worth a label, by priority: declared camera links (marked *), leaves, branches."""
 
     children: dict[int, int] = {}

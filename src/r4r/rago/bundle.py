@@ -4,7 +4,14 @@ Every view's pose is `world_from_body(q_t) · mount` (hard constraint, metric by
 Each track's 3D point is triangulated in closed form from its observations' rays under the
 current poses (weighted least squares on the rays: no point parameters, differentiable), then
 reprojected into every view that saw it. We minimise a robust reprojection error over the free
-mounts, the focal lengths and, when the lenses say so, their distortion.
+mounts, the focal lengths and, when the lenses say so, their distortion:
+
+    E = Σ_m w_m ρ(‖r_m‖² / δ²) / Σ_m w_m + Σ ‖e_prior‖² / V,    ρ(s) = log(1 + s)
+    r_m = (π_K(P_m⁻¹ X_track(m)) − p_m) / u_cam(m)
+
+with `P_m` the view's pose (`world_from_view`, in the track's body frame), `π_K` the lens
+projection, `p_m` the observed pixel, `u` the camera's pixel unit (its initial focal: `r` is
+in normalised image units), `δ` = `cauchy` and `V` the number of views.
 
 A static track lives in the world frame. A moving track (a point on the robot, or on a grasped
 object) is rigid with some link: expressed in that link's frame its point is constant, so the
@@ -41,6 +48,8 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.types import UV, Mat3x3, Mat4x4
+
     from .lens import Lens
     from .robot import Robot
     from .tracks import Tracks
@@ -70,12 +79,11 @@ class BundleConfig:
     cauchy: float = 0.01
     # Focal-length prior (log space): ~0.3 from ARROW, ~0.01 when the dataset knows it
     focal_std: float = 0.3
-    # Moving tracks: re-attach to links every this many iterations; drop a track whose mean
-    # robust cost on its best link exceeds `outlier_cost` (cauchy(e) = log(1 + (e/δ)²))
-    use_moving: bool = True
     # Tracks may attach to moving links (the robot as a calibration target); False: the
     # static world only (calibrating moving cameras, where links invite spurious fits)
     attach_links: bool = True
+    # Moving tracks: re-attach to links every this many iterations; drop a track whose mean
+    # robust cost on its best link exceeds `outlier_cost` (cauchy(e) = log(1 + (e/δ)²))
     reassign_every: int = 100
     outlier_cost: float = math.log1p(9.0)  # mean error ≈ 3δ
     # "lm": Levenberg–Marquardt (`solver.py`) when every free row is dataset or episode scope,
@@ -85,10 +93,12 @@ class BundleConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class BundleResult:
-    body_from_camera: Tensor[[int, 4, 4]]
-    intrinsics: Tensor[[int, 3, 3]]
-    world_from_view: Tensor[[int, 4, 4]]
+class BundleResult[C: IntVar, V: IntVar, T: IntVar, L: IntVar]:
+    """A fit of `C` cameras over `V` views, `T` timesteps of a robot with `L` bodies."""
+
+    body_from_camera: Tensor[[C, *Mat4x4]]
+    intrinsics: Tensor[[C, *Mat3x3]]
+    world_from_view: Tensor[[V, *Mat4x4]]
     # Per iteration: total, reprojection, prior
     history: Tensor[[int, 3]]
     # Median reprojection error at the end (pixels), and the fraction of inlier observations
@@ -98,46 +108,46 @@ class BundleResult:
     # comparable between runs from different starts (the data term averages over kept ones)
     score: float
     # The same score per camera (over its own observations)
-    camera_score: Tensor[[int]]
+    camera_score: Tensor[[C]]
     # Per track (dense ids): body it is attached to (WORLD when static), -1 when dropped
     track_body: Tensor[[int]]
     # Scoped unknowns: `body_from_camera` per camera and timestep, and `world_from_body` with
     # the free bodies' corrections, per timestep and body
-    mounts_at: Tensor[[int, int, 4, 4]]
-    world_from_body: Tensor[[int, int, 4, 4]]
+    mounts_at: Tensor[[C, T, *Mat4x4]]
+    world_from_body: Tensor[[T, L, *Mat4x4]]
     # Kinematic refinements (zero where held): offset per joint (rad or m), time offset
     # (timesteps: the joint values of frame t are read at t + τ)
     joint_offset: Tensor[[int]]
     time_offset: float
     # Distortion per camera with its corrections (None: ideal pinholes)
-    lens: Lens | None = None
+    lens: Lens[C] | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class Observations:
-    """Observations with dense track ids `0..count-1`, ready for `reprojection`."""
+class Observations[M: IntVar]:
+    """`M` observations with dense track ids `0..count-1`, ready for `reprojection`."""
 
-    view: Tensor[[int]]
-    pixel: Tensor[[int, 2]]
-    weight: Tensor[[int]]
-    track: Tensor[[int]]
+    view: Tensor[[M]]
+    pixel: Tensor[[M, *UV]]
+    weight: Tensor[[M]]
+    track: Tensor[[M]]
     count: int
 
 
-def bundle_adjust(
-    robot: Robot,
-    qpos: Tensor[[int, int]],
-    tracks: Tracks,
+def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
+    robot: Robot[L, int, int],
+    qpos: Tensor[[T, int]],
+    tracks: Tracks[M, V, C],
     names: tuple[str, ...],
-    initial_mounts: Tensor[[int, 4, 4]],
+    initial_mounts: Tensor[[C, *Mat4x4]],
     config: BundleConfig,
-    pixel_unit: Tensor[[int]] | None = None,
-    episode: Tensor[[int]] | None = None,
-    start_at: Tensor[[int, int, 4, 4]] | None = None,
-    bodies_at: Tensor[[int, int, 4, 4]] | None = None,
+    pixel_unit: Tensor[[C]] | None = None,
+    episode: Tensor[[T]] | None = None,
+    start_at: Tensor[[C, T, *Mat4x4]] | None = None,
+    bodies_at: Tensor[[int, T, *Mat4x4]] | None = None,
     kinematic: KinematicFreedom | None = None,
     known_focal: tuple[bool, ...] | None = None,
-) -> BundleResult:
+) -> BundleResult[C, V, T, L]:
     """Refine free mounts and focal lengths by robust reprojection of triangulated tracks.
 
     Errors are in pixels per `pixel_unit` (per camera; default: its initial focal length).
@@ -150,11 +160,8 @@ def bundle_adjust(
     """
 
     t = tracks
-    keep = ~t.moving | config.use_moving
-    _, track = torch.unique(t.track[keep], return_inverse=True)
-    obs = Observations(
-        t.view[keep], t.pixel[keep].to(qpos), t.weight[keep].to(qpos), track, int(track.max()) + 1
-    )
+    _, track = torch.unique(t.track, return_inverse=True)
+    obs = Observations(t.view, t.pixel.to(qpos), t.weight.to(qpos), track, int(track.max()) + 1)
     rig = Rig(
         robot,
         qpos,
@@ -172,7 +179,7 @@ def bundle_adjust(
         t.lens,
     )
     track_moving = torch.zeros(obs.count, dtype=torch.bool, device=qpos.device)
-    track_moving[obs.track[t.moving[keep]]] = True
+    track_moving[obs.track[t.moving]] = True
     candidates = moving_bodies(rig) if config.attach_links else []
 
     def assign() -> Tensor[[int]]:
@@ -205,10 +212,10 @@ def bundle_adjust(
     return _result(rig, t, obs, names, config, assign, torch.stack(history))
 
 
-def _levenberg_marquardt(
-    rig: Rig,
-    t: Tracks,
-    obs: Observations,
+def _levenberg_marquardt[M: IntVar](
+    rig: Rig[int, int, int],
+    t: Tracks[int, int, int],
+    obs: Observations[M],
     assign: Callable[[], Tensor[[int]]],
     track_body: Tensor[[int]],
     config: BundleConfig,
@@ -217,11 +224,11 @@ def _levenberg_marquardt(
 
     state = {"body": track_body[obs.track]}
 
-    def residual_fn() -> tuple[Tensor[[int, 2]], Tensor[[int]]]:
+    def residual_fn() -> tuple[Tensor[[M, *UV]], Tensor[[M]]]:
         difference, valid, _ = residuals(rig, t, obs, state["body"].clamp_min(WORLD))
         return difference, valid
 
-    def weight_fn(valid: Tensor[[int]]) -> Tensor[[int]]:
+    def weight_fn(valid: Tensor[[M]]) -> Tensor[[M]]:
         return torch.where(state["body"] >= 0, obs.weight, 0.0) * valid
 
     def reassign() -> None:
@@ -234,15 +241,15 @@ def _levenberg_marquardt(
     )
 
 
-def _result(
-    rig: Rig,
-    t: Tracks,
-    obs: Observations,
+def _result[V: IntVar, C: IntVar, T: IntVar, L: IntVar](
+    rig: Rig[T, L, C],
+    t: Tracks[int, V, C],
+    obs: Observations[int],
     names: tuple[str, ...],
     config: BundleConfig,
     assign: Callable[[], Tensor[[int]]],
     history: Tensor[[int, 3]],
-) -> BundleResult:
+) -> BundleResult[C, V, T, L]:
     with torch.no_grad():
         track_body = assign()
         body = track_body[obs.track]
@@ -276,7 +283,7 @@ def _result(
         )
 
 
-def mounts_per_time(rig: Rig) -> Tensor[[int, int, 4, 4]]:
+def mounts_per_time[T: IntVar, C: IntVar](rig: Rig[T, int, C]) -> Tensor[[C, T, *Mat4x4]]:
     """`body_from_camera [C, T]` with each timestep's scoped correction."""
 
     steps = rig.kinematics.shape[0]
@@ -293,9 +300,9 @@ def cauchy[K: IntVar](error: Tensor[[K]], scale: float) -> Tensor[[K]]:
 
 
 def attach(
-    rig: Rig,
-    tracks: Tracks,
-    obs: Observations,
+    rig: Rig[int, int, int],
+    tracks: Tracks[int, int, int],
+    obs: Observations[int],
     track_moving: Tensor[[int]],
     candidates: list[int],
     scale: float,
@@ -338,7 +345,7 @@ def attach(
     return track_body
 
 
-def moving_bodies(rig: Rig) -> list[int]:
+def moving_bodies(rig: Rig[int, int, int]) -> list[int]:
     """Bodies whose pose changes during the episode."""
 
     poses = rig.kinematics
@@ -346,12 +353,12 @@ def moving_bodies(rig: Rig) -> list[int]:
     return moved.nonzero()[:, 0].tolist()
 
 
-def reprojection(
-    rig: Rig,
-    tracks: Tracks,
-    obs: Observations,
-    body: Tensor[[int]],
-) -> tuple[Tensor[[int]], Tensor[[int]], Tensor[[int]]]:
+def reprojection[M: IntVar](
+    rig: Rig[int, int, int],
+    tracks: Tracks[int, int, int],
+    obs: Observations[M],
+    body: Tensor[[M]],
+) -> tuple[Tensor[[M]], Tensor[[M]], Tensor[[int]]]:
     """Per observation: reprojection error (`residuals`' length) and whether it is usable;
     per track: ray spread."""
 
@@ -359,14 +366,14 @@ def reprojection(
     return torch.where(valid, difference.norm(dim=-1), 0.0), valid, spread
 
 
-def residuals(
-    rig: Rig,
-    tracks: Tracks,
-    obs: Observations,
-    body: Tensor[[int]],
-) -> tuple[Tensor[[int, 2]], Tensor[[int]], Tensor[[int]]]:
-    """Per observation: reprojection residual (projected − observed, per pixel unit) and
-    whether it is usable; per track: ray spread.
+def residuals[M: IntVar](
+    rig: Rig[int, int, int],
+    tracks: Tracks[int, int, int],
+    obs: Observations[M],
+    body: Tensor[[M]],
+) -> tuple[Tensor[[M, *UV]], Tensor[[M]], Tensor[[int]]]:
+    """Per observation: reprojection residual `r` (module doc: projected − observed, per pixel
+    unit) and whether it is usable; per track: ray spread `1 − ‖mean unit ray‖`.
 
     Each observation's ray is expressed in the frame of `body[m]` at its view's time (the world
     body for static tracks), where its track's point is constant.

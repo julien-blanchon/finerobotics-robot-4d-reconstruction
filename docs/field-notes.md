@@ -51,6 +51,16 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - Upstream annotations can replace missing camera fields: InternData-M1 publishes the 2D
     projections of a few known 3D points per camera; solving the projection from six points
     gives exact intrinsics and poses.
+- **Hunt the upstream for calibration before solving:** RealSource-World's upstream
+  `meta/camera.json` has per-episode hand-eye and K (ready with no solve); HRDexDB ships
+  `C2R.npy` + camera parameters. Hand-eye names don't say which frame is which: render the
+  transform and its inverse on the candidate link and pick by overlay.
+- **Put a head camera on the link its calibration refers to** (e.g. the arm base): unrecorded
+  head and lift joints then don't matter.
+- **Check recorded extrinsics over all episodes, not the first few:** AXIS re-places the camera
+  in a third of its episodes. **Count frozen-state episodes** before calibrating (robomind
+  ur5e-real: the arm state is frozen in 89% of episodes).
+- **Read the description's header comments:** petaldex's says its arm kinematics are invented.
 - **Measure, don't eyeball, image geometry:** robomind2's letterbox looked asymmetric in a
   thumbnail and is symmetric when measured. Read the data-collection code for resizing
   (FurnitureBench squashes the wrist to 224x224 but crops the front camera).
@@ -179,6 +189,9 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - From one camera's video, per-episode fits scatter: pool episodes, and fix timing first.
   - The focal is rarely the cause of failures: the true focal rescues only 2 of 12 blind
     failures. Unmodelled kinematics and orientation local minima are.
+- **Low stage-1 agreement (1 of 4 episodes) is the early failure signal:** residuals of 1.1–2.6 px
+  came with wrong geometry several times. A wrist prior with both position and orientation is
+  frozen by `r4r rig`: a rough guess then poisons the static cameras (0.5 m off at 2.6 px).
 - **When the wrist mount search fails** (SO arms; humanoid hands filling the view): render
   candidate mounts over a real wrist frame and keep the one whose drawn jaws or hands sit on the
   real ones. Rendering the roll variants of a description's camera frame side by side works

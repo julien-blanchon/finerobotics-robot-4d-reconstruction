@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import colorsys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import cv2
 import mujoco
@@ -20,12 +20,44 @@ import numpy as np
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from torch import Tensor
+
+    from r4r.types import K1K2K3K4, Mat3x3, Mat4x4
+
 ALPHA = 0.45
 MAX_FACES = 4000  # per geom (decimated beyond)
 AXIS_LENGTH = 0.06  # metres, end-effector frames
 LABEL_HEIGHT = 28
 
 type Surface = tuple[int, np.ndarray, np.ndarray]  # body, vertices in its frame [V, 3], faces
+
+
+class Solution(TypedDict):
+    """Cameras and kinematics to draw, per camera `c` and timestep: `r4r rig --save` writes one
+    (`SavedSolution`), `r4r preview` builds one from the priors. The episodes' timesteps are
+    concatenated (`lengths`); a camera's pose is `world_from_body[t, camera_body[c]] @
+    mounts_at[c, t]`."""
+
+    dataset: str
+    names: tuple[str, ...]
+    lengths: list[int]
+    intrinsics: Tensor[[int, *Mat3x3]]
+    world_from_body: Tensor[[int, int, *Mat4x4]]
+    mounts_at: Tensor[[int, int, *Mat4x4]]
+    camera_body: list[int]
+    # Per episode, when recorded intrinsics change between episodes [E, C, 3, 3]
+    episode_intrinsics: NotRequired[Tensor[[int, int, *Mat3x3]]]
+    # Lens per camera (absent: ideal pinholes)
+    distortion: NotRequired[Tensor[[int, *K1K2K3K4]]]
+    fisheye: NotRequired[Tensor[[int]]]
+
+
+class SavedSolution(Solution):
+    """A `Solution` saved by `r4r rig --save`: which episodes, at which stride, how well."""
+
+    episodes: list[int]
+    stride: int
+    median_error: float
 
 
 def surfaces(model: mujoco.MjModel) -> list[Surface]:
@@ -131,7 +163,11 @@ def draw(
 ) -> np.ndarray:
     """`image` (RGB) with the robot's surfaces (one colour per body, translucent) and the
     frames of the bodies `frames` (RGB axes for x, y, z), projected through the camera's
-    `lens` (distortion coefficients [4] and whether it is a fisheye; None: ideal pinhole)."""
+    `lens` (distortion coefficients [4] and whether it is a fisheye; None: ideal pinhole).
+
+    A vertex `v` of body `b` lands at `p = π(K, camera_from_world · world_from_body[b] · v)`,
+    `π` the pinhole `(x/z, y/z)` or the lens model (`r4r.geometry.camera.project`), in pixels.
+    """
 
     camera_from_world = np.linalg.inv(world_from_camera)
     layer = image.copy()
@@ -185,7 +221,7 @@ def leaves(model: mujoco.MjModel) -> list[int]:
 
 
 def overlay_frames(
-    solution: dict,
+    solution: Solution,
     videos: dict[str, np.ndarray],
     model: mujoco.MjModel,
     episode_index: int,
@@ -211,7 +247,7 @@ def overlay_frames(
     distortion, fisheye = solution.get("distortion"), solution.get("fisheye")
     geoms, frames = surfaces(model), leaves(model)
     names = solution["names"]
-    widths = [round(v.shape[2] * height / v.shape[1]) // 2 * 2 for v in map(videos.get, names)]
+    widths = [round(v.shape[2] * height / v.shape[1]) // 2 * 2 for v in (videos[n] for n in names)]
     for t in times:
         tiles = []
         for c, name in enumerate(names):

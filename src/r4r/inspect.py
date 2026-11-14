@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from r4r.data.episode import Episode
+    from r4r.data.priors import CameraPrior
 
 # A state column "varies" beyond this standard deviation (its own units)
 VARYING = 1e-3
@@ -84,7 +85,7 @@ class Report:
         return "\n".join(lines)
 
 
-def inspect_episode(episode: Episode, root: Path) -> Report:
+def inspect_episode(episode: Episode[int, int], root: Path) -> Report:
     """The report of one episode (loaded with any `decode`, frames are not used)."""
 
     info = json.loads((root / "meta" / "info.json").read_text())
@@ -97,7 +98,7 @@ def inspect_episode(episode: Episode, root: Path) -> Report:
             side=c.side,
             moving=c.moving,
             mount=c.mount,
-            prior="none" if c.prior == type(c.prior)() else _describe(c.prior),
+            prior=_describe(c.prior) or "none",
         )
         for c in episode.cameras
     )
@@ -178,7 +179,9 @@ def inspect_episode(episode: Episode, root: Path) -> Report:
     )
 
 
-def _describe(prior: object) -> str:
+def _describe(prior: CameraPrior) -> str:
+    """The fields that differ from the defaults, `name=value, ...` (empty: none)."""
+
     default = type(prior)()
     fields = getattr(prior, "__slots__", ())
     return ", ".join(

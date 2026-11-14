@@ -8,9 +8,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import tyro
+
+if TYPE_CHECKING:
+    from torch import Tensor
+
+    from r4r.data.episode import CameraStream, Episode
+    from r4r.data.priors import CameraPrior, DatasetPriors
+    from r4r.rago.calibrate import FitConfig
+    from r4r.rago.lens import Lens
+    from r4r.rago.rig import KinematicFreedom
+    from r4r.rago.robot import Robot
+    from r4r.rago.stages import RigEpisode, RigFit
+    from r4r.types import Mat3x3, Mat4x4
+    from r4r.viz.overlay import SavedSolution, Solution
 
 DELIVERY = Path("/e/data1/datasets/playground/mmlaion/guybrush/delivery")
 
@@ -18,6 +31,38 @@ DELIVERY = Path("/e/data1/datasets/playground/mmlaion/guybrush/delivery")
 def dataset_root(name: str) -> Path:
     path = Path(name)
     return path if path.is_absolute() else DELIVERY / path
+
+
+def pinhole_guess(focal: float, aspect: float, width: int, height: int) -> list[list[float]]:
+    """`K = [[f, 0, (W − 1)/2], [0, a·f, (H − 1)/2], [0, 0, 1]]`: a focal guess `f` (pixels),
+    pixel aspect `a = fy / fx`, the principal point at the image centre."""
+
+    return [[focal, 0, (width - 1) / 2], [0, focal * aspect, (height - 1) / 2], [0, 0, 1]]
+
+
+# Ranges written for a fitted mount without a measured spread (m, deg): indicative
+INDICATIVE_RANGES = (0.005, 1.0)
+
+
+def range_fields(metres: float, degrees: float) -> dict[str, float]:
+    """Priors ranges for a fitted pose from the spread of independent fits, floored at 2 mm
+    and 0.2 deg (what a fit can resolve)."""
+
+    return {
+        "position_range": round(max(metres, 0.002), 4),
+        "orientation_range_deg": round(max(degrees, 0.2), 3),
+    }
+
+
+def pose_fields(pose: Tensor[[*Mat4x4]]) -> dict[str, list[float]]:
+    """A pose as priors fields: `position` (m) and `orientation` (quaternion w, x, y, z)."""
+
+    from r4r.geometry import se3
+
+    return {
+        "position": [round(v, 5) for v in pose[:3, 3].tolist()],
+        "orientation": [round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()],
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +98,7 @@ class Links:
 
         from r4r.data.lerobot import load_episode
         from r4r.rago.kinematics import forward_kinematics
-        from r4r.rago.klt import KLTConfig, track_video
+        from r4r.rago.klt import KLTConfig, require_tracks, track_video
         from r4r.rago.links import body_evidence
         from r4r.rago.robot import load_robot, qpos_from_state
 
@@ -70,11 +115,11 @@ class Links:
             height, width = camera.frames.shape[-2:]
             focal = self.focal or 0.7 * width
             k = torch.tensor(
-                [[focal, 0, (width - 1) / 2], [0, focal, (height - 1) / 2], [0, 0, 1]],
-                dtype=torch.float64,
-                device=device,
+                pinhole_guess(focal, 1.0, width, height), dtype=torch.float64, device=device
             )
-            evidence = body_evidence(track_video(camera.frames, KLTConfig()), world_from_body, k)
+            found = track_video(camera.frames, KLTConfig())
+            require_tracks(found.track, camera.name, self.episode)
+            evidence = body_evidence(found, world_from_body, k)
             groups = "; ".join(
                 f"{residual:.2f}° "
                 + ", ".join(robot.body_names[b] for b in group[:3])
@@ -112,7 +157,7 @@ class Fit:
     # Store the result in the camera's priors (mount, focal, ranges from episode agreement)
     write: bool = False
 
-    def _config(self):  # noqa: ANN202
+    def _config(self) -> FitConfig:
         import math
         from dataclasses import replace
 
@@ -138,6 +183,7 @@ class Fit:
             refine,
             video_tracks,
         )
+        from r4r.rago.klt import require_tracks
         from r4r.rago.lens import lens_from_priors
         from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
 
@@ -152,9 +198,8 @@ class Fit:
         robot = load_robot(loaded[0].robot, cameras=(mount,), bodies=free).to(device, torch.float64)
         height, width = stream.frames.shape[-2:]
         focal = stream.prior.focal or self.focal or 0.7 * width
-        fy = focal * stream.prior.aspect
         k = torch.tensor(
-            [[focal, 0, (width - 1) / 2], [0, fy, (height - 1) / 2], [0, 0, 1]],
+            pinhole_guess(focal, stream.prior.aspect, width, height),
             dtype=torch.float64,
             device=device,
         )
@@ -163,10 +208,12 @@ class Fit:
         config = self._config()
         lens = lens_from_priors((stream.prior,), k)
         episodes = []
-        for e in loaded:
+        for number, e in zip(self.episodes, loaded, strict=True):
             frames = next(c for c in e.cameras if c.name == self.camera).frames
             qpos = qpos_from_state(robot, e.state.to(device), e.joints)
-            episodes.append((qpos, video_tracks(frames, k, config.klt, lens=lens)))
+            tracks = video_tracks(frames, k, config.klt, lens=lens)
+            require_tracks(tracks.track, self.camera, number)
+            episodes.append((qpos, tracks))
         ids = tuple(robot.body(b) for b in bodies)
         focal_range = stream.prior.focal_range if stream.prior.focal else None
         if stream.intrinsics is not None:
@@ -185,7 +232,7 @@ class Fit:
                 f"inliers {fit.inlier_fraction:.0%}"
             )
 
-        spread = (0.005, 1.0)  # ranges written for a single episode (m, deg): indicative
+        spread = INDICATIVE_RANGES
         if mount.body_from_camera is not None:
             # Known mount (priors): refine within its ranges, no search
             start = robot.body_from_camera[robot.camera(self.camera)]
@@ -223,16 +270,11 @@ class Fit:
                 f"  state shift scores ({scores}): best {fit.shift:+d} -> set state_shift in priors"
             )
         if self.write:
-            pose = fit.body_from_camera.cpu()
             values = {
                 "mount": "moving",
                 "link": robot.body_names[fit.body],
-                "position": [round(v, 5) for v in pose[:3, 3].tolist()],
-                "orientation": [
-                    round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
-                ],
-                "position_range": round(max(spread[0], 0.002), 4),
-                "orientation_range_deg": round(max(spread[1], 0.2), 3),
+                **pose_fields(fit.body_from_camera.cpu()),
+                **range_fields(*spread),
                 "focal": round(float(fit.intrinsics[0, 0]), 2),
                 "focal_range": focal_range if focal_range is not None else 0.0,
                 **distortion_values(fit.lens, 0, stream.prior),
@@ -248,16 +290,16 @@ class Fit:
 @dataclass(frozen=True, slots=True)
 class _RigInputs:
     root: Path
-    loaded: list
-    streams: tuple
+    loaded: list[Episode[int, int]]
+    streams: tuple[CameraStream[int, int, int], ...]
     names: tuple[str, ...]
-    robot: object
+    robot: Robot[int, int, int]
     device: str
-    intrinsics: object
-    episodes: list
+    intrinsics: Tensor[[int, *Mat3x3]]
+    episodes: list[RigEpisode]
     known_focal: tuple[bool, ...]
     known_mount: tuple[bool, ...]
-    lens: object
+    lens: Lens | None
 
 
 def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: float) -> _RigInputs:
@@ -290,8 +332,7 @@ def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: flo
         if c.intrinsics is not None:  # known for this episode (per-episode table)
             k.append(c.intrinsics.tolist())
             continue
-        f = c.prior.focal or focal * width
-        k.append([[f, 0, (width - 1) / 2], [0, f * c.prior.aspect, (height - 1) / 2], [0, 0, 1]])
+        k.append(pinhole_guess(c.prior.focal or focal * width, c.prior.aspect, width, height))
     intrinsics = torch.tensor(k, dtype=torch.float64, device=device)
     episodes = [
         RigEpisode(
@@ -352,15 +393,11 @@ class Rig:
 
         import torch
 
-        from r4r.data.priors import write_body, write_camera
-        from r4r.geometry import se3
         from r4r.matching import RoMaV2
         from r4r.rago.stages import RigConfig, calibrate_rig, spread
 
         rig = _prepare_rig(self.dataset, self.episodes, self.stride, self.focal)
-        root, loaded, streams = rig.root, rig.loaded, rig.streams
-        names, robot = rig.names, rig.robot
-        known_focal, known_mount = rig.known_focal, rig.known_mount
+        loaded, streams, names, robot = rig.loaded, rig.streams, rig.names, rig.robot
         model = RoMaV2.from_checkpoint(device=rig.device)
         config = replace(
             RigConfig(),
@@ -373,13 +410,12 @@ class Rig:
             rig.episodes,
             names,
             rig.intrinsics,
-            known_focal,
-            known_mount,
+            rig.known_focal,
+            rig.known_mount,
             model,
             config,
             rig.lens,
         )
-        episodes = rig.episodes
 
         free = sorted(robot.free_bodies, key=robot.body)
         disagreement = spread(fit.group_corrections)
@@ -387,12 +423,12 @@ class Rig:
         if config.kinematic is not None:
             _print_kinematics(fit, robot, self.stride)
         if self.save is not None:
-            solution = {
+            solution: SavedSolution = {
                 "dataset": self.dataset,
                 "episodes": list(self.episodes),
                 "stride": self.stride,
                 "names": names,
-                "lengths": [len(e.qpos) for e in episodes],
+                "lengths": [len(e.qpos) for e in rig.episodes],
                 "intrinsics": fit.intrinsics.cpu(),
                 "episode_intrinsics": fit.episode_intrinsics.detach().cpu(),
                 "world_from_body": fit.world_from_body.detach().float().cpu(),
@@ -406,67 +442,82 @@ class Rig:
             torch.save(solution, self.save)
             print(f"saved {self.save}")
         if self.write:
-            for c, stream in enumerate(streams):
-                values: dict[str, object] = {
-                    "focal": round(float(fit.intrinsics[c, 0, 0]), 2),
-                    "focal_range": stream.prior.focal_range if known_focal[c] else 0.0,
-                    **distortion_values(fit.lens, c, stream.prior),
-                }
-                if _focal_varies(fit, c):  # recorded per episode: no single focal to write
-                    del values["focal"], values["focal_range"]
-                prior = robot.free_cameras.get(stream.name)
-                if not stream.moving and prior is not None and prior.scope == "dataset":
-                    # A static camera fixed for the dataset: its pose in the base frame
-                    pose = fit.camera_poses[0, c].cpu()
-                    values |= {
-                        "mount": "static",
-                        "position": [round(v, 5) for v in pose[:3, 3].tolist()],
-                        "orientation": [
-                            round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
-                        ],
-                        "position_range": stream.prior.position_range
-                        if stream.prior.position is not None
-                        else 0.02,
-                        "orientation_range_deg": stream.prior.orientation_range_deg
-                        if stream.prior.position is not None
-                        else 2.0,
-                    }
-                if stream.moving and not known_mount[c]:
-                    pose = fit.mounts[c].cpu()
-                    values |= {
-                        "mount": "moving",
-                        "link": robot.body_names[robot.camera_body[robot.camera(stream.name)]],
-                        "position": [round(v, 5) for v in pose[:3, 3].tolist()],
-                        "orientation": [
-                            round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
-                        ],
-                    }
-                print(f"wrote {write_camera(root, stream.name, values, station_of(loaded))}")
-            for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
-                if robot.free_bodies[name].scope != "dataset":
-                    continue
-                pose = fit.body_corrections[b].cpu()
-                body = {
-                    "position": [round(v, 5) for v in pose[:3, 3].tolist()],
-                    "orientation": [
-                        round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
-                    ],
-                    # The range left: how much independent groups disagree
-                    "position_range": round(max(cm / 100, 0.002), 4),
-                    "orientation_range_deg": round(max(deg, 0.2), 3),
-                    "fitted": {"episodes": list(self.episodes), "groups": self.groups},
-                }
-                print(f"wrote {write_body(root, name, body, station_of(loaded))}")
+            _write_rig(fit, rig, free, disagreement, self.episodes, self.groups)
 
 
-def _focal_varies(fit, camera: int) -> bool:  # noqa: ANN001
+def _write_rig(
+    fit: RigFit,
+    rig: _RigInputs,
+    free: list[str],
+    disagreement: list[tuple[float, float]],
+    episodes: tuple[int, ...],
+    groups: int,
+) -> None:
+    """Store a rig's fitted focals, lenses, static poses, unknown mounts and dataset-scope body
+    corrections in the priors, noting the `episodes` and agreement `groups` they come from."""
+
+    from r4r.data.priors import write_body, write_camera
+
+    robot, streams = rig.robot, rig.streams
+    station = station_of(rig.loaded)
+    for c, stream in enumerate(streams):
+        values: dict[str, object] = {
+            "focal": round(float(fit.intrinsics[c, 0, 0]), 2),
+            "focal_range": stream.prior.focal_range if rig.known_focal[c] else 0.0,
+            **distortion_values(fit.lens, c, stream.prior),
+        }
+        if _focal_varies(fit, c):  # recorded per episode: no single focal to write
+            del values["focal"], values["focal_range"]
+        prior = robot.free_cameras.get(stream.name)
+        if not stream.moving and prior is not None and prior.scope == "dataset":
+            # A static camera fixed for the dataset: its pose in the base frame
+            known = stream.prior.position is not None
+            values |= {
+                "mount": "static",
+                **pose_fields(fit.camera_poses[0, c].cpu()),
+                "position_range": stream.prior.position_range if known else 0.02,
+                "orientation_range_deg": stream.prior.orientation_range_deg if known else 2.0,
+            }
+        if stream.moving and not rig.known_mount[c]:
+            values |= {
+                "mount": "moving",
+                "link": robot.body_names[robot.camera_body[robot.camera(stream.name)]],
+                **pose_fields(fit.mounts[c].cpu()),
+                # No per-group mounts to measure a spread from: the indicative ranges
+                **range_fields(*INDICATIVE_RANGES),
+            }
+        print(f"wrote {write_camera(rig.root, stream.name, values, station)}")
+    checked = len(fit.group_corrections) > 1
+    for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
+        if robot.free_bodies[name].scope != "dataset":
+            continue
+        prior = rig.loaded[0].priors.bodies[name]
+        # The range left: how much independent groups disagree; without two groups to compare,
+        # the priors' ranges stand
+        ranges = (
+            range_fields(cm / 100, deg)
+            if checked
+            else {
+                "position_range": prior.position_range,
+                "orientation_range_deg": prior.orientation_range_deg,
+            }
+        )
+        body = {
+            **pose_fields(fit.body_corrections[b].cpu()),
+            **ranges,
+            "fitted": {"episodes": list(episodes), "groups": groups},
+        }
+        print(f"wrote {write_body(rig.root, name, body, station)}")
+
+
+def _focal_varies(fit: RigFit, camera: int) -> bool:
     """Whether the camera's intrinsics differ between the solved episodes."""
 
     k = fit.episode_intrinsics[:, camera]
     return bool((k != k[:1]).any())
 
 
-def station_of(loaded) -> str | None:  # noqa: ANN001
+def station_of(loaded: list[Episode[int, int]]) -> str | None:
     """Where fitted values go: the episodes' station when the priors keep per-station
     values (`stations`), else the dataset level (None)."""
 
@@ -474,7 +525,9 @@ def station_of(loaded) -> str | None:  # noqa: ANN001
     return first.station if first.station is not None and first.priors.stations else None
 
 
-def distortion_values(lens, camera: int, prior) -> dict[str, object]:  # noqa: ANN001
+def distortion_values(
+    lens: Lens | None, camera: int, prior: CameraPrior
+) -> dict[str, list[float] | float]:
     """Priors fields of a camera's fitted distortion (none for an ideal pinhole): held from
     now on unless its prior gave the coefficients with a range."""
 
@@ -488,7 +541,9 @@ def distortion_values(lens, camera: int, prior) -> dict[str, object]:  # noqa: A
     }
 
 
-def kinematic_freedom(priors, robot, stride: int):  # noqa: ANN001, ANN201
+def kinematic_freedom(
+    priors: DatasetPriors, robot: Robot[int, int, int], stride: int
+) -> KinematicFreedom | None:
     """The priors' `kinematics` block as a `KinematicFreedom` for `robot` (None if absent):
     hinge offsets in degrees, slide offsets in millimetres, the time offset in frames at the
     dataset's rate (converted to strided timesteps)."""
@@ -499,22 +554,24 @@ def kinematic_freedom(priors, robot, stride: int):  # noqa: ANN001, ANN201
     from r4r.rago.robot import HINGE
 
     spec = priors.kinematics
-    if not spec:
+    if spec is None:
         return None
-    only = set(spec.get("joints", robot.joint_names))
+    only = set(robot.joint_names if spec.joints is None else spec.joints)
+    unknown = only - set(robot.joint_names)
+    if unknown:
+        raise ValueError(f"priors kinematics.joints: {sorted(unknown)} are not robot joints")
     stds = []
     for name, kind in zip(robot.joint_names, robot.joint_kind, strict=True):
         if name not in only:
             stds.append(0.0)
         elif kind == HINGE:
-            stds.append(math.radians(float(spec.get("joint_offset_deg", 0.0))))
+            stds.append(math.radians(spec.joint_offset_deg))
         else:
-            stds.append(float(spec.get("joint_offset_mm", 0.0)) / 1000)
-    time = float(spec.get("time_offset_frames", 0.0)) / stride
-    return KinematicFreedom(joint_std=tuple(stds), time_std=time)
+            stds.append(spec.joint_offset_mm / 1000)
+    return KinematicFreedom(joint_std=tuple(stds), time_std=spec.time_offset_frames / stride)
 
 
-def _print_kinematics(fit, robot, stride: int) -> None:  # noqa: ANN001
+def _print_kinematics(fit: RigFit, robot: Robot[int, int, int], stride: int) -> None:
     """Fitted joint and time offsets, with each group's value (their spread is the check)."""
 
     import math
@@ -536,7 +593,14 @@ def _print_kinematics(fit, robot, stride: int) -> None:  # noqa: ANN001
         print(f"joint offset {name}: {value * scale:+.2f} {unit} (groups {each})")
 
 
-def _print_rig(fit, streams, robot, episodes, free, disagreement) -> None:  # noqa: ANN001
+def _print_rig(
+    fit: RigFit,
+    streams: tuple[CameraStream[int, int, int], ...],
+    robot: Robot[int, int, int],
+    episodes: tuple[int, ...],
+    free: list[str],
+    disagreement: list[tuple[float, float]],
+) -> None:
     """What `r4r rig` found, per camera, mobile-base episode and free body."""
 
     import math
@@ -572,10 +636,12 @@ def _print_rig(fit, streams, robot, episodes, free, disagreement) -> None:  # no
         if robot.free_bodies[name].scope == "frame":
             continue  # held at each episode's first frame: see the departure above
         offset = fit.body_corrections[b]
+        # Groups check dataset-scope bodies only (an episode-scope one differs by design)
+        checked = robot.free_bodies[name].scope == "dataset" and len(fit.group_corrections) > 1
         print(
             f"{name}: correction {[round(v, 4) for v in offset[:3, 3].tolist()]} m, "
-            f"{math.degrees(float(se3.so3_log(offset[:3, :3]).norm())):.2f} deg; "
-            f"groups disagree by {cm:.1f} cm / {deg:.2f} deg"
+            f"{math.degrees(float(se3.so3_log(offset[:3, :3]).norm())):.2f} deg"
+            + (f"; groups disagree by {cm:.1f} cm / {deg:.2f} deg" if checked else "")
         )
 
 
@@ -648,7 +714,7 @@ class Overlay:
         from r4r.rago.robot import CameraMount, body_mounts, compile_model
         from r4r.viz.overlay import overlay_frames, write_video
 
-        solution = torch.load(self.solution, weights_only=False)
+        solution: SavedSolution = torch.load(self.solution, weights_only=False)
         root = dataset_root(solution["dataset"])
         names, model, rows = solution["names"], None, []
         still = self.output.suffix.lower() == ".png"
@@ -738,15 +804,15 @@ class Preview:
             if c.intrinsics is not None:
                 k.append(c.intrinsics.tolist())
                 continue
-            f = c.prior.focal or self.focal * width
-            fy = f * c.prior.aspect
-            k.append([[f, 0, (width - 1) / 2], [0, fy, (height - 1) / 2], [0, 0, 1]])
+            k.append(
+                pinhole_guess(c.prior.focal or self.focal * width, c.prior.aspect, width, height)
+            )
         steps = len(qpos)
         placed = robot.body_from_camera[index].clone()
         for c, stream in enumerate(streams):  # a static camera's recorded pose this episode
             if stream.pose is not None:
                 placed[c] = stream.pose.to(placed)
-        solution = {
+        solution: Solution = {
             "dataset": self.dataset,
             "names": names,
             "lengths": [steps],
@@ -882,14 +948,14 @@ class Reconstruct:
             )
 
 
-def _write_poses(path: Path, number: int, stride: int, rig: _RigInputs, fit) -> None:  # noqa: ANN001
+def _write_poses(path: Path, number: int, stride: int, rig: _RigInputs, fit: RigFit) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     world = fit.world_from_body.detach().cpu().double()
     mounts = fit.mounts_at.detach().cpu().double()
     k = fit.episode_intrinsics[0].detach().cpu().double()  # one episode: its own intrinsics
-    rows: dict[str, list] = {
+    rows: dict[str, list[object]] = {
         k_: [] for k_ in ("episode", "frame", "camera", "world_from_camera", "fx", "fy", "cx", "cy")
     }
     for c, name in enumerate(rig.names):

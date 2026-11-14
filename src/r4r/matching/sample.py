@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from shape_extensions import Int, IntVar
     from torch import Tensor
 
+    from r4r.types import UV
+
     from .romav2 import Matches
 
 OVERSAMPLING = 4
@@ -35,20 +37,23 @@ KDE_CHUNK = 1 << 26  # pairwise distances per chunk
 class Correspondences[B: IntVar, K: IntVar]:
     """Pixel coordinates (OpenCV: pixel centres at integers) in each image, and certainty."""
 
-    pixels_a: Tensor[[B, K, 2]]
-    pixels_b: Tensor[[B, K, 2]]
+    pixels_a: Tensor[[B, K, *UV]]
+    pixels_b: Tensor[[B, K, *UV]]
     certainty: Tensor[[B, K]]
 
 
 def to_pixels[B: IntVar, K: IntVar](
-    normalised: Tensor[[B, K, 2]], size: tuple[int, int]
-) -> Tensor[[B, K, 2]]:
+    normalised: Tensor[[B, K, *UV]], size: tuple[int, int]
+) -> Tensor[[B, K, *UV]]:
+    """grid_sample coordinates → pixels: `u = (x + 1) / 2 · W − ½` (`size = (H, W)`)."""
+
     h, w = size
     return (normalised + 1) / 2 * normalised.new_tensor((w, h)) - 0.5
 
 
 def density[B: IntVar, K: IntVar](points: Tensor[[B, K, 4]]) -> Tensor[[B, K]]:
-    """Gaussian kernel density (unnormalised) at each point, chunked over queries."""
+    """Gaussian kernel density (unnormalised) at each point, chunked over queries:
+    `ρ(p_i) = Σ_j exp(−‖p_i − p_j‖² / 2σ²)`, `σ = KDE_STD`, over matches `(x_a, y_a, x_b, y_b)`."""
 
     b, k, _ = points.shape
     rows = max(1, KDE_CHUNK // (b * k))

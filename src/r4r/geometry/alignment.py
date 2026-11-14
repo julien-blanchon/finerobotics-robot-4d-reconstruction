@@ -16,11 +16,17 @@ if TYPE_CHECKING:
     from shape_extensions import IntTuple, IntVar
     from torch import Tensor
 
+    from r4r.types import Mat4x4
+
 
 def procrustes[Bs: IntTuple, N: IntVar](
     source: Tensor[[*Bs, N, 3]], target: Tensor[[*Bs, N, 3]], weight: Tensor[[*Bs, N]]
 ) -> Tensor[[*Bs, 4, 4]]:
-    """`target_from_source` minimising `Σ w ‖target − (R source + t)‖²` (fp64 SVD)."""
+    """`target_from_source` minimising `Σ w ‖target − (R source + t)‖²` (fp64 SVD).
+
+    With weighted means `μ_s`, `μ_t` and cross-covariance `Σ = Σ w (s − μ_s)(t − μ_t)ᵀ`:
+    `R = closest_rotation(Σ)`, `t = μ_t − R μ_s`. Rigid (no scale); units of the inputs.
+    """
 
     w = (weight / weight.sum(-1, keepdim=True).clamp_min(1e-12))[..., None].double()
     source, target = source.double(), target.double()
@@ -34,9 +40,11 @@ def procrustes[Bs: IntTuple, N: IntVar](
     return se3.from_rotation_translation(rotation, translation).to(weight.dtype)
 
 
-def hand_eye[M: IntVar](
-    robot_motion: Tensor[[M, 4, 4]], camera_motion: Tensor[[M, 4, 4]], group: Tensor[[M]]
-) -> tuple[Tensor[[4, 4]], Tensor[[int]]]:
+def hand_eye[NPair: IntVar](
+    robot_motion: Tensor[[NPair, *Mat4x4]],
+    camera_motion: Tensor[[NPair, *Mat4x4]],
+    group: Tensor[[NPair]],
+) -> tuple[Tensor[[*Mat4x4]], Tensor[[int]]]:
     """Solve `A_i X = X B_i(s_g)`: the mount `X` and one scale `s_g` per motion group.
 
     `A_i` are metric motions of the mount link, `B_i` the same motions seen by the camera in
@@ -44,6 +52,7 @@ def hand_eye[M: IntVar](
     one encoding) share the scale `s_g`. Rotation first (Park & Martin: align the rotation axes
     `log R_B → log R_A`), then translation and scales jointly by linear least squares:
     `(R_A − I) t_X − s_g R_X t_B = −t_A`. Needs ≥ 2 motions with non-parallel rotation axes.
+    The scales (one per group, `max(group) + 1` of them) convert camera units to metres.
     """
 
     a, b = robot_motion.double(), camera_motion.double()
@@ -62,8 +71,9 @@ def hand_eye[M: IntVar](
     return mount.to(robot_motion.dtype), solution[3:].to(robot_motion.dtype)
 
 
-def mean_transform[N: IntVar](transforms: Tensor[[N, 4, 4]]) -> Tensor[[4, 4]]:
-    """Chordal mean: the rotation closest to the summed rotations, and the mean translation."""
+def mean_transform[N: IntVar](transforms: Tensor[[N, *Mat4x4]]) -> Tensor[[*Mat4x4]]:
+    """Chordal mean: `R = argmin_R Σ ‖R − R_i‖²_F` (the rotation closest to `Σ R_i`), and the
+    mean translation."""
 
     rotation = closest_rotation(transforms[:, :3, :3].mT.sum(0))
     return se3.from_rotation_translation(rotation, transforms[:, :3, 3].mean(0))

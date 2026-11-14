@@ -33,26 +33,29 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import torch
+from einops import rearrange
 
 from r4r.geometry import se3
 
 from .bundle import BundleConfig, BundleResult, bundle_adjust
 from .calibrate import FitConfig, fit_setup, video_tracks
 from .cross import cross_matches
-from .initialize import locate_camera, triangulate
+from .initialize import CameraStart, Points, locate_camera, triangulate
 from .kinematics import forward_kinematics
-from .klt import VideoTracks, klt_tracks, track_video
+from .klt import VideoTracks, klt_tracks, require_tracks, track_video
 from .merge import merge_tracks
 from .rig import KinematicFreedom
 from .tracks import Tracks
 
 if TYPE_CHECKING:
+    from shape_extensions import IntVar
     from torch import Tensor
 
     from r4r.matching import RoMaV2
+    from r4r.types import RGB, Mat3x3, Mat4x4
 
     from .lens import Lens
-    from .robot import Robot
+    from .robot import Freedom, Robot
 
 # A static camera needs this many points seen by moving cameras (≥ 3 observations each)
 MIN_POINTS = 50
@@ -68,28 +71,36 @@ MIN_STILL = 20
 class _Tracked:
     """KLT tracks of each (episode, camera) video, computed once and shared by the stages."""
 
-    def __init__(self, episodes: list[RigEpisode], config: FitConfig) -> None:
-        self.episodes, self.config, self.done = episodes, config, {}
+    def __init__(self, episodes: list[RigEpisode[int, int]], config: FitConfig) -> None:
+        self.episodes, self.config = episodes, config
+        self.done: dict[tuple[int, str], VideoTracks[int]] = {}
 
-    def __call__(self, episode: int, name: str) -> VideoTracks:
+    def __call__(self, episode: int, name: str) -> VideoTracks[int]:
+        """Tracks of camera `name` in `episode` (its index); raises when there are none."""
+
         key = (episode, name)
         if key not in self.done:
-            self.done[key] = track_video(self.episodes[episode].frames[name], self.config.klt)
+            found = track_video(self.episodes[episode].frames[name], self.config.klt)
+            require_tracks(found.track, name, episode)
+            self.done[key] = found
         return self.done[key]
 
 
 @dataclass(frozen=True, slots=True)
-class RigEpisode:
-    qpos: Tensor[[int, int]]
-    frames: dict[str, Tensor[[int, 3, int, int]]]  # uint8 videos, one per camera
+class RigEpisode[T: IntVar, NQ: IntVar]:
+    """One episode of `T` timesteps: joint positions `qpos [T, NQ]` and every camera's video."""
+
+    qpos: Tensor[[T, NQ]]
+    # uint8 videos, one per camera: T frames (int: stages that read no pixels take a stand-in)
+    frames: dict[str, Tensor[[int, *RGB, int, int]]]
     # Mobile base: its pose at each timestep relative to the first, in its own frame (odometry)
-    base_motion: Tensor[[int, 4, 4]] | None = None
+    base_motion: Tensor[[T, *Mat4x4]] | None = None
     # Recorded start poses (base frame, OpenCV axes) of static cameras in this episode, e.g. a
     # dataset's own per-episode calibration (per-episode table): used instead of PnP. For a
     # moving camera: its mount on its link in this episode (e.g. a simulator randomising it)
-    poses: dict[str, Tensor[[4, 4]]] = field(default_factory=dict)
+    poses: dict[str, Tensor[[*Mat4x4]]] = field(default_factory=dict)
     # Recorded intrinsics of cameras in this episode (e.g. a simulator redrawing focals)
-    intrinsics: dict[str, Tensor[[3, 3]]] = field(default_factory=dict)
+    intrinsics: dict[str, Tensor[[*Mat3x3]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -106,53 +117,56 @@ class RigConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class RigFit:
+class RigFit[C: IntVar, L: IntVar, J: IntVar]:
+    """A rig's calibration: `C` cameras on a robot of `L` bodies and `J` joints, over `E`
+    episodes (`T` timesteps in all), `F` free bodies and `G` groups of episodes."""
+
     # `body_from_camera` per camera (moving: its mount; static: its first episode's pose)
-    mounts: Tensor[[int, 4, 4]]
-    intrinsics: Tensor[[int, 3, 3]]
+    mounts: Tensor[[C, *Mat4x4]]
+    intrinsics: Tensor[[C, *Mat3x3]]
     # Per episode [E, C]: `intrinsics` rescaled to each episode's recorded ones (all equal to
     # `intrinsics` unless a camera's recorded intrinsics change between episodes)
-    episode_intrinsics: Tensor[[int, int, 3, 3]]
+    episode_intrinsics: Tensor[[int, C, *Mat3x3]]
     # Distortion per camera (None: ideal pinholes)
-    lens: Lens | None
-    # Free bodies' corrected `world_from_body` at the first timestep of every episode [E, B]
-    bodies: Tensor[[int, int, 4, 4]]
+    lens: Lens[C] | None
+    # Free bodies' corrected `world_from_body` at the first timestep of every episode [E, F]
+    bodies: Tensor[[int, int, *Mat4x4]]
     # Static cameras' poses per episode [E, C] (moving cameras: their mount)
-    camera_poses: Tensor[[int, int, 4, 4]]
+    camera_poses: Tensor[[int, C, *Mat4x4]]
     # The free bodies' corrections (description's offset → fitted: `parent_from_body @ this`),
-    # from all episodes [B], and per group of episodes [G, B]
-    body_corrections: Tensor[[int, 4, 4]]
-    group_corrections: Tensor[[int, int, 4, 4]]
+    # from all episodes [F], and per group of episodes [G, F]
+    body_corrections: Tensor[[int, *Mat4x4]]
+    group_corrections: Tensor[[int, int, *Mat4x4]]
     median_error: float
     inlier_fraction: float
     # Per camera: (agreeing, searched) episodes of its stage-1 mount search (None: not searched)
     mount_agreement: tuple[tuple[int, int] | None, ...]
     # The solution at every timestep (episodes concatenated): `world_from_body [T, L]` with the
     # free bodies' corrections, and each camera's `body_from_camera [C, T]` (static: world pose)
-    world_from_body: Tensor[[int, int, 4, 4]]
-    mounts_at: Tensor[[int, int, 4, 4]]
+    world_from_body: Tensor[[int, L, *Mat4x4]]
+    mounts_at: Tensor[[C, int, *Mat4x4]]
     # Mobile base, per episode: how far the fitted base departs from its recorded motion
     # (median cm, max cm, max degrees); empty without a record
     base_departure: tuple[tuple[float, float, float], ...]
     # Kinematic refinements (zero where held): joint offsets [J] and time offset (timesteps),
     # from all episodes and per group ([G, J], [G])
-    joint_offset: Tensor[[int]]
+    joint_offset: Tensor[[J]]
     time_offset: float
-    group_joint_offsets: Tensor[[int, int]]
+    group_joint_offsets: Tensor[[int, J]]
     group_time_offsets: tuple[float, ...]
 
 
-def calibrate_rig(
-    robot: Robot,
-    episodes: list[RigEpisode],
+def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
+    robot: Robot[L, J, int],
+    episodes: list[RigEpisode[int, int]],
     names: tuple[str, ...],
-    intrinsics: Tensor[[int, 3, 3]],
+    intrinsics: Tensor[[C, *Mat3x3]],
     known_focal: tuple[bool, ...],
     known_mount: tuple[bool, ...],
     model: RoMaV2,
     config: RigConfig,
-    lens: Lens | None = None,
-) -> RigFit:
+    lens: Lens[C] | None = None,
+) -> RigFit[C, L, J]:
     """Calibrate the free mounts, free bodies and static cameras of `robot` (see module doc).
 
     `intrinsics` are the focal priors (or guesses where `known_focal` is False); cameras on
@@ -163,8 +177,6 @@ def calibrate_rig(
     episode's where episodes record their own (`RigEpisode.intrinsics`).
     """
 
-    index = [robot.camera(n) for n in names]
-    static = [robot.camera_body[i] == 0 for i in index]
     tracked = _Tracked(episodes, config.fit)
     scaling = episode_scaling(episodes, names)
     mounts, intrinsics, lens, agreement = _moving_mounts(
@@ -186,13 +198,82 @@ def calibrate_rig(
     starts, intrinsics = _static_starts(
         robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount
     )
-    for i, e in enumerate(episodes):  # recorded per-episode mounts of moving cameras
-        for c, name in enumerate(names):
-            if not static[c] and name in e.poses:
-                starts[i, c] = e.poses[name].to(starts)
+    starts = _recorded_mounts(robot, episodes, names, starts)
 
-    # 4-5. Bundles: all episodes, then groups; moving mounts frozen, except those that change
-    # between episodes (randomising simulators: episode scope), refined per episode in range
+    # 4-5. Bundles: all episodes, then groups. Known focals stay fixed; those found in stage 3
+    # are refined
+    frozen = _freeze_moving_mounts(robot, names, starts[0])
+    everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config, known_focal)
+    group_fits = _group_bundles(
+        frozen, episodes, merged, names, intrinsics, starts, config, known_focal
+    )
+    first = torch.cumsum(torch.tensor([0] + [len(e.qpos) for e in episodes[:-1]]), 0).tolist()
+    free = sorted(robot.body(n) for n in robot.free_bodies)
+    overall = _body_corrections(frozen, episodes[0].qpos, everything.world_from_body)
+    corrections = [
+        _body_corrections(frozen, episodes[group[0]].qpos, fit.world_from_body)
+        for group, fit in group_fits
+    ]
+    fits = [fit for _, fit in group_fits] or [everything]
+    return RigFit(
+        mounts=everything.body_from_camera,
+        intrinsics=everything.intrinsics,
+        episode_intrinsics=everything.intrinsics.expand(len(episodes), -1, 3, 3)
+        if scaling is None
+        else scaling.to(everything.intrinsics) @ everything.intrinsics,
+        lens=everything.lens,
+        bodies=everything.world_from_body[first][:, free],
+        body_corrections=overall,
+        camera_poses=rearrange(everything.mounts_at[:, first], "c e i j -> e c i j"),
+        group_corrections=torch.stack(corrections) if corrections else overall[None],
+        median_error=everything.median_error,
+        inlier_fraction=everything.inlier_fraction,
+        mount_agreement=agreement,
+        world_from_body=everything.world_from_body,
+        mounts_at=everything.mounts_at,
+        base_departure=_base_departure(frozen, episodes, everything.world_from_body),
+        joint_offset=everything.joint_offset,
+        time_offset=everything.time_offset,
+        group_joint_offsets=torch.stack([f.joint_offset for f in fits]),
+        group_time_offsets=tuple(f.time_offset for f in fits),
+    )
+
+
+def _recorded_mounts[E: IntVar, C: IntVar](
+    robot: Robot[int, int, int],
+    episodes: list[RigEpisode[int, int]],
+    names: tuple[str, ...],
+    starts: Tensor[[E, C, *Mat4x4]],
+) -> Tensor[[E, C, *Mat4x4]]:
+    """`starts` with the moving cameras' recorded per-episode mounts (`RigEpisode.poses`).
+
+    Raises when they differ between episodes for a camera the bundles freeze (dataset scope,
+    or held: `_freeze_moving_mounts` keeps the first episode's mount for all)."""
+
+    for c, name in enumerate(names):
+        if robot.camera_body[robot.camera(name)] == 0:
+            continue
+        for i, e in enumerate(episodes):
+            if name in e.poses:
+                starts[i, c] = e.poses[name].to(starts)
+        freedom = robot.free_cameras.get(name)
+        frozen = freedom is None or freedom.scope == "dataset"
+        if frozen and bool((starts[:, c] != starts[0, c]).any()):
+            raise ValueError(
+                f"{name}: recorded mounts differ between episodes, but the mount is held or "
+                "dataset scope (one for all episodes); give it episode scope in the priors"
+            )
+    return starts
+
+
+def _freeze_moving_mounts[L: IntVar, J: IntVar, C: IntVar](
+    robot: Robot[L, J, C], names: tuple[str, ...], mounts: Tensor[[int, *Mat4x4]]
+) -> Robot[L, J, C]:
+    """`robot` with `names`' cameras at `mounts`, free only where the bundles refine them: static
+    cameras, and moving ones whose mount changes between episodes (randomising simulators:
+    episode scope, refined per episode within range). Other moving mounts are frozen."""
+
+    static = [robot.camera_body[robot.camera(n)] == 0 for n in names]
     frozen = replace(
         robot,
         free_cameras={
@@ -202,68 +283,59 @@ def calibrate_rig(
         },
         body_from_camera=robot.body_from_camera.to(mounts).clone(),
     )
-    for c, i in enumerate(index):
-        frozen.body_from_camera[i] = starts[0, c]
-    # Known focals stay fixed; those found in stage 3 are refined
-    fixed = known_focal
-    everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config, fixed)
-    # Groups (agreement check); 0 groups: none (reconstruction with frozen priors)
-    groups = [list(range(g, len(episodes), config.groups)) for g in range(config.groups)]
-    corrections, group_fits = [], []
-    for group in filter(None, groups):
-        fit = _bundle(
-            frozen,
-            [episodes[i] for i in group],
-            [merged[i] for i in group],
-            names,
-            intrinsics,
-            starts[group],
-            config,
-            fixed,
-        )
-        corrections.append(_body_corrections(frozen, episodes[group[0]].qpos, fit.world_from_body))
-        group_fits.append(fit)
-    first = torch.cumsum(torch.tensor([0] + [len(e.qpos) for e in episodes[:-1]]), 0).tolist()
-    free = sorted(robot.body(n) for n in robot.free_bodies)
-    camera_poses = everything.mounts_at[:, first].transpose(0, 1)
-    return RigFit(
-        mounts=everything.body_from_camera,
-        intrinsics=everything.intrinsics,
-        episode_intrinsics=everything.intrinsics.expand(len(episodes), -1, 3, 3)
-        if scaling is None
-        else scaling.to(everything.intrinsics) @ everything.intrinsics,
-        lens=everything.lens,
-        bodies=everything.world_from_body[first][:, free],
-        body_corrections=_body_corrections(frozen, episodes[0].qpos, everything.world_from_body),
-        camera_poses=camera_poses,
-        group_corrections=torch.stack(corrections)
-        if corrections
-        else _body_corrections(frozen, episodes[0].qpos, everything.world_from_body)[None],
-        median_error=everything.median_error,
-        inlier_fraction=everything.inlier_fraction,
-        mount_agreement=agreement,
-        world_from_body=everything.world_from_body,
-        mounts_at=everything.mounts_at,
-        base_departure=_base_departure(frozen, episodes, everything.world_from_body),
-        joint_offset=everything.joint_offset,
-        time_offset=everything.time_offset,
-        group_joint_offsets=torch.stack([f.joint_offset for f in group_fits or [everything]]),
-        group_time_offsets=tuple(f.time_offset for f in group_fits or [everything]),
-    )
+    for c, name in enumerate(names):
+        frozen.body_from_camera[robot.camera(name)] = mounts[c]
+    return frozen
 
 
-def _moving_mounts(
-    robot: Robot,
-    episodes: list[RigEpisode],
+def _group_bundles(
+    robot: Robot[int, int, int],
+    episodes: list[RigEpisode[int, int]],
+    merged: list[Tracks[int, int, int]],
     names: tuple[str, ...],
-    intrinsics: Tensor[[int, 3, 3]],
+    intrinsics: Tensor[[int, *Mat3x3]],
+    starts: Tensor[[int, int, *Mat4x4]],
+    config: RigConfig,
+    known_focal: tuple[bool, ...],
+) -> list[tuple[list[int], BundleResult[int, int, int, int]]]:
+    """Stage 5: the bundle per group of episodes (every `groups`-th), the agreement check on
+    dataset-scope unknowns. Fewer than two non-empty groups (0 or 1 asked, or one episode):
+    none, since one group would only repeat the bundle over all episodes."""
+
+    groups = [list(range(g, len(episodes), config.groups)) for g in range(config.groups)]
+    groups = [g for g in groups if g]
+    if len(groups) < 2:
+        return []
+    return [
+        (
+            group,
+            _bundle(
+                robot,
+                [episodes[i] for i in group],
+                [merged[i] for i in group],
+                names,
+                intrinsics,
+                starts[group],
+                config,
+                known_focal,
+            ),
+        )
+        for group in groups
+    ]
+
+
+def _moving_mounts[C: IntVar](
+    robot: Robot[int, int, int],
+    episodes: list[RigEpisode[int, int]],
+    names: tuple[str, ...],
+    intrinsics: Tensor[[C, *Mat3x3]],
     known_focal: tuple[bool, ...],
     known_mount: tuple[bool, ...],
     config: RigConfig,
     tracked: _Tracked | None = None,
-    lens: Lens | None = None,
+    lens: Lens[C] | None = None,
 ) -> tuple[
-    Tensor[[int, 4, 4]], Tensor[[int, 3, 3]], Lens | None, tuple[tuple[int, int] | None, ...]
+    Tensor[[C, *Mat4x4]], Tensor[[C, *Mat3x3]], Lens[C] | None, tuple[tuple[int, int] | None, ...]
 ]:
     """Stage 1: each free moving camera's mount (and focal, distortion) from its own video."""
 
@@ -276,19 +348,8 @@ def _moving_mounts(
         body = robot.camera_body[index[c]]
         if body == 0 or known_mount[c] or name not in robot.free_cameras:
             continue
-        data = []
         own = None if lens is None else lens.select(torch.tensor([c], device=mounts.device))
-        for i, e in enumerate(episodes):
-            a, b = still_span(e.base_motion)
-            if b - a < MIN_STILL:
-                continue
-            whole = a == 0 and b >= len(e.qpos)  # the whole video: its tracks are shared
-            found = tracked(i, name) if whole and tracked is not None else None
-            frames = e.frames[name][a:b]
-            tracks = video_tracks(frames, intrinsics[c], config.fit.klt, found, lens=own)
-            if scaling is not None:
-                tracks = replace(tracks, view_scaling=scaling[i, c].expand(len(frames), 3, 3))
-            data.append((e.qpos[a:b], tracks))
+        data = _still_videos(episodes, c, name, intrinsics[c], config, tracked, own, scaling)
         if not data:
             raise ValueError(
                 f"{name}: no span of {MIN_STILL} timesteps with the base still in any episode;"
@@ -304,16 +365,45 @@ def _moving_mounts(
     return mounts, intrinsics, lens, tuple(agreement)
 
 
-def _multi_camera_tracks(
-    episode: RigEpisode,
+def _still_videos(
+    episodes: list[RigEpisode[int, int]],
+    camera: int,
+    name: str,
+    intrinsics: Tensor[[*Mat3x3]],
+    config: RigConfig,
+    tracked: _Tracked | None,
+    lens: Lens[1] | None,
+    scaling: Tensor[[int, int, *Mat3x3]] | None,
+) -> list[tuple[Tensor[[int, int]], Tracks[int, int, 1]]]:
+    """Per episode with a long enough still base span: its joint positions and the camera's
+    KLT tracks over that span (`lens`, `scaling [E, C]`: the camera's own)."""
+
+    data = []
+    for i, e in enumerate(episodes):
+        a, b = still_span(e.base_motion)
+        if b - a < MIN_STILL:
+            continue
+        whole = a == 0 and b >= len(e.qpos)  # the whole video: its tracks are shared
+        found = tracked(i, name) if whole and tracked is not None else None
+        frames = e.frames[name][a:b]
+        tracks = video_tracks(frames, intrinsics, config.fit.klt, found, lens=lens)
+        require_tracks(tracks.track, name, i)
+        if scaling is not None:
+            tracks = replace(tracks, view_scaling=scaling[i, camera].expand(len(frames), 3, 3))
+        data.append((e.qpos[a:b], tracks))
+    return data
+
+
+def _multi_camera_tracks[C: IntVar](
+    episode: RigEpisode[int, int],
     names: tuple[str, ...],
-    intrinsics: Tensor[[int, 3, 3]],
+    intrinsics: Tensor[[C, *Mat3x3]],
     model: RoMaV2,
     config: RigConfig,
-    found: list[VideoTracks] | None = None,
-    lens: Lens | None = None,
-    scaling: Tensor[[int, 3, 3]] | None = None,
-) -> Tracks:
+    found: list[VideoTracks[int]] | None = None,
+    lens: Lens[C] | None = None,
+    scaling: Tensor[[C, *Mat3x3]] | None = None,
+) -> Tracks[int, int, C]:
     """Stage 2: KLT tracks of every camera, merged through RoMa links at the same instants.
     `scaling [C]`: the episode's own intrinsics relative to `intrinsics` (`episode_scaling`)."""
 
@@ -335,34 +425,35 @@ def _multi_camera_tracks(
     ]
     if not pairs:  # one camera: nothing to link
         return tracks
-    found = cross_matches(model, videos, pairs)
+    links = cross_matches(model, videos, pairs)
     return merge_tracks(
         tracks,
-        found.camera_a * steps + found.time_a,
-        found.pixel_a.to(tracks.pixel),
-        found.camera_b * steps + found.time_b,
-        found.pixel_b.to(tracks.pixel),
+        links.camera_a * steps + links.time_a,
+        links.pixel_a.to(tracks.pixel),
+        links.camera_b * steps + links.time_b,
+        links.pixel_b.to(tracks.pixel),
     )
 
 
-def _static_starts(
-    robot: Robot,
-    episodes: list[RigEpisode],
-    merged: list[Tracks],
+def _static_starts[C: IntVar](
+    robot: Robot[int, int, int],
+    episodes: list[RigEpisode[int, int]],
+    merged: list[Tracks[int, int, C]],
     names: tuple[str, ...],
-    mounts: Tensor[[int, 4, 4]],
-    intrinsics: Tensor[[int, 3, 3]],
+    mounts: Tensor[[C, *Mat4x4]],
+    intrinsics: Tensor[[C, *Mat3x3]],
     known_focal: tuple[bool, ...],
     known_mount: tuple[bool, ...] | None = None,
-) -> tuple[Tensor[[int, int, 4, 4]], Tensor[[int, 3, 3]]]:
+) -> tuple[Tensor[[int, C, *Mat4x4]], Tensor[[C, *Mat3x3]]]:
     """Stage 3: each free static camera's pose per episode (and focal, from the first episode
     where it is found, when unknown) by PnP on points the moving cameras triangulate. Episodes
-    where PnP fails keep the description's pose; cameras the priors fix keep theirs, and
-    cameras whose pose the priors give (`known_mount`) start from it: the bundle refines them
-    within the priors' ranges (PnP on robot-attached tracks can land a known camera 10 cm /
-    6 deg off and the bundle then keeps it there). A
-    dataset-scope camera starts every episode from the consensus of its episodes' PnP poses
-    (`_consensus`): one episode with few links can land metres away."""
+    where PnP fails keep the description's pose. A pose recorded for the episode
+    (`RigEpisode.poses`) is used whatever the priors say; otherwise cameras the priors fix
+    keep theirs, and cameras whose pose the priors give (`known_mount`) start from it: the
+    bundle refines them within the priors' ranges (PnP on robot-attached tracks can land a
+    known camera 10 cm / 6 deg off and the bundle then keeps it there). A dataset-scope
+    camera starts every episode from the consensus of its episodes' PnP poses (`_consensus`):
+    one episode with few links can land metres away."""
 
     device = mounts.device
     index = [robot.camera(n) for n in names]
@@ -381,36 +472,29 @@ def _static_starts(
         observed = tracks.view_camera[tracks.view]
         points = triangulate(tracks, world_from_view, ~static[observed])
         for c in static.nonzero()[:, 0].tolist():
-            if not free[c]:
-                continue
+            # The episode's own calibration comes first, even where the priors give a pose
             recorded = e.poses.get(names[c])
-            if recorded is not None:  # the episode's own calibration: no PnP
+            if recorded is not None:
                 starts[i, c] = recorded.to(starts)
                 support[i, c] = 1.0
+                continue
+            if not free[c]:
                 continue
             seen = (observed == c) & (points.count[tracks.track] >= MIN_OBSERVATIONS)
             if int(seen.sum()) < MIN_POINTS:
                 continue
-            size = tuple(e.frames[names[c]].shape[-2:])
-            # This episode's focal over the camera's (1 unless recorded ones change)
-            scale = 1.0
-            if tracks.view_scaling is not None:
-                scale = float(tracks.view_scaling[int((cam == c).nonzero()[0, 0]), 0, 0])
-            prior = float(focal[c]) * scale if known_focal[c] or found[c] else None
-            lens = tracks.lens
-            start = locate_camera(
-                points.point[tracks.track[seen]],
-                tracks.pixel[seen],
-                size,
-                prior,
-                None if lens is None else lens.distortion[c],
-                None if lens is None else lens.fisheye[c],
-            )
-            if start is not None and not (
-                bool(torch.isfinite(start.world_from_camera).all())  # degenerate PnP: NaN
-                and _within_prior(start.world_from_camera, mounts[c], robot.free_cameras[names[c]])
-            ):
-                start = None  # keep the prior's pose
+            width = int(e.frames[names[c]].shape[-1])
+            # This episode's K: the camera's at the current focal (fx, fy scaled together),
+            # through its view scaling; `scale` its focal over the camera's (1 unless recorded
+            # ones change)
+            camera_k = intrinsics[c].clone()
+            camera_k[:2, :2] *= focal[c] / intrinsics[c, 0, 0]
+            view_k = tracks.view_intrinsics(camera_k.expand(len(names), 3, 3))
+            k = view_k[int((cam == c).nonzero()[0, 0])]
+            scale = float(k[0, 0] / camera_k[0, 0])
+            known = known_focal[c] or found[c]
+            freedom = robot.free_cameras[names[c]]
+            start = _checked_pnp(tracks, points, seen, c, k, width, known, mounts[c], freedom)
             if start is not None:
                 starts[i, c] = start.world_from_camera
                 support[i, c] = start.inliers
@@ -423,7 +507,40 @@ def _static_starts(
     return starts, intrinsics
 
 
-def _within_prior(pose: Tensor[[4, 4]], prior: Tensor[[4, 4]], freedom: Freedom) -> bool:
+def _checked_pnp[M: IntVar, C: IntVar](
+    tracks: Tracks[M, int, C],
+    points: Points[int],
+    seen: Tensor[[M]],
+    camera: int,
+    intrinsics: Tensor[[*Mat3x3]],
+    width: int,
+    known_focal: bool,
+    prior: Tensor[[*Mat4x4]],
+    freedom: Freedom,
+) -> CameraStart | None:
+    """PnP start of static `camera` (seen through `intrinsics`, its focal searched unless
+    `known_focal`) from its `seen` observations of triangulated `points`; None when PnP
+    fails, is degenerate (NaN) or lands outside `_within_prior` (keep the prior)."""
+
+    lens = tracks.lens
+    start = locate_camera(
+        points.point[tracks.track[seen]],
+        tracks.pixel[seen],
+        intrinsics,
+        width,
+        known_focal,
+        None if lens is None else lens.distortion[camera],
+        None if lens is None else lens.fisheye[camera],
+    )
+    if start is None or not (
+        bool(torch.isfinite(start.world_from_camera).all())
+        and _within_prior(start.world_from_camera, prior, freedom)
+    ):
+        return None
+    return start
+
+
+def _within_prior(pose: Tensor[[*Mat4x4]], prior: Tensor[[*Mat4x4]], freedom: Freedom) -> bool:
     """Whether `pose` lies within twice the priors' range of the prior pose (when the priors
     give no pose: within `MAX_STATIC_DISTANCE` of the robot base, a degenerate PnP otherwise)."""
 
@@ -439,13 +556,14 @@ def _within_prior(pose: Tensor[[4, 4]], prior: Tensor[[4, 4]], freedom: Freedom)
     )
 
 
-def _consensus(
-    poses: Tensor[[int, 4, 4]],
-    support: Tensor[[int]],
+def _consensus[E: IntVar](
+    poses: Tensor[[E, *Mat4x4]],
+    support: Tensor[[E]],
     tolerance: tuple[float, float] = (0.1, math.radians(5.0)),
-) -> Tensor[[4, 4]]:
+) -> Tensor[[*Mat4x4]]:
     """The pose (among per-episode estimates) whose neighbours within `tolerance` (m, rad)
-    carry the most support (PnP inliers); episodes without an estimate have none."""
+    carry the most support (PnP inliers): `argmax_i Σ_j [Δ_ij near] s_j`, `Δ_ij = P_i⁻¹ P_j`;
+    episodes without an estimate have none."""
 
     delta = se3.inverse(poses)[:, None] @ poses[None]
     near = (delta[..., :3, 3].norm(dim=-1) < tolerance[0]) & (
@@ -454,16 +572,16 @@ def _consensus(
     return poses[int((near.to(support) @ support).argmax())]
 
 
-def _bundle(
-    robot: Robot,
-    episodes: list[RigEpisode],
-    merged: list[Tracks],
+def _bundle[C: IntVar](
+    robot: Robot[int, int, int],
+    episodes: list[RigEpisode[int, int]],
+    merged: list[Tracks[int, int, C]],
     names: tuple[str, ...],
-    intrinsics: Tensor[[int, 3, 3]],
-    starts: Tensor[[int, int, 4, 4]],
+    intrinsics: Tensor[[C, *Mat3x3]],
+    starts: Tensor[[int, C, *Mat4x4]],
     config: RigConfig,
     known_focal: tuple[bool, ...] | None = None,
-) -> BundleResult:
+) -> BundleResult[C, int, int, int]:
     """One bundle over `episodes`: their tracks pooled (distinct ids and timesteps)."""
 
     steps = [len(e.qpos) for e in episodes]
@@ -521,11 +639,11 @@ def _bundle(
 
 
 def episode_scaling(
-    episodes: list[RigEpisode], names: tuple[str, ...]
-) -> Tensor[[int, int, 3, 3]] | None:
-    """Per episode and camera [E, C]: its recorded intrinsics times the inverse of the first
-    episode's, for cameras recorded in every episode with intrinsics that change (identity
-    elsewhere); None when no camera's change."""
+    episodes: list[RigEpisode[int, int]], names: tuple[str, ...]
+) -> Tensor[[int, int, *Mat3x3]] | None:
+    """Per episode and camera [E, C]: `S_ec = K_ec · K_0c⁻¹`, its recorded intrinsics over the
+    first episode's, for cameras recorded in every episode with intrinsics that change
+    (identity elsewhere); None when no camera's change."""
 
     qpos = episodes[0].qpos
     eye = torch.eye(3, dtype=qpos.dtype, device=qpos.device)
@@ -541,8 +659,9 @@ def episode_scaling(
     return scaling if varies else None
 
 
-def still_span(motion: Tensor[[int, 4, 4]] | None) -> tuple[int, int]:
-    """The longest span (first, last + 1) where the recorded base motion stays still."""
+def still_span[T: IntVar](motion: Tensor[[T, *Mat4x4]] | None) -> tuple[int, int]:
+    """The longest span (first, last + 1) where the recorded base motion stays still: every
+    step `M_t⁻¹ M_t+1` below `STILL_STEP` (m, rad). No record: the whole episode."""
 
     if motion is None:
         return 0, 1 << 62
@@ -559,8 +678,10 @@ def still_span(motion: Tensor[[int, 4, 4]] | None) -> tuple[int, int]:
     return best
 
 
-def _base_departure(
-    robot: Robot, episodes: list[RigEpisode], fitted: Tensor[[int, int, 4, 4]]
+def _base_departure[L: IntVar](
+    robot: Robot[L, int, int],
+    episodes: list[RigEpisode[int, int]],
+    fitted: Tensor[[int, L, *Mat4x4]],
 ) -> tuple[tuple[float, float, float], ...]:
     """Per episode with a record: the fitted base against the recorded motion."""
 
@@ -580,14 +701,16 @@ def _base_departure(
     return tuple(out)
 
 
-def _moving_base(robot: Robot) -> int | None:
+def _moving_base(robot: Robot[int, int, int]) -> int | None:
     """The body a recorded base motion moves: the frame-scope free body nearest the root."""
 
     frame = [robot.body(n) for n, f in robot.free_bodies.items() if f.scope == "frame"]
     return min(frame) if frame else None
 
 
-def _bodies_at(robot: Robot, episodes: list[RigEpisode]) -> Tensor[[int, int, 4, 4]] | None:
+def _bodies_at(
+    robot: Robot[int, int, int], episodes: list[RigEpisode[int, int]]
+) -> Tensor[[int, int, *Mat4x4]] | None:
     """Starting corrections of the free bodies [B, T] (all episodes): the base's recorded
     motion, identity elsewhere; None without any record."""
 
@@ -608,9 +731,12 @@ def _bodies_at(robot: Robot, episodes: list[RigEpisode]) -> Tensor[[int, int, 4,
     return out
 
 
-def moved_kinematics(robot: Robot, episode: RigEpisode) -> Tensor[[int, int, 4, 4]]:
+def moved_kinematics[L: IntVar, T: IntVar, NQ: IntVar](
+    robot: Robot[L, int, int], episode: RigEpisode[T, NQ]
+) -> Tensor[[T, L, *Mat4x4]]:
     """`world_from_body [T, L]` with the episode's recorded base motion applied to the base's
-    subtree, as the bundle's free-body correction does (`W_p · P_b · M · J_b`)."""
+    subtree, as the bundle's free-body correction does: `W_p · P_b · M_t · J_b` (W_p the parent's
+    world pose, P_b the base's offset, M_t the recorded motion, J_b its joints)."""
 
     world = forward_kinematics(robot, episode.qpos)
     base = _moving_base(robot)
@@ -624,26 +750,28 @@ def moved_kinematics(robot: Robot, episode: RigEpisode) -> Tensor[[int, int, 4, 
     return torch.where(below.to(world.device)[None, :, None, None], change[:, None] @ world, world)
 
 
-def _under(robot: Robot, body: int, ancestor: int) -> bool:
+def _under(robot: Robot[int, int, int], body: int, ancestor: int) -> bool:
+    """Whether `body` is `ancestor` or below it in the kinematic tree."""
+
     while body > 0 and body != ancestor:
         body = robot.body_parent[body]
     return body == ancestor
 
 
-def _body_corrections(
-    robot: Robot, qpos: Tensor[[int, int]], corrected: Tensor[[int, int, 4, 4]]
-) -> Tensor[[int, 4, 4]]:
+def _body_corrections[L: IntVar](
+    robot: Robot[L, int, int], qpos: Tensor[[int, int]], corrected: Tensor[[int, L, *Mat4x4]]
+) -> Tensor[[int, *Mat4x4]]:
     """Each free body's correction at the first timestep (description → fitted): since a
-    correction moves the body's subtree as `parent_from_body @ E`, `E` is the nominal pose's
-    inverse times the corrected one."""
+    correction moves the body's subtree as `parent_from_body @ E`, `E = W_nominal⁻¹ · W_fitted`."""
 
     free = sorted(robot.body(n) for n in robot.free_bodies)
     nominal = forward_kinematics(robot, qpos[:1])[0]
     return se3.inverse(nominal[free]) @ corrected[0, free]
 
 
-def spread(corrections: Tensor[[int, int, 4, 4]]) -> list[tuple[float, float]]:
-    """Per free body: largest disagreement between groups (cm, degrees)."""
+def spread(corrections: Tensor[[int, int, *Mat4x4]]) -> list[tuple[float, float]]:
+    """Per free body (`corrections [G, F]`): largest disagreement between groups,
+    `max_ij ‖t(E_i⁻¹ E_j)‖` (cm) and `max_ij ‖log R(E_i⁻¹ E_j)‖` (degrees)."""
 
     out = []
     for b in range(corrections.shape[1]):

@@ -60,6 +60,8 @@ MIN_OBSERVATIONS = 3
 # Stage 1 on a mobile base: timesteps where the recorded base moves less than this per step
 # count as still (m, rad), and a mount is searched on spans of at least MIN_STILL of them
 STILL_STEP = (0.002, math.radians(0.1))
+# A static camera's PnP start farther than this from the robot base (m) is degenerate
+MAX_STATIC_DISTANCE = 10.0
 MIN_STILL = 20
 
 
@@ -422,9 +424,11 @@ def _static_starts(
 
 
 def _within_prior(pose: Tensor[[4, 4]], prior: Tensor[[4, 4]], freedom: Freedom) -> bool:
-    """Whether `pose` lies within twice the priors' range of the prior pose (always, when the
-    priors give no pose: infinite range)."""
+    """Whether `pose` lies within twice the priors' range of the prior pose (when the priors
+    give no pose: within `MAX_STATIC_DISTANCE` of the robot base, a degenerate PnP otherwise)."""
 
+    if float(pose[:3, 3].norm()) > MAX_STATIC_DISTANCE:
+        return False
     if math.isinf(freedom.translation_std):
         return True
     delta = se3.inverse(prior) @ pose

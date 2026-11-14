@@ -41,6 +41,15 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   (FurnitureBench squashes the wrist to 224x224 but crops the front camera).
 - **End-effector columns of simulators name their frame:** M1's EE position equals FK of
   `panda_link8` exactly, a quick check of the joint mapping.
+- **Recorded end-effector poses check the description for free:** they validate the joint
+  mapping and locate arm bases exactly (groot: right arm 1.2 m from the description, 0.000 cm
+  residual after correction). Solve for the end-effector point's offset too: it is rarely the
+  hand origin, and ignoring it looked like a 5 cm error.
+- **Simulators define their cameras in source code** (robocasa's camera config, robosuite scene
+  files). MuJoCo cameras to OpenCV: flip y and z. Focal from the field of view and the rendered
+  height, not the padded one; letterboxed videos need the focal of the content area.
+- **Sample episodes from the first, middle and last data files:** setups and randomisation
+  showed up only that way (interndata b090: two head-camera positions, unlabelled).
 - **Index-like names can mislead:** RoboInter's `source_episode_name` is not DROID-3D's
   `traj_id` (joined poses 10–120 cm apart). Verify any join against the images.
 - **Triage by feature names first:** reading each feature's `names` blocked ten Open
@@ -61,6 +70,8 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - meshes in unreadable formats.
 
   Fix it in a corrected copy under `priors/descriptions/<embodiment>/`, never in the delivery.
+- **Gripper meshes are often not the real gripper** (Robotiq, dexterous hands): judge wrist
+  cameras by the links up to the hand.
 - **Gripper attachment angle:** check it against a view where the wrist mount is known. The
   Robotiq on the Panda flange was +90°, not the +45° chosen by eye at first.
   Project the flange axis into that view: the jaw centre must lie on it, which separates a
@@ -100,6 +111,10 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **A "static" camera can move in the robot frame:** InternData-M1's cameras are fixed in the
   scene but the robot base is re-placed ±5 cm per episode. Model the cameras fixed for the
   dataset and the base free per episode.
+- **Gate PnP starts with the prior:** PnP from wrist-triangulated points can land metres away at
+  a low residual (interndata head camera 0.7–2.4 m off at 2.27 px).
+- **Per-episode focals:** one focal per camera across episodes silently breaks every episode but
+  the first in a randomising simulator, while the pooled residual stays low (molmobot 0.47 px).
 - **A per-episode reference calibration is only a start:** DROID's own calibration is off in
   some episodes, and the rig can drift on a dark episode where it is right. Tight ranges, and
   read every episode's overlay.
@@ -135,7 +150,8 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - Arm placement differs per setup or station.
 - **Mobile bases:**
   - Base motion comes from the recorded state/actions, never vision.
-  - First check whether the base moves within episodes at all.
+  - First check whether the base moves within episodes at all (groot omron-base moves < 1 cm
+    per episode: its base cameras are static in the arm frame).
   - Validate odometry against an on-robot camera's rotation (HSR: commanded yaw useless,
     wheel encoders good).
   - molmobot records the base pose exactly.

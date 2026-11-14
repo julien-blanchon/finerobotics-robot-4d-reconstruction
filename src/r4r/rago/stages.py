@@ -227,6 +227,8 @@ def _multi_camera_tracks(
         for a in range(len(names))
         for b in range(a + 1, len(names))
     ]
+    if not pairs:  # one camera: nothing to link
+        return tracks
     found = cross_matches(model, videos, pairs)
     return merge_tracks(
         tracks,

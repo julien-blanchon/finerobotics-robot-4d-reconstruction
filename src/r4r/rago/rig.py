@@ -85,6 +85,10 @@ class Corrections(nn.Module):
         active = torch.cat(free) & ~torch.cat(held) if free else none.bool()
         self.register_buffer("active", active)
         self.delta = nn.Parameter(torch.zeros(count, 6, dtype=dtype, device=device))
+        # Each row's starting value: a frame-scope walk is costed by how far each step departs
+        # from the starting trajectory's step (e.g. odometry), not from standing still
+        eye = torch.eye(4, dtype=dtype, device=device)
+        self.register_buffer("start", eye.repeat(count, 1, 1))
         self.free_elements = [f is not None for f in freedoms]
 
     def values(self) -> Tensor[[int, 6]]:
@@ -94,7 +98,8 @@ class Corrections(nn.Module):
 
     def prior(self, element_from_reference: Tensor[[int, 4, 4]]) -> Tensor[[]]:
         """Gaussian cost of each row's deviation: from the reference (the description) for
-        dataset and episode scopes, from the previous frame's value for frame scope.
+        dataset and episode scopes; for frame scope, of its step from the previous frame
+        against the starting trajectory's step.
 
         `element_from_reference [rows, 4, 4]`: each row's corrected pose relative to its
         reference.
@@ -102,8 +107,11 @@ class Corrections(nn.Module):
 
         pose = element_from_reference
         walk = self.previous >= 0
-        before = pose[self.previous.clamp_min(0)]
-        relative = torch.where(walk[:, None, None], se3.inverse(before) @ pose, pose)
+        previous = self.previous.clamp_min(0)
+        step = se3.inverse(pose[previous]) @ pose
+        expected = se3.inverse(self.start[previous]) @ self.start
+        walked = se3.inverse(expected) @ step
+        relative = torch.where(walk[:, None, None], walked, pose)
         deviation = se3.se3_log(relative)
         cost = (deviation[:, :3] ** 2).sum(-1) / self.std[:, 0] ** 2
         cost = cost + (deviation[:, 3:] ** 2).sum(-1) / self.std[:, 1] ** 2
@@ -193,6 +201,7 @@ class Rig(nn.Module):
                     first.scatter_reduce_(0, rows, time, reduce="amin", include_self=False)
                     used = torch.unique(rows)
                     self.bodies.delta[used] = se3.se3_log(bodies_at[b, first[used]])
+                    self.bodies.start[used] = bodies_at[b, first[used]]
 
         self.register_buffer("initial_intrinsics", initial_intrinsics.to(qpos))
         # Pixels per unit of reprojection error, a constant per camera (default: initial focal)

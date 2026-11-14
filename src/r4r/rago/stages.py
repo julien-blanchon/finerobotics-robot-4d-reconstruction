@@ -416,12 +416,13 @@ def _static_starts[C: IntVar](
 ) -> tuple[Tensor[[int, C, *Mat4x4]], Tensor[[C, *Mat3x3]]]:
     """Stage 3: each free static camera's pose per episode (and focal, from the first episode
     where it is found, when unknown) by PnP on points the moving cameras triangulate. Episodes
-    where PnP fails keep the description's pose; cameras the priors fix keep theirs, and
-    cameras whose pose the priors give (`known_mount`) start from it: the bundle refines them
-    within the priors' ranges (PnP on robot-attached tracks can land a known camera 10 cm /
-    6 deg off and the bundle then keeps it there). A
-    dataset-scope camera starts every episode from the consensus of its episodes' PnP poses
-    (`_consensus`): one episode with few links can land metres away."""
+    where PnP fails keep the description's pose. A pose recorded for the episode
+    (`RigEpisode.poses`) is used whatever the priors say; otherwise cameras the priors fix
+    keep theirs, and cameras whose pose the priors give (`known_mount`) start from it: the
+    bundle refines them within the priors' ranges (PnP on robot-attached tracks can land a
+    known camera 10 cm / 6 deg off and the bundle then keeps it there). A dataset-scope
+    camera starts every episode from the consensus of its episodes' PnP poses (`_consensus`):
+    one episode with few links can land metres away."""
 
     device = mounts.device
     index = [robot.camera(n) for n in names]
@@ -440,12 +441,13 @@ def _static_starts[C: IntVar](
         observed = tracks.view_camera[tracks.view]
         points = triangulate(tracks, world_from_view, ~static[observed])
         for c in static.nonzero()[:, 0].tolist():
-            if not free[c]:
-                continue
+            # The episode's own calibration comes first, even where the priors give a pose
             recorded = e.poses.get(names[c])
-            if recorded is not None:  # the episode's own calibration: no PnP
+            if recorded is not None:
                 starts[i, c] = recorded.to(starts)
                 support[i, c] = 1.0
+                continue
+            if not free[c]:
                 continue
             seen = (observed == c) & (points.count[tracks.track] >= MIN_OBSERVATIONS)
             if int(seen.sum()) < MIN_POINTS:

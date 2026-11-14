@@ -370,6 +370,11 @@ def _static_starts(
                 None if lens is None else lens.distortion[c],
                 None if lens is None else lens.fisheye[c],
             )
+            if start is not None and not (
+                bool(torch.isfinite(start.world_from_camera).all())  # degenerate PnP: NaN
+                and _within_prior(start.world_from_camera, mounts[c], robot.free_cameras[names[c]])
+            ):
+                start = None  # keep the prior's pose
             if start is not None:
                 starts[i, c] = start.world_from_camera
                 support[i, c] = start.inliers
@@ -380,6 +385,20 @@ def _static_starts(
     intrinsics = intrinsics.clone()
     intrinsics[:, :2, :2] *= (focal / intrinsics[:, 0, 0])[:, None, None]
     return starts, intrinsics
+
+
+def _within_prior(pose: Tensor[[4, 4]], prior: Tensor[[4, 4]], freedom: Freedom) -> bool:
+    """Whether `pose` lies within twice the priors' range of the prior pose (always, when the
+    priors give no pose: infinite range)."""
+
+    if math.isinf(freedom.translation_std):
+        return True
+    delta = se3.inverse(prior) @ pose
+    angle = float(se3.so3_log(delta[:3, :3]).norm())
+    return (
+        float(delta[:3, 3].norm()) <= 2 * freedom.translation_std
+        and angle <= 2 * freedom.rotation_std
+    )
 
 
 def _consensus(

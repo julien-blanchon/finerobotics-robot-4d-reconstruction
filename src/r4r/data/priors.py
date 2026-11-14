@@ -23,6 +23,8 @@ take precedence over `meta/robot.json` and the camera feature info:
 }
 ```
 
+`state_feature` names the joint-state feature when `meta/robot.json` names a wrong one (a list:
+the features' columns concatenated, e.g. leg joints recorded apart from the arms).
 `description` replaces the delivered robot description by a corrected one kept under
 `priors/` (fixes to the URDF/MJCF itself: wrong joints, frames, meshes). `joints` add or
 replace (by URDF joint name) entries of the state mapping; `removed_joints`
@@ -35,10 +37,17 @@ the dataset, per episode (e.g. a static camera re-placed between episodes) or pe
 `bodies` are elements of the description whose offset from their parent is not exactly known
 (a second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the
 video resolution, a property of the lens: fixed across episodes unless `focal_range`
-(relative) says how far it may vary. `lens` is `pinhole` (radial `distortion`: OpenCV's
+(relative) says how far it may vary; `aspect` (fy / fx, default 1) for non-square pixels.
+`lens` is `pinhole` (radial `distortion`: OpenCV's
 k1, k2, k3) or `fisheye` (Kannala–Brandt, OpenCV fisheye's k1..k4); `distortion_range` is the
 prior std of each coefficient when fitting refines them (0: held; default 0 when the
-coefficients are given, wide for a fisheye without them).
+coefficients are given, wide for a fisheye without them). `intrinsics` reads a camera's
+intrinsics from a column of the dataset itself, per episode (simulators that randomise the
+focal): `{"column": "publisher.<name>_intrinsics", "layout": "fx_fy_cx_cy" | "matrix",
+"size": [w, h], "resize": "stretch" | "height"}`: `size` is the resolution the values are
+given at (default: the video's), `resize` how they map to the video (`stretch`: each axis
+scaled; `height`: the same vertical field of view, centred). `ignore` leaves a camera out (one
+that rides on no robot body, e.g. worn by a person).
 """
 
 from __future__ import annotations
@@ -56,6 +65,16 @@ PRIORS = Path(__file__).resolve().parents[3] / "priors"
 
 
 @dataclass(frozen=True, slots=True)
+class IntrinsicsColumn:
+    """Where a dataset records a camera's intrinsics (see the module doc)."""
+
+    column: str
+    layout: Literal["fx_fy_cx_cy", "matrix"] = "fx_fy_cx_cy"
+    size: tuple[int, int] | None = None  # width, height the values are given at
+    resize: Literal["stretch", "height"] = "stretch"
+
+
+@dataclass(frozen=True, slots=True)
 class CameraPrior:
     mount: Literal["static", "moving"] | None = None
     link: str | None = None
@@ -66,6 +85,9 @@ class CameraPrior:
     lens: Literal["pinhole", "fisheye"] = "pinhole"
     focal: float | None = None  # pixels at the video resolution
     focal_range: float | None = None  # relative; None: unknown (searched)
+    # Pixel aspect fy / fx (non-square pixels, e.g. a 848-wide sensor resized to 640): `focal`
+    # is fx, fy = focal × aspect; focal corrections keep the ratio
+    aspect: float = 1.0
     # Pinhole: OpenCV radial k1, k2, k3; fisheye: OpenCV fisheye (Kannala–Brandt) k1..k4.
     # None: zero (an ideal pinhole; for a fisheye, unknown: refined from the equidistant model)
     distortion: tuple[float, ...] | None = None
@@ -74,6 +96,10 @@ class CameraPrior:
     # How often the mount may change within its ranges: dataset, episode (e.g. a static camera
     # re-placed between episodes) or frame
     scope: Literal["dataset", "episode", "frame"] = "dataset"
+    # Intrinsics recorded in the dataset's own columns (per episode), if any
+    intrinsics: IntrinsicsColumn | None = None
+    # Left out of every command (a camera on no robot body, e.g. worn by a person)
+    ignore: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,16 +118,23 @@ class BodyPrior:
 @dataclass(frozen=True, slots=True)
 class BaseOdometry:
     """Where a mobile base's motion is recorded (see `r4r.rago.odometry`): `feature` columns
-    `columns` holding planar poses (x, y, θ), body-frame velocities (vx, vy, ω), or wheel
-    angles (left, right[, steering]) of a caster or differential drive with its geometry."""
+    `columns` holding planar poses (x, y, θ or x, y, qz, qw), full poses (x, y, z, qw, qx, qy,
+    qz: list the columns in that order), body-frame velocities (vx, vy, ω), wheel angles (left,
+    right[, steering]) of a caster or differential drive with its geometry, or a swerve drive's
+    steering angles (`columns`) and wheel ground speeds (m/s, `speed_columns` of
+    `speed_feature`, default `feature`) with each wheel's contact point (x, y) in the base
+    frame (`wheels`)."""
 
-    kind: Literal["pose", "velocity", "caster"]
-    feature: str
+    kind: Literal["pose", "velocity", "caster", "swerve"]
+    feature: str | tuple[str, ...]  # several: their columns concatenated
     columns: tuple[int, ...]
     radius: float | None = None
     half_track: float | None = None
     offset: float = 0.0
     signs: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    speed_feature: str | None = None
+    speed_columns: tuple[int, ...] = ()
+    wheels: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +150,8 @@ class DatasetPriors:
     # (e.g. `descriptions/<embodiment>/robot.xml`, shared by an embodiment's datasets). Meshes
     # may point back into the delivery (absolute `meshdir` / filenames).
     description: str | None = None
+    # The feature holding the joint state, when `meta/robot.json` names a wrong one
+    state_feature: str | tuple[str, ...] | None = None  # several: concatenated
     # Kinematic refinement in `r4r rig` (prior stds; absent: held): joint-encoder offsets
     # (`joint_offset_deg` for hinges, `joint_offset_mm` for slides, optionally only `joints`)
     # and a video/joint time offset on top of `state_shift` (`time_offset_frames`)
@@ -181,12 +216,15 @@ def load_priors(root: Path) -> DatasetPriors:
     if odometry is not None:
         odometry = BaseOdometry(
             odometry["kind"],
-            odometry["feature"],
+            _feature(odometry["feature"]),
             tuple(odometry["columns"]),
             odometry.get("radius"),
             odometry.get("half_track"),
             float(odometry.get("offset", 0.0)),
             tuple(odometry.get("signs", (1.0, 1.0, 1.0))),
+            odometry.get("speed_feature"),
+            tuple(odometry.get("speed_columns", ())),
+            tuple(tuple(w) for w in odometry.get("wheels", ())),
         )
     return DatasetPriors(
         base=raw.get("base", "fixed"),
@@ -197,10 +235,26 @@ def load_priors(root: Path) -> DatasetPriors:
         state_shift=int(raw.get("state_shift", 0)),
         cameras=cameras,
         description=raw.get("description"),
+        state_feature=_feature(raw.get("state_feature")),
         kinematics=raw.get("kinematics"),
         stations=raw.get("stations", {}),
         raw={"cameras": raw.get("cameras", {}), "bodies": raw.get("bodies", {})},
         notes=raw.get("notes", ""),
+    )
+
+
+def _feature(value: str | list[str] | None) -> str | tuple[str, ...] | None:
+    return tuple(value) if isinstance(value, list) else value
+
+
+def _intrinsics_column(raw: dict | None) -> IntrinsicsColumn | None:
+    if raw is None:
+        return None
+    return IntrinsicsColumn(
+        raw["column"],
+        raw.get("layout", "fx_fy_cx_cy"),
+        tuple(raw["size"]) if raw.get("size") else None,
+        raw.get("resize", "stretch"),
     )
 
 
@@ -216,9 +270,12 @@ def _cameras(raw: Mapping[str, dict]) -> dict[str, CameraPrior]:
             lens=c.get("lens", "pinhole"),
             focal=c.get("focal"),
             focal_range=c.get("focal_range"),
+            aspect=float(c.get("aspect", 1.0)),
             distortion=tuple(c["distortion"]) if c.get("distortion") is not None else None,
             distortion_range=c.get("distortion_range"),
             scope=c.get("scope", "dataset"),
+            intrinsics=_intrinsics_column(c.get("intrinsics")),
+            ignore=bool(c.get("ignore", False)),
         )
         for name, c in raw.items()
     }

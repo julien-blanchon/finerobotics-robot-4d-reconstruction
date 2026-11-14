@@ -50,6 +50,15 @@ def from_poses(x: Tensor[[int]], y: Tensor[[int]], theta: Tensor[[int]]) -> Tens
     return se3.inverse(pose[:1]) @ pose
 
 
+def from_poses_3d(position: Tensor[[int, 3]], quaternion: Tensor[[int, 4]]) -> Tensor[[int, 4, 4]]:
+    """Base motion from full poses (position, quaternion w x y z) in any fixed world frame: a
+    recorded root pose (simulator free joint, a legged robot's state estimator)."""
+
+    rotation = se3.quaternion_to_matrix(quaternion / quaternion.norm(dim=-1, keepdim=True))
+    pose = se3.from_rotation_translation(rotation, position)
+    return se3.inverse(pose[:1]) @ pose
+
+
 def from_steps(step: Tensor[[int, 3]]) -> Tensor[[int, 4, 4]]:
     """Base motion from per-step body-frame displacements (dx, dy, dθ) between consecutive
     timesteps (row t: from t − 1 to t; row 0 ignored), each a constant-twist arc."""
@@ -70,6 +79,22 @@ def from_velocity(velocity: Tensor[[int, 3]], time: Tensor[[int]]) -> Tensor[[in
     dt = torch.diff(time, prepend=time[:1])
     mean = torch.cat((velocity[:1], 0.5 * (velocity[1:] + velocity[:-1])))
     return from_steps(mean * dt[:, None])
+
+
+def swerve_twist(
+    steering: Tensor[[int, int]], speed: Tensor[[int, int]], wheels: Tensor[[int, 2]]
+) -> Tensor[[int, 3]]:
+    """Body-frame twist (vx, vy, ω) of a swerve drive per timestep, by least squares over its
+    wheels: wheel i at (x_i, y_i), steered to θ_i and rolling at s_i (m/s) moves at
+    s_i (cos θ_i, sin θ_i) = (vx − ω y_i, vy + ω x_i)."""
+
+    x, y = wheels[:, 0], wheels[:, 1]
+    one, zero = torch.ones_like(x), torch.zeros_like(x)
+    design = torch.stack(
+        (torch.stack((one, zero, -y), -1), torch.stack((zero, one, x), -1)), 1
+    ).reshape(-1, 3)  # [2W, 3]: rows (vx, vy, ω) per wheel, x then y
+    target = torch.stack((speed * torch.cos(steering), speed * torch.sin(steering)), -1)
+    return target.reshape(len(target), -1) @ torch.linalg.pinv(design).T
 
 
 def caster_steps(

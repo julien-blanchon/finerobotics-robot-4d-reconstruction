@@ -174,7 +174,7 @@ class ARROW(nn.Module):
 
         parts: list[Predictions[B, int]] = []
         for start in range(0, max(queries.count, 1), chunk):
-            part = queries.slice(start, start + chunk)
+            part = queries.slice(start, min(start + chunk, queries.count))
             with self.autocast(encoding.images.device):
                 tokens = self.query_embed(encoding.images, encoding.id_tokens, part)
                 tokens = self.decoder(tokens, encoding.keys, encoding.values)

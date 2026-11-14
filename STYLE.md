@@ -55,10 +55,11 @@ are checked statically, at zero runtime cost.
 
   ```python
   def per_frame[N: IntVar, F: IntVar](xy: Tensor[[N, 2]], frames: Int[F], ...) -> Queries[1, F * N]
-  def slice[B: IntVar, Q: IntVar](self: Queries[B, Q], start: int, stop: int) -> Queries[B, int]
+  def slice[Start: IntVar, Stop: IntVar](self, start: Int[Start], stop: Int[Stop]) -> Queries[B, Stop - Start]
   ```
 
   `int` in a shape means "data-dependent" (a mask, a file's length), never "not written yet".
+  Where pyrefly has no form for a size (`ceil(N / stride)`), keep `int` with a one-line comment.
 
 **Axis glossary.** Single-letter (or short PascalCase) dimension names mean the same thing in
 every file. Defined once in `src/r4r/types.py`; add a name there before using it.

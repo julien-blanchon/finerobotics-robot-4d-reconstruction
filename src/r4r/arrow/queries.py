@@ -33,8 +33,10 @@ class Queries[B: IntVar, Q: IntVar]:
     def count(self) -> Int[Q]:
         return self.xy.shape[1]
 
-    def slice(self, start: int, stop: int) -> Queries[B, int]:
-        """Queries `start:stop` (clipped to the count, so the length is left `int`)."""
+    def slice[Start: IntVar, Stop: IntVar](
+        self, start: Int[Start], stop: Int[Stop]
+    ) -> Queries[B, Stop - Start]:
+        """Queries `start:stop`, for `0 ≤ start ≤ stop ≤ count` (Python would clip a longer stop)."""
 
         return Queries(
             self.xy[:, start:stop],

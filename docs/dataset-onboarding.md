@@ -49,6 +49,12 @@ Only then calibrate (section 4): the solver refines good priors; it does not res
 3. Video/joint-state offset: `r4r fit <dataset> <camera> --shifts -3 -2 -1 0 1 2 3` ✅. If a
    shift other than 0 wins clearly, set `state_shift`. Check two or three episodes: it may
    vary.
+4. Remaining kinematic errors (encoder zeros, a sub-frame lag) ✅: declare them in the priors,
+   `"kinematics": {"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "time_offset_frames": 2.0}`
+   (optionally `"joints": [...]` to free only some), and `r4r rig` refines them in every
+   bundle, printing each offset with the two episode groups' values: trust an offset only
+   when the groups agree. Joint offsets need cameras that pin the chain (a wrist camera plus
+   a static one); with the time offset held, joint offsets absorb timing errors.
 
 ## 2. Cameras: what is where, and what is known
 

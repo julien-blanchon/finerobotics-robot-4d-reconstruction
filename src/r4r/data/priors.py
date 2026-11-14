@@ -47,8 +47,16 @@ intrinsics from a column of the dataset itself, per episode (simulators that ran
 focal): `{"column": "publisher.<name>_intrinsics", "layout": "fx_fy_cx_cy" | "matrix",
 "size": [w, h], "resize": "stretch" | "height"}`: `size` is the resolution the values are
 given at (default: the video's), `resize` how they map to the video (`stretch`: each axis
-scaled; `height`: the same vertical field of view, centred). `ignore` leaves a camera out (one
-that rides on no robot body, e.g. worn by a person).
+scaled; `height`: the same vertical field of view, centred). `pose` reads a camera's recorded
+pose per episode from a JSON string column of the dataset (simulators that re-place cameras
+per episode and record them with the episode, too many episodes for a table):
+`{"column": "publisher.episode.extra_info", "path": ["config", "cameras", "name=front"],
+"axes": "forward_left_up"}`: `path` walks the JSON (`key=value` picks the list item whose `key`
+equals `value`) to an object with `position` (x, y, z) and `orientation` (w, x, y, z) in the
+robot base frame (moving camera: on its link); `axes` are the recorded camera axes (`opencv`,
+or `forward_left_up`: x forward, y left, z up, Isaac Sim's "world" camera axes). An episodes
+table pose takes precedence. `ignore` leaves a camera out (one that rides on no robot body,
+e.g. worn by a person).
 """
 
 from __future__ import annotations
@@ -79,6 +87,15 @@ class IntrinsicsColumn:
 
 
 @dataclass(frozen=True, slots=True)
+class PoseColumn:
+    """Where a dataset records a camera's pose per episode (see the module doc)."""
+
+    column: str
+    path: tuple[str, ...]
+    axes: Literal["opencv", "forward_left_up"] = "opencv"
+
+
+@dataclass(frozen=True, slots=True)
 class CameraPrior:
     mount: Literal["static", "moving"] | None = None
     link: str | None = None
@@ -102,6 +119,8 @@ class CameraPrior:
     scope: Literal["dataset", "episode", "frame"] = "dataset"
     # Intrinsics recorded in the dataset's own columns (per episode), if any
     intrinsics: IntrinsicsColumn | None = None
+    # Pose recorded in the dataset's own JSON column (per episode), if any
+    pose: PoseColumn | None = None
     # Left out of every command (a camera on no robot body, e.g. worn by a person)
     ignore: bool = False
 
@@ -266,6 +285,12 @@ def _intrinsics_column(raw: JsonObject | None) -> IntrinsicsColumn | None:
     )
 
 
+def _pose_column(raw: JsonObject | None) -> PoseColumn | None:
+    if raw is None:
+        return None
+    return PoseColumn(raw["column"], tuple(raw["path"]), raw.get("axes", "opencv"))
+
+
 def _cameras(raw: Mapping[str, JsonObject]) -> dict[str, CameraPrior]:
     return {
         name: CameraPrior(
@@ -283,6 +308,7 @@ def _cameras(raw: Mapping[str, JsonObject]) -> dict[str, CameraPrior]:
             distortion_range=c.get("distortion_range"),
             scope=c.get("scope", "dataset"),
             intrinsics=_intrinsics_column(c.get("intrinsics")),
+            pose=_pose_column(c.get("pose")),
             ignore=bool(c.get("ignore", False)),
         )
         for name, c in raw.items()

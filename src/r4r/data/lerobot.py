@@ -27,6 +27,7 @@ from .priors import (
     DatasetPriors,
     IntrinsicsColumn,
     JsonObject,
+    PoseColumn,
     load_episode_record,
     load_priors,
 )
@@ -39,6 +40,10 @@ if TYPE_CHECKING:
     from r4r.types import RGB, Mat3x3, Mat4x4
 
 IMAGE_PREFIX = "observation.images."
+# OpenCV camera axes (x right, y down, z forward) in x-forward, y-left, z-up camera axes
+FORWARD_LEFT_UP_FROM_OPENCV = torch.tensor(
+    [[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]], dtype=torch.float64
+)
 
 
 def load_episode(
@@ -89,6 +94,11 @@ def load_episode(
             rotation = se3.quaternion_to_matrix(torch.tensor(q, dtype=torch.float64))
             position = torch.tensor([x, y, z], dtype=torch.float64)
             stream = replace(stream, pose=se3.from_rotation_translation(rotation, position))
+        elif prior.pose is not None:
+            # One row of a dataset is a dict of values; this column holds JSON text
+            row = cast("Mapping[str, str]", every.select_columns([prior.pose.column])[0])
+            text = row[prior.pose.column]
+            stream = replace(stream, pose=recorded_pose(text, prior.pose))
         cameras.append(stream)
     feature = priors.state_feature or robot["state"]["feature"]
     state = _columns(rows, feature)
@@ -136,6 +146,21 @@ def _recorded_intrinsics(
         sx, sy = width / given_width, height / given_height
         fx, fy, cx, cy = fx * sx, fy * sy, cx * sx, cy * sy
     return torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
+
+
+def recorded_pose(text: str, source: PoseColumn) -> Tensor[[*Mat4x4]]:
+    """A camera's recorded `world_from_camera` (OpenCV axes) from one row of its JSON column."""
+
+    item = json.loads(text)
+    for step in source.path:
+        key, _, value = step.partition("=")
+        item = next(i for i in item if str(i[key]) == value) if value else item[key]
+    q = torch.tensor(item["orientation"], dtype=torch.float64)
+    rotation = se3.quaternion_to_matrix(q / q.norm())
+    if source.axes == "forward_left_up":
+        rotation = rotation @ FORWARD_LEFT_UP_FROM_OPENCV.to(rotation)
+    position = torch.tensor(item["position"], dtype=torch.float64)
+    return se3.from_rotation_translation(rotation, position)
 
 
 def _description(root: Path, robot: JsonObject, priors: DatasetPriors) -> Path:

@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="0.5" y="0.5" width="899" height="519" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+<line x1="30.0" y1="393.0" x2="150.5" y2="254.1" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="79.9" y1="397.1" x2="200.4" y2="258.2" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="129.9" y1="401.2" x2="250.4" y2="262.3" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="179.8" y1="405.4" x2="300.3" y2="266.5" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="229.8" y1="409.5" x2="350.3" y2="270.6" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="279.7" y1="413.6" x2="400.2" y2="274.7" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="329.7" y1="417.8" x2="450.2" y2="278.9" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="379.6" y1="421.9" x2="500.1" y2="283.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="429.6" y1="426.1" x2="550.1" y2="287.1" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="479.5" y1="430.2" x2="600.0" y2="291.3" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="30.0" y1="393.0" x2="479.5" y2="430.2" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="43.4" y1="377.5" x2="492.9" y2="414.8" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="56.8" y1="362.1" x2="506.3" y2="399.3" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="70.2" y1="346.7" x2="519.7" y2="383.9" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="83.5" y1="331.2" x2="533.1" y2="368.5" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="96.9" y1="315.8" x2="546.5" y2="353.0" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="110.3" y1="300.4" x2="559.8" y2="337.6" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="123.7" y1="284.9" x2="573.2" y2="322.1" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="137.1" y1="269.5" x2="586.6" y2="306.7" stroke="#e2e8f0" stroke-width="1"/>
+<line x1="150.5" y1="254.1" x2="600.0" y2="291.3" stroke="#e2e8f0" stroke-width="1"/>
+<polyline points="220.6,94.3 220.7,92.7 220.5,92.3 220.6,92.8 222.7,96.3 230.8,104.3 244.9,117.5 260.3,133.0 275.4,147.0 290.9,158.9 307.5,169.1 326.6,179.1 345.9,188.5 365.4,197.8 384.1,207.1 400.6,216.0 415.1,223.9 427.0,230.3 436.3,235.2 443.1,238.9 446.5,241.7 447.8,242.9 449.1,243.3 450.5,244.0 451.9,245.7 452.6,247.8 452.5,249.9 451.8,252.1 450.0,253.5 447.5,253.3 445.2,252.9 441.7,251.4 434.2,249.0 425.5,246.3 416.9,242.7 408.0,239.5 399.8,239.3 391.9,242.2 384.5,247.1 378.4,252.5 371.1,257.1 361.3,263.3 351.8,269.8 343.6,275.4 336.7,279.1 331.7,280.9 327.3,283.7 323.8,287.4 321.2,291.6 319.9,295.1 318.7,297.4 318.9,299.1 327.1,295.5 330.0,294.1 331.4,293.1 331.1,293.2 329.8,294.2 324.5,297.2 318.0,295.1 311.5,289.7 309.1,285.7 304.6,282.2 298.6,279.9 292.2,281.9 288.1,284.3 285.5,285.3" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="3 4" opacity="0.8"/>
+<polyline points="120.1,350.8 120.1,187.0 217.3,68.3 251.2,93.7 435.7,178.3 479.5,190.4 465.2,241.5 465.2,241.5 445.1,312.9" fill="none" stroke="#8b5cf6" stroke-width="9" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/>
+<circle cx="120.1" cy="350.8" r="6" fill="#ffffff" stroke="#8b5cf6" stroke-width="3"/>
+<circle cx="120.1" cy="187.0" r="6" fill="#ffffff" stroke="#8b5cf6" stroke-width="3"/>
+<circle cx="217.3" cy="68.3" r="6" fill="#ffffff" stroke="#8b5cf6" stroke-width="3"/>
+<circle cx="251.2" cy="93.7" r="6" fill="#ffffff" stroke="#8b5cf6" stroke-width="3"/>
+<circle cx="435.7" cy="178.3" r="6" fill="#ffffff" stroke="#8b5cf6" stroke-width="3"/>
+<circle cx="479.5" cy="190.4" r="6" fill="#ffffff" stroke="#8b5cf6" stroke-width="3"/>
+<circle cx="465.2" cy="241.5" r="6" fill="#ffffff" stroke="#8b5cf6" stroke-width="3"/>
+<circle cx="465.2" cy="241.5" r="6" fill="#ffffff" stroke="#8b5cf6" stroke-width="3"/>
+<line x1="120.1" y1="350.8" x2="200.0" y2="357.4" stroke="#ef4444" stroke-width="3.5" stroke-linecap="round"/>
+<line x1="120.1" y1="350.8" x2="141.5" y2="326.1" stroke="#22c55e" stroke-width="3.5" stroke-linecap="round"/>
+<line x1="120.1" y1="350.8" x2="120.1" y2="272.1" stroke="#3b82f6" stroke-width="3.5" stroke-linecap="round"/>
+<line x1="465.2" y1="241.5" x2="510.0" y2="252.2" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round"/>
+<line x1="465.2" y1="241.5" x2="468.2" y2="255.8" stroke="#22c55e" stroke-width="2.5" stroke-linecap="round"/>
+<line x1="465.2" y1="241.5" x2="453.1" y2="284.6" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round"/>
+<polygon points="465.4,38.7 350.9,59.0 339.6,110.7 454.1,90.3" fill="#0ea5e9" fill-opacity="0.18" stroke="#0ea5e9" stroke-width="2"/>
+<line x1="382.4" y1="40.0" x2="465.4" y2="38.7" stroke="#0ea5e9" stroke-width="1.6"/>
+<line x1="382.4" y1="40.0" x2="350.9" y2="59.0" stroke="#0ea5e9" stroke-width="1.6"/>
+<line x1="382.4" y1="40.0" x2="339.6" y2="110.7" stroke="#0ea5e9" stroke-width="1.6"/>
+<line x1="382.4" y1="40.0" x2="454.1" y2="90.3" stroke="#0ea5e9" stroke-width="1.6"/>
+<circle cx="382.4" cy="40.0" r="4" fill="#0ea5e9"/>
+<polygon points="244.0,164.0 329.8,185.2 308.3,252.7 222.5,231.5" fill="#0ea5e9" fill-opacity="0.18" stroke="#0ea5e9" stroke-width="2"/>
+<line x1="241.5" y1="194.6" x2="244.0" y2="164.0" stroke="#0ea5e9" stroke-width="1.6"/>
+<line x1="241.5" y1="194.6" x2="329.8" y2="185.2" stroke="#0ea5e9" stroke-width="1.6"/>
+<line x1="241.5" y1="194.6" x2="308.3" y2="252.7" stroke="#0ea5e9" stroke-width="1.6"/>
+<line x1="241.5" y1="194.6" x2="222.5" y2="231.5" stroke="#0ea5e9" stroke-width="1.6"/>
+<circle cx="241.5" cy="194.6" r="4" fill="#0ea5e9"/>
+<polygon points="414.6,285.5 411.1,268.5 441.4,265.7 444.9,282.6" fill="#f59e0b" fill-opacity="0.18" stroke="#f59e0b" stroke-width="2"/>
+<line x1="425.5" y1="246.3" x2="414.6" y2="285.5" stroke="#f59e0b" stroke-width="1.6"/>
+<line x1="425.5" y1="246.3" x2="411.1" y2="268.5" stroke="#f59e0b" stroke-width="1.6"/>
+<line x1="425.5" y1="246.3" x2="441.4" y2="265.7" stroke="#f59e0b" stroke-width="1.6"/>
+<line x1="425.5" y1="246.3" x2="444.9" y2="282.6" stroke="#f59e0b" stroke-width="1.6"/>
+<circle cx="425.5" cy="246.3" r="4" fill="#f59e0b"/>
+<line x1="465.2" y1="241.5" x2="425.5" y2="246.3" stroke="#1e293b" stroke-width="1.5" stroke-dasharray="4 3"/>
+<path d="M382 40 L632 66" fill="none" stroke="#0284c7" stroke-width="1.2"/><circle cx="382" cy="40" r="3" fill="#0284c7"/><path d="M242 195 L632 70" fill="none" stroke="#0284c7" stroke-width="1.2"/><circle cx="242" cy="195" r="3" fill="#0284c7"/><text x="640" y="62" font-size="15" font-weight="700" fill="#0284c7">static cameras (2 exteriors)</text><text x="640" y="81" font-size="13" fill="#475569">pose in the base frame</text><text x="640" y="100" font-size="13" fill="#475569">scope here: one pose per episode</text><path d="M465 242 L632 196" fill="none" stroke="#7c3aed" stroke-width="1.2"/><circle cx="465" cy="242" r="3" fill="#7c3aed"/><text x="640" y="192" font-size="15" font-weight="700" fill="#7c3aed">link (panda_link8)</text><text x="640" y="211" font-size="13" fill="#475569">base_from_link = FK(joint states qₜ)</text><path d="M426 246 L632 286" fill="none" stroke="#ea580c" stroke-width="1.2"/><circle cx="426" cy="246" r="3" fill="#ea580c"/><text x="640" y="282" font-size="15" font-weight="700" fill="#ea580c">moving camera (wrist)</text><text x="640" y="301" font-size="13" fill="#475569">pose = FK(qₜ) · mount</text><text x="640" y="320" font-size="13" fill="#475569">mount: fixed on the link, fitted once</text><text x="640" y="339" font-size="13" fill="#475569">dotted: its path over the episode</text><path d="M120 351 L120 420" fill="none" stroke="#0f172a" stroke-width="1.2"/><circle cx="120" cy="351" r="3" fill="#0f172a"/><text x="60" y="438" font-size="15" font-weight="700" fill="#0f172a">base frame (panda_link0)</text><text x="60" y="457" font-size="13" fill="#475569">every output is here, in metres</text>
+<g transform="translate(640,400)"><line x1="0" y1="0" x2="22" y2="0" stroke="#ef4444" stroke-width="3"/><text x="28" y="5" font-size="13" fill="#475569">x</text><line x1="50" y1="0" x2="72" y2="0" stroke="#22c55e" stroke-width="3"/><text x="78" y="5" font-size="13" fill="#475569">y</text><line x1="100" y1="0" x2="122" y2="0" stroke="#3b82f6" stroke-width="3"/><text x="128" y="5" font-size="13" fill="#475569">z</text><text x="0" y="28" font-size="12" fill="#475569">camera axes: OpenCV (z forward)</text></g>
+<text x="24" y="500" font-size="12" fill="#475569">Drawn from a real solution: DROID episode 150, timestep 33, solved by r4r rig (median 0.55 px). Orthographic view.</text>
+</svg>

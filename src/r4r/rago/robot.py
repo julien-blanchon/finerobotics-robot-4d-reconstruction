@@ -145,7 +145,14 @@ class CameraMount:
             position = torch.tensor(prior.position, dtype=torch.float64)
             pose = tuple(map(tuple, se3.from_rotation_translation(rotation, position).tolist()))
         if not moving:
-            unknown = (math.inf, math.inf)
+            # Ranges the priors give bound the bundle around the camera's start (PnP or a
+            # recorded per-episode pose); none: free
+            unknown = (
+                prior.position_range,
+                math.radians(prior.orientation_range_deg)
+                if prior.orientation_range_deg < 180.0
+                else math.inf,
+            )
         else:
             unknown = (SEARCH_TRANSLATION_STD, SEARCH_ROTATION_STD)
         return cls(

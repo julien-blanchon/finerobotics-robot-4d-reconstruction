@@ -28,16 +28,17 @@ the features' columns concatenated, e.g. leg joints recorded apart from the arms
 `description` replaces the delivered robot description by a corrected one kept under
 `priors/` (fixes to the URDF/MJCF itself: wrong joints, frames, meshes). `joints` add or
 replace (by URDF joint name) entries of the state mapping; `removed_joints`
-drops wrong ones; `state_shift` fixes a video/joint-state offset (frame t's state is taken
-from t + shift; `r4r fit --shifts` measures it). A camera's `position` and `orientation`
-(quaternion w, x, y, z of its OpenCV axes) are in the frame of `link` (moving) or of the robot
-base (static); ranges bound what fitting may change (small: fixed across episodes, fitted per
-episode within them). `scope` says how often a value may change within its ranges: once for
-the dataset, per episode (e.g. a static camera re-placed between episodes) or per frame.
-`bodies` are elements of the description whose offset from their parent is not exactly known
-(a second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the
-video resolution, a property of the lens: fixed across episodes unless `focal_range`
-(relative) says how far it may vary; `aspect` (fy / fx, default 1) for non-square pixels.
+drops wrong ones; `state_shift` fixes a video/joint-state offset (frame t's state is taken from
+t + shift; `r4r fit --shifts` measures it). A camera's `position` and `orientation` (quaternion
+w, x, y, z of its OpenCV axes) are in the frame of `link` (moving) or of the robot base
+(static); ranges bound what fitting may change (small: fixed across episodes, fitted per episode
+within them): each is the std σ of a Gaussian prior, a residual `(x − x₀) / σ` (metres, radians
+of rotation, relative focal). `scope` says how often a value may change within its ranges: once
+for the dataset, per episode (e.g. a static camera re-placed between episodes) or per frame.
+`bodies` are elements of the description whose offset from their parent is not exactly known (a
+second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the video
+resolution, a property of the lens: fixed across episodes unless `focal_range` (relative) says
+how far it may vary; `aspect` (fy / fx, default 1) for non-square pixels.
 `lens` is `pinhole` (radial `distortion`: OpenCV's
 k1, k2, k3) or `fisheye` (Kannala–Brandt, OpenCV fisheye's k1..k4); `distortion_range` is the
 prior std of each coefficient when fitting refines them (0: held; default 0 when the
@@ -57,11 +58,14 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, overload
 
 from .episode import JointMap
 
 PRIORS = Path(__file__).resolve().parents[3] / "priors"
+
+# Parsed JSON (priors files, `meta/robot.json`): an untyped boundary, read field by field
+type JsonObject = dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,12 +159,12 @@ class DatasetPriors:
     # Kinematic refinement in `r4r rig` (prior stds; absent: held): joint-encoder offsets
     # (`joint_offset_deg` for hinges, `joint_offset_mm` for slides, optionally only `joints`)
     # and a video/joint time offset on top of `state_shift` (`time_offset_frames`)
-    kinematics: dict | None = None
+    kinematics: JsonObject | None = None
     # Per-station overrides (raw priors fields `cameras`, `bodies`, set on top of the
     # dataset's, entry by entry): {station: {"cameras": {...}, "bodies": {...}}}
-    stations: dict = field(default_factory=dict)
+    stations: dict[str, JsonObject] = field(default_factory=dict)
     # The raw dataset-level `cameras` and `bodies` (for merging station overrides)
-    raw: dict = field(default_factory=dict, repr=False, compare=False)
+    raw: JsonObject = field(default_factory=dict, repr=False, compare=False)
     notes: str = ""
 
     @property
@@ -243,11 +247,15 @@ def load_priors(root: Path) -> DatasetPriors:
     )
 
 
+@overload
+def _feature(value: str | list[str]) -> str | tuple[str, ...]: ...
+@overload
+def _feature(value: str | list[str] | None) -> str | tuple[str, ...] | None: ...
 def _feature(value: str | list[str] | None) -> str | tuple[str, ...] | None:
     return tuple(value) if isinstance(value, list) else value
 
 
-def _intrinsics_column(raw: dict | None) -> IntrinsicsColumn | None:
+def _intrinsics_column(raw: JsonObject | None) -> IntrinsicsColumn | None:
     if raw is None:
         return None
     return IntrinsicsColumn(
@@ -258,7 +266,7 @@ def _intrinsics_column(raw: dict | None) -> IntrinsicsColumn | None:
     )
 
 
-def _cameras(raw: Mapping[str, dict]) -> dict[str, CameraPrior]:
+def _cameras(raw: Mapping[str, JsonObject]) -> dict[str, CameraPrior]:
     return {
         name: CameraPrior(
             mount=c.get("mount"),
@@ -281,7 +289,7 @@ def _cameras(raw: Mapping[str, dict]) -> dict[str, CameraPrior]:
     }
 
 
-def _bodies(raw: Mapping[str, dict]) -> dict[str, BodyPrior]:
+def _bodies(raw: Mapping[str, JsonObject]) -> dict[str, BodyPrior]:
     return {
         name: BodyPrior(
             float(b["position_range"]),
@@ -294,7 +302,9 @@ def _bodies(raw: Mapping[str, dict]) -> dict[str, BodyPrior]:
     }
 
 
-def _merged(base: Mapping[str, dict], override: Mapping[str, dict]) -> dict[str, dict]:
+def _merged(
+    base: Mapping[str, JsonObject], override: Mapping[str, JsonObject]
+) -> dict[str, JsonObject]:
     """`base` entries with `override`'s fields set on top (entry by entry)."""
 
     out = {name: dict(values) for name, values in base.items()}

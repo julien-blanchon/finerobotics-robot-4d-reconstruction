@@ -12,6 +12,7 @@ import json
 import math
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import torch
 from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
@@ -25,16 +26,24 @@ from .priors import (
     CameraPrior,
     DatasetPriors,
     IntrinsicsColumn,
+    JsonObject,
     load_episode_record,
     load_priors,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from torch import Tensor
+
+    from r4r.types import RGB, Mat3x3, Mat4x4
 
 IMAGE_PREFIX = "observation.images."
 
 
 def load_episode(
     root: Path, episode: int, stride: int = 1, decode: tuple[str, ...] | None = None
-) -> Episode:
+) -> Episode[int, int]:
     """Every `stride`-th timestep of `episode` from the dataset root `root`.
 
     Only the cameras in `decode` get frames (all when None); the others come with none.
@@ -68,7 +77,10 @@ def load_episode(
             stream = replace(stream, intrinsics=k)
         elif prior.intrinsics is not None:
             size = meta.features[key]["shape"][:2]  # height, width
-            column = every.select_columns([prior.intrinsics.column])[:][prior.intrinsics.column]
+            recorded = prior.intrinsics.column
+            # A slice of a dataset is a dict of columns (the stubs also allow a Dataset)
+            table = cast("Mapping[str, Tensor]", every.select_columns([recorded])[:])
+            column = _columns(table, recorded)
             k = _recorded_intrinsics(column, prior.intrinsics, size)
             stream = replace(stream, intrinsics=k)
         # A static camera's pose in the base frame, or a moving camera's mount on its link
@@ -100,12 +112,15 @@ def load_episode(
 
 
 def _recorded_intrinsics(
-    values: torch.Tensor, source: IntrinsicsColumn, size: tuple[int, int]
-) -> torch.Tensor:
+    values: Tensor[[int, int]], source: IntrinsicsColumn, size: tuple[int, int]
+) -> Tensor[[*Mat3x3]]:
     """A camera's K at the video resolution `size` (height, width) from its recorded column
-    (the episode's first finite, non-zero row)."""
+    (rows: flattened K or fx, fy, cx, cy; the episode's first finite, non-zero row is used).
 
-    values = values.double().flatten(1)
+    `stretch`: `f' = f · s`, `c' = c · s` per axis, `s = video / given`; `height`: one scale
+    `s = H / H_given` on both focals and the principal point centred (same vertical FOV).
+    """
+
     finite = values.isfinite().all(1) & (values.abs().sum(1) > 0)
     row = values[int(finite.nonzero()[0, 0]) if finite.any() else 0]
     if source.layout == "matrix":
@@ -123,7 +138,7 @@ def _recorded_intrinsics(
     return torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
 
 
-def _description(root: Path, robot: dict, priors: DatasetPriors) -> Path:
+def _description(root: Path, robot: JsonObject, priors: DatasetPriors) -> Path:
     """The robot description: the corrected one of the priors, else the delivered one."""
 
     if priors.description:
@@ -131,14 +146,14 @@ def _description(root: Path, robot: dict, priors: DatasetPriors) -> Path:
     return root / "meta" / robot["urdf"]
 
 
-def _columns(rows, feature: str | tuple[str, ...]) -> torch.Tensor:  # noqa: ANN001
+def _columns(rows: Mapping[str, Tensor], feature: str | tuple[str, ...]) -> Tensor[[int, int]]:
     """A vector feature's columns as float64 [T, n]; several features are concatenated."""
 
     names = (feature,) if isinstance(feature, str) else feature
     return torch.cat([rows[f].double().reshape(len(rows[f]), -1) for f in names], dim=1)
 
 
-def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
+def _base_motion(priors: DatasetPriors, rows: Mapping[str, Tensor]) -> Tensor[[int, *Mat4x4]]:
     """The base's recorded motion (see `r4r.rago.odometry`) at the loaded timesteps."""
 
     from r4r.rago import odometry
@@ -175,8 +190,8 @@ def _camera(
     timestamps: list[float],
     link: str | None,
     prior: CameraPrior,
-    frames: torch.Tensor | None,
-) -> CameraStream:
+    frames: Tensor[[int, *RGB, int, int]] | None,
+) -> CameraStream[int, int, int]:
     info = meta.features[key].get("info", {})
     if frames is None:
         assert meta.episodes is not None, f"{root}: episode metadata missing"
@@ -202,7 +217,7 @@ def _camera(
     )
 
 
-def _joints(robot: dict, replaced: frozenset[str] = frozenset()) -> tuple[JointMap, ...]:
+def _joints(robot: JsonObject, replaced: frozenset[str] = frozenset()) -> tuple[JointMap, ...]:
     """Arm joints and gripper joints of every arm in `robot.json`, in the description's units.
 
     A joint's `joint_ranges` entry (column range → joint range) applies to any joint; without

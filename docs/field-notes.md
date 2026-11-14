@@ -23,6 +23,11 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - right place but lagging the motion: timing;
   - right at the base, wrong along the chain in every camera: kinematics;
   - wrong in one camera only: that camera.
+- **Check that recorded values reach the solver:** a loader that dropped per-episode mounts and
+  a rig that used episode 0's focal for all episodes both failed silently under 1 px. Only a
+  per-episode comparison with ground truth or a careful overlay caught them.
+- **A low residual can come with an absurd pose:** a static camera placed ~300 km away at
+  1.35 px (community SO-101). Starts farther than 10 m from the base are now rejected.
 - **Ground truth where it exists.** Simulators that ship camera poses (sim-panda, maniskill,
   molmobot, InternData) measure real error: always compare before trusting a method.
 
@@ -89,6 +94,13 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **Grafted descriptions:** when a borrowed part has visual meshes and the original arm's
   don't load, overlays draw the part and no arm. Point the arm's visuals at its collision
   meshes (the overlay now also falls back per link).
+- **Ground truth can expose description errors:** express the delivered camera pose in its link
+  through FK. A mount that drifts within an episode while its rotation stays fixed points to a
+  wrong link length (RB-Y1 shoulders 2 cm too low); translation-only drift on one moving arm is
+  geometry, not timing (a lag would also rotate it). A least-squares fit of link-origin
+  corrections plus per-episode mounts finds it.
+- **Take recorded per-episode values from a middle frame** and check them against a second
+  frame: a few first frames are off by centimetres (molmobot).
 - **Simulators randomise:** mounts per episode (molmobot: 1–5 cm, 4–10°), focals, robot base
   placement (InternData-M1: ±5 cm). Use episode scope and the recorded values when they exist;
   images alone don't pin a per-episode mount.
@@ -162,6 +174,11 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **A wrist-mount search without a prior can "converge" to nonsense at low error** (aist: mounts
   0.5 m from the gripper at 1.5 px).
 - **Unrecorded lift:** use the frame that carries all the cameras (the arm platform) as the base.
+- **Freezing wrong mounts pushes the error elsewhere:** keep the base walk tight, or the bundle
+  moves the base (RB-Y1: 9 cm off an exact record).
+- **Gazebo optical frames:** the `frame_name` link whose `*_gazebo_frame` child is rotated rpy
+  (π/2, −π/2, 0); the mount is the identity on it. Equidistant fisheye focal from the
+  description's field of view: (width/2)/(hfov/2).
 - **Fisheye:** declare `lens: fisheye`; recorded coefficients first (OpenCV/ROS/RealSense
   give Kannala-Brandt directly); a static fisheye needs a known focal (focal, distortion and
   distance trade off).

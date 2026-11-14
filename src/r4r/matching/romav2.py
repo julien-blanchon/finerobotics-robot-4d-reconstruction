@@ -217,7 +217,7 @@ class RoMaV2(nn.Module):
         )
 
 
-def load_checkpoint(path: Path) -> dict[str, Tensor]:
+def load_checkpoint(path: Path) -> dict[str, Tensor]:  # parameters of every rank: bare Tensor
     """The released state dict, mapped to this module's names (on CPU, memory-mapped).
 
     The only checkpoint format is a pickled `.pt`: it loads with `weights_only=True` (tensors

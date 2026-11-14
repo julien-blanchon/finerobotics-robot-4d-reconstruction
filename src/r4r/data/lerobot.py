@@ -147,7 +147,10 @@ def _description(root: Path, robot: JsonObject, priors: DatasetPriors) -> Path:
 
 
 def _columns(rows: Mapping[str, Tensor], feature: str | tuple[str, ...]) -> Tensor[[int, int]]:
-    """A vector feature's columns as float64 [T, n]; several features are concatenated."""
+    """A vector feature's columns as float64 [T, n]; several features are concatenated.
+
+    `rows` is a slice of the dataset: its columns have any rank (bare `Tensor`).
+    """
 
     names = (feature,) if isinstance(feature, str) else feature
     return torch.cat([rows[f].double().reshape(len(rows[f]), -1) for f in names], dim=1)

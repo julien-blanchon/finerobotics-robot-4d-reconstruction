@@ -107,6 +107,11 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
   (base frame, OpenCV axes; intrinsics columns null when unknown) ✅: `r4r preview` draws it
   and `r4r rig` starts each episode from it instead of PnP. PnP on robot tracks alone can
   land a camera far off and still fit (DROID: exteriors below the table at 0.86 px).
+  When the dataset itself records each episode's camera pose in a JSON string column (too many
+  episodes for a table: SynGrasp-1B, 4.9M), the camera prior names it instead ✅:
+  `"pose": {"column": "publisher.episode.extra_info", "path": ["environment_config",
+  "camera_info", "name=side_rand_small"], "axes": "forward_left_up"}` (`key=value` picks a list
+  item; `axes`: `opencv` or Isaac Sim's x-forward, z-up camera axes).
   For a moving camera the same columns are its mount on its link in that episode (simulators
   that randomise mounts per episode and record them, e.g. molmobot): give the camera
   `"scope": "episode"` with a tight range, and `r4r rig` starts each episode's mount there.

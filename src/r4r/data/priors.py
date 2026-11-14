@@ -96,8 +96,9 @@ class BodyPrior:
 @dataclass(frozen=True, slots=True)
 class BaseOdometry:
     """Where a mobile base's motion is recorded (see `r4r.rago.odometry`): `feature` columns
-    `columns` holding planar poses (x, y, θ), body-frame velocities (vx, vy, ω), or wheel
-    angles (left, right[, steering]) of a caster or differential drive with its geometry."""
+    `columns` holding planar poses (x, y, θ or x, y, qz, qw), body-frame velocities
+    (vx, vy, ω), or wheel angles (left, right[, steering]) of a caster or differential drive
+    with its geometry."""
 
     kind: Literal["pose", "velocity", "caster"]
     feature: str

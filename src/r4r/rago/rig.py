@@ -4,6 +4,8 @@ A camera is rigidly mounted on a body of the kinematic tree (a wrist camera on t
 exterior camera on the world body). Its pose at time t is `world_from_body(q_t) · body_from_camera`.
 Each camera's focal length is corrected by a factor `exp(φ)` with a log-normal prior (std
 `focal_std`): wide when the initial intrinsics are a guess, tight when the dataset knows them.
+Distortion coefficients (`lens.Lens`) are corrected additively, with a Gaussian prior per
+coefficient (`Lens.std`, 0: held).
 
 Unknowns of the description (declared with priors in it, see `robot.Freedom`) are optimised
 as corrections `exp(δ)` with a scope:
@@ -25,7 +27,7 @@ is then recomputed at each evaluation; otherwise it is computed once.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from .lens import Lens
     from .robot import Freedom, Robot
 
 
@@ -156,11 +159,13 @@ class Rig(nn.Module):
         start_at: Tensor[[int, int, 4, 4]] | None = None,
         bodies_at: Tensor[[int, int, 4, 4]] | None = None,
         kinematic: KinematicFreedom | None = None,
+        lens: Lens | None = None,
     ) -> None:
         """`start_at [C, T]`, when given: each camera's starting mount at each timestep (for
         episode-scope cameras placed differently in each episode). `bodies_at [B, T]`: each
         free body's starting correction at each timestep (free bodies in body order), e.g. a
-        mobile base's odometry since the episode's first frame."""
+        mobile base's odometry since the episode's first frame. `lens`: the cameras'
+        distortion (None: ideal pinholes)."""
 
         super().__init__()
         index = [robot.camera(name) for name in names]
@@ -234,6 +239,15 @@ class Rig(nn.Module):
         # Per camera; 0: the focal is known and held
         std = torch.as_tensor(focal_std, dtype=qpos.dtype, device=device).expand(len(names))
         self.register_buffer("focal_std", std.clone())
+        self._init_lens(lens, qpos, len(names))
+
+    def _init_lens(self, lens: Lens | None, qpos: Tensor[[int, int]], cameras: int) -> None:
+        self.initial_lens = None if lens is None else lens.to(qpos)
+        self.distortion = (
+            None if lens is None else nn.Parameter(qpos.new_zeros(cameras, lens.std.shape[1]))
+        )
+        if lens is not None:
+            self.register_buffer("distortion_std", self.initial_lens.std.clone())
 
     def _init_kinematic(
         self,
@@ -290,6 +304,15 @@ class Rig(nn.Module):
         factor[:, [0, 1], [0, 1]] = log_focal.exp()[:, None]
         return self.initial_intrinsics * factor
 
+    def lens(self) -> Lens | None:
+        """Per camera: initial distortion with its corrections (held coefficients kept)."""
+
+        if self.initial_lens is None or self.distortion is None:
+            return None
+        lens = self.initial_lens
+        correction = torch.where(lens.std > 0, self.distortion, 0.0)
+        return replace(lens, distortion=lens.distortion + correction)
+
     def world_from_body(self) -> Tensor[[int, int, 4, 4]]:
         """`world_from_body [T, L]`: the kinematics with the free bodies' corrections.
 
@@ -345,7 +368,7 @@ class Rig(nn.Module):
 
     def prior_residuals(self) -> Tensor[[int]]:
         """The priors as residuals (their squares sum to `prior`): camera rows, body rows,
-        focals, joint offsets, then the time offset (zero where held)."""
+        focals, joint offsets, the time offset, then distortion (zero where held)."""
 
         owner = self.cameras.owner
         mounts = self.initial_mount[owner] @ se3.se3_exp(self.cameras.values())
@@ -359,4 +382,10 @@ class Rig(nn.Module):
         time = torch.where(
             self.time_std > 0, self.time_offset / self.time_std.clamp_min(1e-12), 0.0
         )
-        return torch.cat((cameras.flatten(), bodies.flatten(), focal, joints, time))
+        parts = [cameras.flatten(), bodies.flatten(), focal, joints, time]
+        if self.distortion is not None:
+            std = self.distortion_std
+            parts.append(
+                torch.where(std > 0, self.distortion / std.clamp_min(1e-12), 0.0).flatten()
+            )
+        return torch.cat(parts)

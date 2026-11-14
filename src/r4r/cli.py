@@ -524,19 +524,21 @@ def kinematic_freedom(
     from r4r.rago.robot import HINGE
 
     spec = priors.kinematics
-    if not spec:
+    if spec is None:
         return None
-    only = set(spec.get("joints", robot.joint_names))
+    only = set(robot.joint_names if spec.joints is None else spec.joints)
+    unknown = only - set(robot.joint_names)
+    if unknown:
+        raise ValueError(f"priors kinematics.joints: {sorted(unknown)} are not robot joints")
     stds = []
     for name, kind in zip(robot.joint_names, robot.joint_kind, strict=True):
         if name not in only:
             stds.append(0.0)
         elif kind == HINGE:
-            stds.append(math.radians(float(spec.get("joint_offset_deg", 0.0))))
+            stds.append(math.radians(spec.joint_offset_deg))
         else:
-            stds.append(float(spec.get("joint_offset_mm", 0.0)) / 1000)
-    time = float(spec.get("time_offset_frames", 0.0)) / stride
-    return KinematicFreedom(joint_std=tuple(stds), time_std=time)
+            stds.append(spec.joint_offset_mm / 1000)
+    return KinematicFreedom(joint_std=tuple(stds), time_std=spec.time_offset_frames / stride)
 
 
 def _print_kinematics(fit: RigFit, robot: Robot[int, int, int], stride: int) -> None:

@@ -56,7 +56,14 @@ equals `value`) to an object with `position` (x, y, z) and `orientation` (w, x, 
 robot base frame (moving camera: on its link); `axes` are the recorded camera axes (`opencv`,
 or `forward_left_up`: x forward, y left, z up, Isaac Sim's "world" camera axes). An episodes
 table pose takes precedence. `ignore` leaves a camera out (one that rides on no robot body,
-e.g. worn by a person).
+e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
+absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...],
+"time_offset_frames": 1.0}`, encoder offsets of hinges / slides (only `joints`, if given) and a
+video/joint time offset on top of `state_shift`.
+
+Unknown keys are errors (a typo would otherwise be ignored silently), except records kept for
+people and never read: `notes`, `base_odometry_measured` (an alternative odometry record) and
+a camera's `fitted` (provenance of a fitted mount).
 """
 
 from __future__ import annotations
@@ -64,7 +71,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Literal, overload
 
@@ -161,6 +168,16 @@ class BaseOdometry:
 
 
 @dataclass(frozen=True, slots=True)
+class KinematicsPrior:
+    """Prior stds of the kinematic refinement in `r4r rig` (see the module doc)."""
+
+    joint_offset_deg: float = 0.0  # hinge encoder offsets
+    joint_offset_mm: float = 0.0  # slide encoder offsets
+    joints: tuple[str, ...] | None = None  # only these joints (None: all)
+    time_offset_frames: float = 0.0  # frames at the dataset's rate
+
+
+@dataclass(frozen=True, slots=True)
 class DatasetPriors:
     base: Literal["fixed", "mobile"] = "fixed"
     joints: tuple[JointMap, ...] = ()
@@ -175,10 +192,8 @@ class DatasetPriors:
     description: str | None = None
     # The feature holding the joint state, when `meta/robot.json` names a wrong one
     state_feature: str | tuple[str, ...] | None = None  # several: concatenated
-    # Kinematic refinement in `r4r rig` (prior stds; absent: held): joint-encoder offsets
-    # (`joint_offset_deg` for hinges, `joint_offset_mm` for slides, optionally only `joints`)
-    # and a video/joint time offset on top of `state_shift` (`time_offset_frames`)
-    kinematics: JsonObject | None = None
+    # Kinematic refinement in `r4r rig` (absent: held)
+    kinematics: KinematicsPrior | None = None
     # Per-station overrides (raw priors fields `cameras`, `bodies`, set on top of the
     # dataset's, entry by entry): {station: {"cameras": {...}, "bodies": {...}}}
     stations: dict[str, JsonObject] = field(default_factory=dict)
@@ -205,9 +220,10 @@ class DatasetPriors:
             return self
         from dataclasses import replace
 
+        where = f"station {station}"
         cameras = _merged(self.raw.get("cameras", {}), override.get("cameras", {}))
         bodies = _merged(self.raw.get("bodies", {}), override.get("bodies", {}))
-        return replace(self, cameras=_cameras(cameras), bodies=_bodies(bodies))
+        return replace(self, cameras=_cameras(cameras, where), bodies=_bodies(bodies, where))
 
 
 def priors_path(root: Path) -> Path:
@@ -222,7 +238,7 @@ def load_priors(root: Path) -> DatasetPriors:
     path = priors_path(root)
     if not path.exists():
         return DatasetPriors()
-    raw = json.loads(path.read_text())
+    raw = _checked(json.loads(path.read_text()), TOP_KEYS, str(path))
     joints = tuple(
         JointMap(
             j["urdf_joint"],
@@ -231,12 +247,15 @@ def load_priors(root: Path) -> DatasetPriors:
             tuple(j["from"]) if j.get("from") else None,
             tuple(j["to"]) if j.get("to") else None,
         )
-        for j in raw.get("joints", [])
+        for j in (_checked(j, JOINT_KEYS, f"{path}: joints") for j in raw.get("joints", []))
     )
-    cameras = _cameras(raw.get("cameras", {}))
-    bodies = _bodies(raw.get("bodies", {}))
+    cameras = _cameras(raw.get("cameras", {}), str(path))
+    bodies = _bodies(raw.get("bodies", {}), str(path))
+    for station, override in raw.get("stations", {}).items():
+        _checked(override, STATION_KEYS, f"{path}: stations.{station}")
     odometry = raw.get("base_odometry")
     if odometry is not None:
+        _checked(odometry, _keys(BaseOdometry), f"{path}: base_odometry")
         odometry = BaseOdometry(
             odometry["kind"],
             _feature(odometry["feature"]),
@@ -259,7 +278,7 @@ def load_priors(root: Path) -> DatasetPriors:
         cameras=cameras,
         description=raw.get("description"),
         state_feature=_feature(raw.get("state_feature")),
-        kinematics=raw.get("kinematics"),
+        kinematics=_kinematics(raw.get("kinematics"), str(path)),
         stations=raw.get("stations", {}),
         raw={"cameras": raw.get("cameras", {}), "bodies": raw.get("bodies", {})},
         notes=raw.get("notes", ""),
@@ -274,9 +293,46 @@ def _feature(value: str | list[str] | None) -> str | tuple[str, ...] | None:
     return tuple(value) if isinstance(value, list) else value
 
 
-def _intrinsics_column(raw: JsonObject | None) -> IntrinsicsColumn | None:
+def _keys(cls: type) -> frozenset[str]:
+    """The JSON keys of a priors dataclass: its field names."""
+
+    return frozenset(f.name for f in fields(cls))
+
+
+TOP_KEYS = _keys(DatasetPriors) - {"raw"} | {"base_odometry_measured"}
+JOINT_KEYS = frozenset({"index", "urdf_joint", "sign", "from", "to"})
+STATION_KEYS = frozenset({"cameras", "bodies"})
+CAMERA_KEYS = _keys(CameraPrior) | {"fitted"}
+
+
+def _checked(raw: JsonObject, allowed: frozenset[str], where: str) -> JsonObject:
+    """`raw`, after rejecting keys outside `allowed`."""
+
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(
+            f"{where}: unknown priors keys {sorted(unknown)}; known: {sorted(allowed)}"
+        )
+    return raw
+
+
+def _kinematics(raw: JsonObject | None, where: str) -> KinematicsPrior | None:
+    if not raw:
+        return None
+    _checked(raw, _keys(KinematicsPrior), f"{where}: kinematics")
+    joints = raw.get("joints")
+    return KinematicsPrior(
+        float(raw.get("joint_offset_deg", 0.0)),
+        float(raw.get("joint_offset_mm", 0.0)),
+        None if joints is None else tuple(joints),
+        float(raw.get("time_offset_frames", 0.0)),
+    )
+
+
+def _intrinsics_column(raw: JsonObject | None, where: str) -> IntrinsicsColumn | None:
     if raw is None:
         return None
+    _checked(raw, _keys(IntrinsicsColumn), f"{where}.intrinsics")
     return IntrinsicsColumn(
         raw["column"],
         raw.get("layout", "fx_fy_cx_cy"),
@@ -285,13 +341,16 @@ def _intrinsics_column(raw: JsonObject | None) -> IntrinsicsColumn | None:
     )
 
 
-def _pose_column(raw: JsonObject | None) -> PoseColumn | None:
+def _pose_column(raw: JsonObject | None, where: str) -> PoseColumn | None:
     if raw is None:
         return None
+    _checked(raw, _keys(PoseColumn), f"{where}.pose")
     return PoseColumn(raw["column"], tuple(raw["path"]), raw.get("axes", "opencv"))
 
 
-def _cameras(raw: Mapping[str, JsonObject]) -> dict[str, CameraPrior]:
+def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior]:
+    for name, c in raw.items():
+        _checked(c, CAMERA_KEYS, f"{where}: cameras.{name}")
     return {
         name: CameraPrior(
             mount=c.get("mount"),
@@ -307,15 +366,17 @@ def _cameras(raw: Mapping[str, JsonObject]) -> dict[str, CameraPrior]:
             distortion=tuple(c["distortion"]) if c.get("distortion") is not None else None,
             distortion_range=c.get("distortion_range"),
             scope=c.get("scope", "dataset"),
-            intrinsics=_intrinsics_column(c.get("intrinsics")),
-            pose=_pose_column(c.get("pose")),
+            intrinsics=_intrinsics_column(c.get("intrinsics"), f"{where}: cameras.{name}"),
+            pose=_pose_column(c.get("pose"), f"{where}: cameras.{name}"),
             ignore=bool(c.get("ignore", False)),
         )
         for name, c in raw.items()
     }
 
 
-def _bodies(raw: Mapping[str, JsonObject]) -> dict[str, BodyPrior]:
+def _bodies(raw: Mapping[str, JsonObject], where: str) -> dict[str, BodyPrior]:
+    for name, b in raw.items():
+        _checked(b, _keys(BodyPrior), f"{where}: bodies.{name}")
     return {
         name: BodyPrior(
             float(b["position_range"]),

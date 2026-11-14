@@ -164,11 +164,14 @@ def calibrate_rig(
         robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount
     )
 
-    # 4-5. Bundles: all episodes, then groups; moving mounts frozen
+    # 4-5. Bundles: all episodes, then groups; moving mounts frozen, except those that change
+    # between episodes (randomising simulators: episode scope), refined per episode in range
     frozen = replace(
         robot,
         free_cameras={
-            n: f for n, f in robot.free_cameras.items() if n in names and static[names.index(n)]
+            n: f
+            for n, f in robot.free_cameras.items()
+            if n in names and (static[names.index(n)] or f.scope != "dataset")
         },
         body_from_camera=robot.body_from_camera.to(mounts).clone(),
     )

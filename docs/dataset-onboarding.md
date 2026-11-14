@@ -76,7 +76,22 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
   datasets that really vary it (randomising simulators, per-unit calibrations).
 - **Scope** of each pose: `dataset` (bolted, never moves), `episode` (re-placed between
   episodes, e.g. DROID's exterior cameras), `frame` (rare).
-- **Lens**: pinhole only for now; fisheye datasets wait (⬜ distortion + correction tables).
+- **Lens** ✅: `"lens": "pinhole"` (default) or `"fisheye"`, and its `distortion`
+  coefficients, looked for like the focal (recorded calibration first):
+  - pinhole: OpenCV radial `[k1, k2, k3]` (from `distCoeffs` `[k1, k2, p1, p2, k3]`: drop the
+    tangential `p1, p2`); missing: an ideal pinhole;
+  - fisheye: OpenCV fisheye / Kannala–Brandt `[k1, k2, k3, k4]` (ROS `equidistant`,
+    RealSense `kannala_brandt4`); missing: unknown, refined from the equidistant model
+    (`ρ = θ`) with a wide prior. The focal is then pixels per radian at the centre (a
+    pinhole-like guess, 0.7 × width, is a fine start).
+
+  `distortion_range` is the prior std of each coefficient in the bundle: 0 holds them (the
+  default when given), a value lets the fit refine them (e.g. 0.05 for a datasheet guess).
+  Coefficients do not depend on the video resolution. Other models (rational, Double Sphere,
+  FOV) must be converted or refitted to one of these two. `r4r rig` / `r4r fit --write`
+  write fitted coefficients back (`distortion_range: 0` afterwards, like the focal).
+  A first draft for a fisheye without recorded coefficients can come from AnyCalib
+  (⬜, see `docs/related-work.md`).
 
 ## 3. Other unknowns
 

@@ -68,7 +68,8 @@ Ranked by expected gain for the pipeline per unit of effort [infer].
    - AnyCalib (ICCV 2025, Apache-2.0 code and weights) is the only permissive learned
      calibrator that outputs these parametric models and a principal point. Use it as the
      initial value only; the bundle refines.
-   - **Unblocks** the fisheye roots. Today it is "pinhole only, skip".
+   - **Unblocks** the fisheye roots. The lens models are in (`r4r.geometry.camera`:
+     radial pinhole and Kannala-Brandt, refined by the bundle); AnyCalib is not wired yet.
 4. **More references on DROID to bound reference error** (P7).
    - Besides DROID's shipped calibration and DROID-3D (already in hand), there are two more:
      - **PointWorld-DROID:** 42,935 episodes with `optimized_extrinsics`, NVIDIA research
@@ -117,7 +118,8 @@ records an IMU (galaxea r1-lite has `observation.state.chassis.imu`). See §7.
   of "hours per setup", and the reason uncertainty only comes from splitting episodes into
   groups. A covariance per unknown would also feed the `r4r report` validation directly.
 - **Lens and timing models are simpler than the field's standard.**
-  - Lens: pinhole only, and no distortion on real cameras.
+  - Lens: radial pinhole and Kannala-Brandt only (no tangential, rational or Double Sphere
+    terms).
   - Time offset: integer frames only.
   - Joint-encoder offsets are not modelled.
   - Rolling shutter is not modelled either. I found no robot-calibration paper that models it,
@@ -455,6 +457,13 @@ section is about static cameras and lenses.
   - Single image; no shared-intrinsics mode is documented, so we would take a median over
     frames.
   - **adopt as a fisheye initialiser** (try-first #3). **test** for pinhole in the benchmark.
+  - How it would plug in (not installed; needs its own environment, e.g. a clone with
+    `pip install -e .`, weights downloaded on first use):
+    `AnyCalib(model_id="anycalib_dist").predict(image, cam_id="kb:4")` returns
+    `intrinsics = [fx, fy, cx, cy, k1, k2, k3, k4]`, exactly our fisheye priors (`lens:
+    fisheye`, `focal`, `distortion`); `cam_id="radial:3"` gives our pinhole `[k1, k2, k3]`.
+    Predict on frames resized to the video resolution, take the median over frames, then
+    let the bundle refine within a `distortion_range`.
 - **GeoCalib**: ECCV 2024.
   - [arXiv 2409.06704](https://arxiv.org/abs/2409.06704) ·
     [code](https://github.com/cvg/GeoCalib) (code Apache-2.0, weights CC BY 4.0).

@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     from r4r.arrow.images import Resize
     from r4r.arrow.models.arrow import ARROW
 
+    from .lens import Lens
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TrackConfig:
@@ -69,6 +71,7 @@ class Tracks[M: IntVar, V: IntVar, C: IntVar]:
     weight: Tensor[[M]]
     moving: Tensor[[M]]
     intrinsics: Tensor[[C, 3, 3]]  # median of ARROW's per-view fits (initialisation only)
+    lens: Lens | None = None  # distortion per camera; None: ideal pinholes
 
 
 @dataclass(frozen=True, slots=True)

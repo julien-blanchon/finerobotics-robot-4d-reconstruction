@@ -28,12 +28,48 @@ leave out is a parameter of the robot description with:
 | static-camera pose | dataset or episode | ✅ PnP on moving-camera points + bundle (`r4r rig`) |
 | arm-base placement (bimanual) | dataset or episode | ✅ free bodies, staged (`r4r rig`), written back to the priors |
 | robot base pose | frame | ✅ free body at frame scope, started from recorded odometry (`base_odometry`), wired through every `r4r rig` stage (mounts on parked spans); ⬜ legged kinematic odometry (stance foot) for humanoids, end-to-end validation; motion comes from the recorded state/actions, not vision |
-| lens distortion | dataset | ⬜ (fisheye: later, with correction tables) |
+| lens distortion | dataset | ✅ prior + bundle refinement (see "Lens models" below); ⬜ AnyCalib initialiser, RoMa/ARROW on fisheye images untested on real data |
 
 Values and ranges live in `priors/<family>/<dataset>.json`; `r4r export` writes them into the
 robot description (MJCF) with each camera placed and each range as an `r4r:` numeric, so the
 description itself says what is known and what still varies. One solver (the kinematic
 bundle) fits whatever is free, at whatever scope.
+
+## Lens models
+
+Every camera is a radially symmetric lens (`r4r.geometry.camera`): a ray at distance `s` from
+the optical axis lands at the normalised radius `d(s) = s · (1 + k1 s² + k2 s⁴ + k3 s⁶ + k4 s⁸)`,
+then `pixel = f · d + c`.
+
+- **pinhole**: `s = r / z`, Brown–Conrady radial distortion with OpenCV's `k1, k2, k3`
+  (tangential and rational terms not modelled). All zero is today's ideal pinhole.
+- **fisheye**: `s = θ`, the angle from the axis, Kannala–Brandt with OpenCV fisheye's
+  `k1..k4`. All zero is the equidistant fisheye, valid past 90°.
+
+Why these two: they are what datasets and drivers publish (OpenCV `distCoeffs`,
+`cv2.fisheye`, ROS `equidistant`, RealSense `kannala_brandt4`) and what AnyCalib outputs, so
+known calibrations go in unchanged. With unknown coefficients the bundle starts from the
+equidistant model (`tests/rago/test_lens.py`: a ~150° wrist fisheye recovered to 0.4 px up to
+77° off-axis, with mount and focal; the coefficients themselves trade off, the projection
+does not). Both
+share one polynomial, so one batched Newton iteration inverts both (`camera.rays`: detached
+steps, then one differentiable step, which gives the exact inverse's gradients). UCM/EUCM and
+Double Sphere have closed-form inverses but are not what datasets publish; the Newton inverse
+costs seven steps of two polynomial evaluations per observation.
+
+The coefficients are a dataset-scope prior per camera (`lens`, `distortion`,
+`distortion_range` in the priors), carried with the tracks (`Tracks.lens`) to the bundle,
+which corrects them additively with a Gaussian prior (`Lens.std`, 0: held), like the focal.
+A rig whose cameras are all ideal pinholes carries no lens and runs the plain pinhole path.
+Static cameras are placed by PnP on undistorted pixels (rays within 75° of the axis).
+The tracks fix a lens only over the angles where it sees them: a static camera that sees the
+scene in a narrow cone (an exterior camera 2 m away sees the table within ~20°) leaves its
+coefficients near the prior, its focal trading with its distance. Even seeing the table up to
+45° off-axis from 0.8 m, one episode does not separate an unknown focal, distortion and
+distance (a fit 5 cm and 7 % off matches the pixels to the noise level); with the focal known
+the lens is fitted to < 1 px. Give a static fisheye its focal (description field of view,
+datasheet) or hold its lens at a recorded or AnyCalib value.
+Coefficients are per normalised radius: resizing the video changes `K`, not them.
 
 ## Solving coupled unknowns in stages
 

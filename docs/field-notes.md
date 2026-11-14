@@ -71,6 +71,15 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **Simulators randomise:** mounts per episode (molmobot: 1–5 cm, 4–10°), focals, robot base
   placement (InternData-M1: ±5 cm). Use episode scope and the recorded values when they exist;
   images alone don't pin a per-episode mount.
+- **Merged roots mix setups:** community-v3 roots join many LeRobot repos, each with its own
+  cameras and calibration (one root's overlay showed three rooms). Find the setup key first
+  (`source/subtree` or `source/publisher_repo` in `meta/episodes`), write it as `station`, and
+  never calibrate across setups.
+- **Joint conventions from statistics:** the first-frame poses of ~1,600 SO-100/101 repos all
+  start at the same folded rest pose, which settles the zero convention at once. But the most
+  frequent start pose isn't always the rest pose (Koch starts stretched out): check the images.
+- **Comparing two descriptions:** fit an affine joint map from one to the other; a few mm of
+  residual means the same kinematics (SO-100 vs SO-101: 7 mm).
 - **States may be commanded, not measured** (xrobotwin). Or absent: many Open X-Embodiment
   sets record only the end-effector pose. With no joint states there is no FK, so blocked.
 
@@ -107,6 +116,13 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - From one camera's video, per-episode fits scatter: pool episodes, and fix timing first.
   - The focal is rarely the cause of failures: the true focal rescues only 2 of 12 blind
     failures. Unmodelled kinematics and orientation local minima are.
+- **When the wrist mount search fails** (SO arms; humanoid hands filling the view): render
+  candidate mounts over a real wrist frame and keep the one whose drawn jaws or hands sit on the
+  real ones. Rendering the roll variants of a description's camera frame side by side works
+  the same way. A wrist camera's image "up" usually points away from the gripper axis. It
+  can't work when the camera doesn't see the jaws.
+- **Hand-picked joint positions** in 2–3 frames give a static camera's pose by PnP, but only when
+  the picks leave the arm's plane.
 - **Fisheye:** declare `lens: fisheye`; recorded coefficients first (OpenCV/ROS/RealSense
   give Kannala-Brandt directly); a static fisheye needs a known focal (focal, distortion and
   distance trade off).
@@ -123,6 +139,9 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - Validate odometry against an on-robot camera's rotation (HSR: commanded yaw useless,
     wheel encoders good).
   - molmobot records the base pose exactly.
+- **Humanoids:** a leg-joint range above 0.1 rad per episode separates standing from walking
+  episodes (13–100% walking by dataset): calibrate on standing ones first. A head that never
+  moves while standing anchors nothing: the head mount comes by eye and is held.
 - **Stations:** a dataset can mix physical setups (abc: 19 stations by camera calibration
   signature). Calibrate per station.
 
@@ -143,5 +162,11 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **Dedicated estimators beat 4D models for one-shot focal guesses less than expected:**
   ARROW gen2 with a self-draft gave a 3% median focal error; MoGe-2 and GeoCalib were much
   worse on robot footage.
+- **Kosmo-GFM** (tested on simulator ground truth): no better for focal (3% ARROW vs 7%) or
+  static camera starts (19 cm / 13°, fails 5° / 10 cm). Its camera-conditioned depth, fed our
+  solved cameras, keeps static and wrist cameras in one metric frame (AbsRel lower in 6/6
+  scenes than ARROW with one scale), at ~0.03 GPU s/frame: a candidate for the dense pass,
+  pending a real-data check (`experiments/kosmo_gfm/RESULTS.md`).
+- **Shared login nodes have a per-user thread limit** (4096): cap OMP/BLAS threads in helpers.
 - **Robot meshes:** only for checking (overlays), never inside the solve. Meshes are often
   wrong or incomplete.

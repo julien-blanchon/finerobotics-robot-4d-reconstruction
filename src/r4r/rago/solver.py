@@ -38,13 +38,14 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LMConfig:
-    iterations: int = 60
-    # Stop when an accepted step lowers the objective by less than this (relative)
-    tolerance: float = 1e-7
+    # Rounds of: converge with the tracks' bodies fixed, then re-attach moving tracks (which
+    # changes the objective itself, so it is not part of a descent)
+    rounds: int = 3
+    iterations: int = 25  # per round, at most
+    # A round ends when an accepted step lowers the objective by less than this (relative)
+    tolerance: float = 1e-5
     damping: float = 1e-3
     max_damping: float = 1e10
-    # Re-attach moving tracks to bodies every this many accepted steps
-    reassign_every: int = 10
 
 
 class _Call(nn.Module):
@@ -222,33 +223,47 @@ def levenberg_marquardt(
             prior = (prior_at(x) ** 2).sum() / steps
             return torch.stack((data + prior, data, prior))
 
-    history = [objective(zero)]
-    damping = config.damping
-    for accepted in range(1, config.iterations + 1):
-        hessian, gradient = _normal_equations(
-            at, prior_at, weight_fn, tangents, owners, zero, cauchy, steps
-        )
-        step = None
-        while damping <= config.max_damping:
-            system = hessian + damping * torch.diag(hessian.diagonal().clamp_min(1e-12))
-            candidate = torch.linalg.solve(system, -gradient)
-            value = objective(candidate)
-            if bool(torch.isfinite(value[0])) and value[0] < history[-1][0]:
-                step = candidate
-                damping = max(damping / 3, 1e-12)
-                break
-            damping *= 4
-        if step is None:
-            break
-        _commit(rig, columns, step)
-        improvement = float((history[-1][0] - value[0]) / history[-1][0].abs().clamp_min(1e-12))
-        if accepted % config.reassign_every == 0:
+    history = []
+    for round_ in range(config.rounds):
+        if round_:
             reassign()
-            value = objective(zero)
-        history.append(value)
-        if improvement < config.tolerance:
-            break
+        history.append(objective(zero))
+        damping = config.damping
+        for _ in range(config.iterations):
+            hessian, gradient = _normal_equations(
+                at, prior_at, weight_fn, tangents, owners, zero, cauchy, steps
+            )
+            accepted = _damped_step(hessian, gradient, damping, history[-1][0], objective, config)
+            if accepted is None:
+                break
+            step, value, damping = accepted
+            _commit(rig, columns, step)
+            improvement = float((history[-1][0] - value[0]) / history[-1][0].abs().clamp_min(1e-12))
+            history.append(value)
+            if improvement < config.tolerance:
+                break
     return torch.stack(history).cpu()
+
+
+def _damped_step(
+    hessian: Tensor[[int, int]],
+    gradient: Tensor[[int]],
+    damping: float,
+    current: Tensor[[]],
+    objective: Callable[[Tensor], Tensor],
+    config: LMConfig,
+) -> tuple[Tensor[[int]], Tensor[[3]], float] | None:
+    """The first damping (from `damping` up) whose step lowers the objective: (step, its
+    objective, the next damping); None if none does."""
+
+    diagonal = torch.diag(hessian.diagonal().clamp_min(1e-12))
+    while damping <= config.max_damping:
+        candidate = torch.linalg.solve(hessian + damping * diagonal, -gradient)
+        value = objective(candidate)
+        if bool(torch.isfinite(value[0])) and value[0] < current:
+            return candidate, value, max(damping / 3, 1e-12)
+        damping *= 4
+    return None
 
 
 def _normal_equations(

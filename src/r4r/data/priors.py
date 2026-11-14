@@ -23,7 +23,8 @@ take precedence over `meta/robot.json` and the camera feature info:
 }
 ```
 
-`state_feature` names the joint-state feature when `meta/robot.json` names a wrong one.
+`state_feature` names the joint-state feature when `meta/robot.json` names a wrong one (a list:
+the features' columns concatenated, e.g. leg joints recorded apart from the arms).
 `description` replaces the delivered robot description by a corrected one kept under
 `priors/` (fixes to the URDF/MJCF itself: wrong joints, frames, meshes). `joints` add or
 replace (by URDF joint name) entries of the state mapping; `removed_joints`
@@ -97,7 +98,7 @@ class BaseOdometry:
     angles (left, right[, steering]) of a caster or differential drive with its geometry."""
 
     kind: Literal["pose", "velocity", "caster"]
-    feature: str
+    feature: str | tuple[str, ...]  # several: their columns concatenated
     columns: tuple[int, ...]
     radius: float | None = None
     half_track: float | None = None
@@ -119,7 +120,7 @@ class DatasetPriors:
     # may point back into the delivery (absolute `meshdir` / filenames).
     description: str | None = None
     # The feature holding the joint state, when `meta/robot.json` names a wrong one
-    state_feature: str | None = None
+    state_feature: str | tuple[str, ...] | None = None  # several: concatenated
     notes: str = ""
 
     @property
@@ -188,7 +189,7 @@ def load_priors(root: Path) -> DatasetPriors:
     if odometry is not None:
         odometry = BaseOdometry(
             odometry["kind"],
-            odometry["feature"],
+            _feature(odometry["feature"]),
             tuple(odometry["columns"]),
             odometry.get("radius"),
             odometry.get("half_track"),
@@ -204,9 +205,13 @@ def load_priors(root: Path) -> DatasetPriors:
         state_shift=int(raw.get("state_shift", 0)),
         cameras=cameras,
         description=raw.get("description"),
-        state_feature=raw.get("state_feature"),
+        state_feature=_feature(raw.get("state_feature")),
         notes=raw.get("notes", ""),
     )
+
+
+def _feature(value: str | list[str] | None) -> str | tuple[str, ...] | None:
+    return tuple(value) if isinstance(value, list) else value
 
 
 @dataclass(frozen=True, slots=True)

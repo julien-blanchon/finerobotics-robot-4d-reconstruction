@@ -57,11 +57,11 @@ def load_episode(
             stream = replace(stream, intrinsics=k)
         cameras.append(stream)
     feature = priors.state_feature or robot["state"]["feature"]
-    state = rows[feature].double()
+    state = _columns(rows, feature)
     if priors.state_shift:
         # Frame t's state from t + shift (a known video/joint-state offset, in frames at the
         # dataset's rate whatever the stride), clamped
-        full = every[:][feature].double()
+        full = _columns(every[:], feature)
         index = torch.arange(0, len(full), stride)[: len(state)] + priors.state_shift
         state = full[index.clamp(0, len(full) - 1)]
     return Episode(
@@ -85,6 +85,13 @@ def _description(root: Path, robot: dict, priors: DatasetPriors) -> Path:
     return root / "meta" / robot["urdf"]
 
 
+def _columns(rows, feature: str | tuple[str, ...]) -> torch.Tensor:  # noqa: ANN001
+    """A vector feature's columns as float64 [T, n]; several features are concatenated."""
+
+    names = (feature,) if isinstance(feature, str) else feature
+    return torch.cat([rows[f].double().reshape(len(rows[f]), -1) for f in names], dim=1)
+
+
 def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
     """The base's recorded motion (see `r4r.rago.odometry`) at the loaded timesteps."""
 
@@ -92,7 +99,7 @@ def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001
 
     spec = priors.base_odometry
     assert spec is not None
-    values = rows[spec.feature].double()[:, list(spec.columns)]
+    values = _columns(rows, spec.feature)[:, list(spec.columns)]
     if spec.kind == "pose":
         return odometry.from_poses(values[:, 0], values[:, 1], values[:, 2])
     if spec.kind == "velocity":

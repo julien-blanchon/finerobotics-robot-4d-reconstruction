@@ -76,6 +76,9 @@ class RigEpisode:
     frames: dict[str, Tensor[[int, 3, int, int]]]  # uint8 videos, one per camera
     # Mobile base: its pose at each timestep relative to the first, in its own frame (odometry)
     base_motion: Tensor[[int, 4, 4]] | None = None
+    # Recorded start poses (base frame, OpenCV axes) of static cameras in this episode, e.g. a
+    # dataset's own per-episode calibration (per-episode table): used instead of PnP
+    poses: dict[str, Tensor[[4, 4]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -140,8 +143,9 @@ def calibrate_rig(
 
     `intrinsics` are the focal priors (or guesses where `known_focal` is False); cameras on
     the world body are static, the others moving. Moving cameras with `known_mount` keep the
-    description's mount (no search). `lens`: the cameras' distortion priors (None: ideal
-    pinholes), refined where their std allows.
+    description's mount (no search); static ones start from it (no PnP), as do those with a
+    recorded pose for the episode (`RigEpisode.poses`). `lens`: the cameras' distortion
+    priors (None: ideal pinholes), refined where their std allows.
     """
 
     index = [robot.camera(n) for n in names]
@@ -157,7 +161,7 @@ def calibrate_rig(
         for i, e in enumerate(episodes)
     ]
     starts, intrinsics = _static_starts(
-        robot, episodes, merged, names, mounts, intrinsics, known_focal
+        robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount
     )
 
     # 4-5. Bundles: all episodes, then groups; moving mounts frozen
@@ -306,10 +310,14 @@ def _static_starts(
     mounts: Tensor[[int, 4, 4]],
     intrinsics: Tensor[[int, 3, 3]],
     known_focal: tuple[bool, ...],
+    known_mount: tuple[bool, ...] | None = None,
 ) -> tuple[Tensor[[int, int, 4, 4]], Tensor[[int, 3, 3]]]:
     """Stage 3: each free static camera's pose per episode (and focal, from the first episode
     where it is found, when unknown) by PnP on points the moving cameras triangulate. Episodes
-    where PnP fails keep the description's pose; cameras the priors fix keep theirs. A
+    where PnP fails keep the description's pose; cameras the priors fix keep theirs, and
+    cameras whose pose the priors give (`known_mount`) start from it: the bundle refines them
+    within the priors' ranges (PnP on robot-attached tracks can land a known camera 10 cm /
+    6 deg off and the bundle then keeps it there). A
     dataset-scope camera starts every episode from the consensus of its episodes' PnP poses
     (`_consensus`): one episode with few links can land metres away."""
 
@@ -321,7 +329,8 @@ def _static_starts(
     support = torch.zeros(len(episodes), len(names), device=device)  # PnP inliers
     focal = intrinsics[:, 0, 0].clone()
     found = [False] * len(names)
-    free = [n in robot.free_cameras for n in names]
+    known = known_mount or (False,) * len(names)
+    free = [n in robot.free_cameras and not k for n, k in zip(names, known, strict=True)]
     for i, (e, tracks) in enumerate(zip(episodes, merged, strict=True)):
         world = moved_kinematics(robot, e)
         cam = tracks.view_camera
@@ -330,6 +339,11 @@ def _static_starts(
         points = triangulate(tracks, world_from_view, ~static[observed])
         for c in static.nonzero()[:, 0].tolist():
             if not free[c]:
+                continue
+            recorded = e.poses.get(names[c])
+            if recorded is not None:  # the episode's own calibration: no PnP
+                starts[i, c] = recorded.to(starts)
+                support[i, c] = 1.0
                 continue
             seen = (observed == c) & (points.count[tracks.track] >= MIN_OBSERVATIONS)
             if int(seen.sum()) < MIN_POINTS:

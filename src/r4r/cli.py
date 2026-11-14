@@ -311,6 +311,7 @@ class Rig:
                 qpos_from_state(robot, e.state.to(device), e.joints),
                 {c.name: c.frames for c in e.cameras if c.name in names},
                 None if e.base_motion is None else e.base_motion.to(device),
+                {c.name: c.pose.to(device) for c in e.cameras if c.pose is not None},
             )
             for e in loaded
         ]
@@ -643,12 +644,16 @@ class Preview:
             f = c.prior.focal or self.focal * width
             k.append([[f, 0, (width - 1) / 2], [0, f, (height - 1) / 2], [0, 0, 1]])
         steps = len(qpos)
+        placed = robot.body_from_camera[index].clone()
+        for c, stream in enumerate(streams):  # a static camera's recorded pose this episode
+            if stream.pose is not None:
+                placed[c] = stream.pose.to(placed)
         solution = {
             "dataset": self.dataset,
             "names": names,
             "lengths": [steps],
             "world_from_body": forward_kinematics(robot, qpos),
-            "mounts_at": robot.body_from_camera[index][:, None].expand(-1, steps, 4, 4),
+            "mounts_at": placed[:, None].expand(-1, steps, 4, 4),
             "camera_body": [robot.camera_body[i] for i in index],
             "intrinsics": torch.tensor(k, dtype=torch.float64),
         }

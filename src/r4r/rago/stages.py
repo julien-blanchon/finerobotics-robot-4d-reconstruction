@@ -42,7 +42,7 @@ from .calibrate import FitConfig, fit_setup, video_tracks
 from .cross import cross_matches
 from .initialize import CameraStart, Points, locate_camera, triangulate
 from .kinematics import forward_kinematics
-from .klt import VideoTracks, klt_tracks, track_video
+from .klt import VideoTracks, klt_tracks, require_tracks, track_video
 from .merge import merge_tracks
 from .rig import KinematicFreedom
 from .tracks import Tracks
@@ -76,9 +76,13 @@ class _Tracked:
         self.done: dict[tuple[int, str], VideoTracks[int]] = {}
 
     def __call__(self, episode: int, name: str) -> VideoTracks[int]:
+        """Tracks of camera `name` in `episode` (its index); raises when there are none."""
+
         key = (episode, name)
         if key not in self.done:
-            self.done[key] = track_video(self.episodes[episode].frames[name], self.config.klt)
+            found = track_video(self.episodes[episode].frames[name], self.config.klt)
+            require_tracks(found.track, name, episode)
+            self.done[key] = found
         return self.done[key]
 
 
@@ -383,6 +387,7 @@ def _still_videos(
         found = tracked(i, name) if whole and tracked is not None else None
         frames = e.frames[name][a:b]
         tracks = video_tracks(frames, intrinsics, config.fit.klt, found, lens=lens)
+        require_tracks(tracks.track, name, i)
         if scaling is not None:
             tracks = replace(tracks, view_scaling=scaling[i, camera].expand(len(frames), 3, 3))
         data.append((e.qpos[a:b], tracks))

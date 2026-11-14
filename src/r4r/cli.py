@@ -98,7 +98,7 @@ class Links:
 
         from r4r.data.lerobot import load_episode
         from r4r.rago.kinematics import forward_kinematics
-        from r4r.rago.klt import KLTConfig, track_video
+        from r4r.rago.klt import KLTConfig, require_tracks, track_video
         from r4r.rago.links import body_evidence
         from r4r.rago.robot import load_robot, qpos_from_state
 
@@ -117,7 +117,9 @@ class Links:
             k = torch.tensor(
                 pinhole_guess(focal, 1.0, width, height), dtype=torch.float64, device=device
             )
-            evidence = body_evidence(track_video(camera.frames, KLTConfig()), world_from_body, k)
+            found = track_video(camera.frames, KLTConfig())
+            require_tracks(found.track, camera.name, self.episode)
+            evidence = body_evidence(found, world_from_body, k)
             groups = "; ".join(
                 f"{residual:.2f}° "
                 + ", ".join(robot.body_names[b] for b in group[:3])
@@ -181,6 +183,7 @@ class Fit:
             refine,
             video_tracks,
         )
+        from r4r.rago.klt import require_tracks
         from r4r.rago.lens import lens_from_priors
         from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
 
@@ -205,10 +208,12 @@ class Fit:
         config = self._config()
         lens = lens_from_priors((stream.prior,), k)
         episodes = []
-        for e in loaded:
+        for number, e in zip(self.episodes, loaded, strict=True):
             frames = next(c for c in e.cameras if c.name == self.camera).frames
             qpos = qpos_from_state(robot, e.state.to(device), e.joints)
-            episodes.append((qpos, video_tracks(frames, k, config.klt, lens=lens)))
+            tracks = video_tracks(frames, k, config.klt, lens=lens)
+            require_tracks(tracks.track, self.camera, number)
+            episodes.append((qpos, tracks))
         ids = tuple(robot.body(b) for b in bodies)
         focal_range = stream.prior.focal_range if stream.prior.focal else None
         if stream.intrinsics is not None:

@@ -117,6 +117,14 @@ def track_video[T: IntVar, H: IntVar, W: IntVar](
     )
 
 
+def require_tracks(track: Tensor[[int]], camera: str, episode: int) -> None:
+    """Raise when a camera's video gave no tracks (blank, frozen or too short): the stages
+    after it number tracks from `track.max()`."""
+
+    if len(track) == 0:
+        raise ValueError(f"camera {camera}, episode {episode}: no tracks")
+
+
 def klt_tracks[V: IntVar, C: IntVar](
     frames: list[Tensor[[int, *RGB, int, int]]],
     view_camera: Tensor[[V]],

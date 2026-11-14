@@ -339,6 +339,9 @@ class Rig:
                 "camera_body": [robot.camera_body[robot.camera(n)] for n in names],
                 "median_error": fit.median_error,
             }
+            if fit.lens is not None:
+                solution["distortion"] = fit.lens.distortion.detach().cpu()
+                solution["fisheye"] = fit.lens.fisheye.cpu()
             torch.save(solution, self.save)
             print(f"saved {self.save}")
         if self.write:
@@ -560,6 +563,7 @@ class Preview:
 
         from r4r.data.lerobot import load_episode
         from r4r.rago.kinematics import forward_kinematics
+        from r4r.rago.lens import lens_from_priors
         from r4r.rago.robot import (
             CameraMount,
             body_mounts,
@@ -595,6 +599,9 @@ class Preview:
             "camera_body": [robot.camera_body[i] for i in index],
             "intrinsics": torch.tensor(k, dtype=torch.float64),
         }
+        lens = lens_from_priors([c.prior for c in streams], solution["intrinsics"])
+        if lens is not None:
+            solution["distortion"], solution["fisheye"] = lens.distortion, lens.fisheye
         model = compile_model(episode.robot, None, mounts, bodies)
         videos = {c.name: c.frames.permute(0, 2, 3, 1).numpy() for c in streams}
         label = f"{self.dataset}  episode {self.episode}  PRIORS ONLY (no solve)"

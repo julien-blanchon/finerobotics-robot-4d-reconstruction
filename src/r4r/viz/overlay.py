@@ -122,17 +122,35 @@ def draw(
     intrinsics: np.ndarray,
     geoms: list[Surface],
     frames: list[int],
+    lens: tuple[np.ndarray, bool] | None = None,
 ) -> np.ndarray:
     """`image` (RGB) with the robot's surfaces (one colour per body, translucent) and the
-    frames of the bodies `frames` (RGB axes for x, y, z)."""
+    frames of the bodies `frames` (RGB axes for x, y, z), projected through the camera's
+    `lens` (distortion coefficients [4] and whether it is a fisheye; None: ideal pinhole)."""
 
     camera_from_world = np.linalg.inv(world_from_camera)
     layer = image.copy()
     width = image.shape[1]
+
+    def project(local: np.ndarray) -> np.ndarray:
+        if lens is None:
+            return (local @ intrinsics.T)[:, :2] / np.maximum(local[:, 2:3], 1e-6)
+        import torch
+
+        from r4r.geometry.camera import project as lens_project
+
+        pixels = lens_project(
+            torch.from_numpy(intrinsics),
+            torch.from_numpy(np.ascontiguousarray(local, dtype=np.float64)),
+            torch.from_numpy(np.asarray(lens[0], dtype=np.float64)),
+            torch.tensor(bool(lens[1])),
+        )
+        return pixels.numpy()
+
     for body, vertices, faces in geoms:
         pose = camera_from_world @ world_from_body[body]
         local = vertices @ pose[:3, :3].T + pose[:3, 3]
-        pixel = (local @ intrinsics.T)[:, :2] / np.maximum(local[:, 2:3], 1e-6)
+        pixel = project(local)
         ok = (local[:, 2] > 0.02)[faces].all(1)
         polygons = np.round(pixel[faces[ok]] * 4).astype(np.int32)  # 2 bits of sub-pixel
         near = (np.abs(polygons[..., 0]) < 16 * width).all(1)
@@ -144,7 +162,9 @@ def draw(
         if pose[2, 3] < 0.05:
             continue
         points = np.vstack([pose[:3, 3], pose[:3, 3] + AXIS_LENGTH * pose[:3, :3].T])
-        pixel = (points @ intrinsics.T)[:, :2] / points[:, 2:3]
+        if (points[:, 2] <= 0).any():
+            continue
+        pixel = project(points)
         origin = tuple(int(v) for v in pixel[0])
         for axis, colour in enumerate([(255, 40, 40), (40, 255, 40), (60, 120, 255)]):
             end = tuple(int(v) for v in pixel[1 + axis])
@@ -176,6 +196,8 @@ def overlay_frames(
     world = solution["world_from_body"][start : start + steps].double().numpy()
     mounts = solution["mounts_at"][:, start : start + steps].double().numpy()
     intrinsics = solution["intrinsics"].double().numpy()
+    # Lens per camera (absent from pinhole-only solutions): distortion [C, 4], fisheye [C]
+    distortion, fisheye = solution.get("distortion"), solution.get("fisheye")
     geoms, frames = surfaces(model), leaves(model)
     names = solution["names"]
     widths = [round(v.shape[2] * height / v.shape[1]) // 2 * 2 for v in map(videos.get, names)]
@@ -184,7 +206,10 @@ def overlay_frames(
         for c, name in enumerate(names):
             image = np.ascontiguousarray(videos[name][t])
             camera = world[t, solution["camera_body"][c]] @ mounts[c, t]
-            tile = draw(image, world[t], camera, intrinsics[c], geoms, frames)
+            lens = None
+            if distortion is not None and fisheye is not None:
+                lens = (distortion[c].double().numpy(), bool(fisheye[c]))
+            tile = draw(image, world[t], camera, intrinsics[c], geoms, frames, lens)
             tiles.append(cv2.resize(tile, (widths[c], height), interpolation=cv2.INTER_AREA))
         frame = np.zeros((height + LABEL_HEIGHT, sum(widths), 3), dtype=np.uint8)
         frame[LABEL_HEIGHT:] = np.hstack(tiles)

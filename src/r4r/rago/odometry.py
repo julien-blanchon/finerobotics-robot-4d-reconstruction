@@ -72,6 +72,22 @@ def from_velocity(velocity: Tensor[[int, 3]], time: Tensor[[int]]) -> Tensor[[in
     return from_steps(mean * dt[:, None])
 
 
+def swerve_twist(
+    steering: Tensor[[int, int]], speed: Tensor[[int, int]], wheels: Tensor[[int, 2]]
+) -> Tensor[[int, 3]]:
+    """Body-frame twist (vx, vy, ω) of a swerve drive per timestep, by least squares over its
+    wheels: wheel i at (x_i, y_i), steered to θ_i and rolling at s_i (m/s) moves at
+    s_i (cos θ_i, sin θ_i) = (vx − ω y_i, vy + ω x_i)."""
+
+    x, y = wheels[:, 0], wheels[:, 1]
+    one, zero = torch.ones_like(x), torch.zeros_like(x)
+    design = torch.stack(
+        (torch.stack((one, zero, -y), -1), torch.stack((zero, one, x), -1)), 1
+    ).reshape(-1, 3)  # [2W, 3]: rows (vx, vy, ω) per wheel, x then y
+    target = torch.stack((speed * torch.cos(steering), speed * torch.sin(steering)), -1)
+    return target.reshape(len(target), -1) @ torch.linalg.pinv(design).T
+
+
 def caster_steps(
     wheels: Tensor[[int, 2]], steering: Tensor[[int]] | None, geometry: CasterGeometry
 ) -> Tensor[[int, 3]]:

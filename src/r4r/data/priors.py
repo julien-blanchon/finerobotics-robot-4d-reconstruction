@@ -35,7 +35,8 @@ the dataset, per episode (e.g. a static camera re-placed between episodes) or pe
 `bodies` are elements of the description whose offset from their parent is not exactly known
 (a second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the
 video resolution, a property of the lens: fixed across episodes unless `focal_range`
-(relative) says how far it may vary. `lens` is `pinhole` (radial `distortion`: OpenCV's
+(relative) says how far it may vary; `aspect` (fy / fx, default 1) for non-square pixels.
+`lens` is `pinhole` (radial `distortion`: OpenCV's
 k1, k2, k3) or `fisheye` (Kannala–Brandt, OpenCV fisheye's k1..k4); `distortion_range` is the
 prior std of each coefficient when fitting refines them (0: held; default 0 when the
 coefficients are given, wide for a fisheye without them).
@@ -66,6 +67,9 @@ class CameraPrior:
     lens: Literal["pinhole", "fisheye"] = "pinhole"
     focal: float | None = None  # pixels at the video resolution
     focal_range: float | None = None  # relative; None: unknown (searched)
+    # Pixel aspect fy / fx (non-square pixels, e.g. a 848-wide sensor resized to 640): `focal`
+    # is fx, fy = focal × aspect; focal corrections keep the ratio
+    aspect: float = 1.0
     # Pinhole: OpenCV radial k1, k2, k3; fisheye: OpenCV fisheye (Kannala–Brandt) k1..k4.
     # None: zero (an ideal pinhole; for a fisheye, unknown: refined from the equidistant model)
     distortion: tuple[float, ...] | None = None
@@ -92,16 +96,22 @@ class BodyPrior:
 @dataclass(frozen=True, slots=True)
 class BaseOdometry:
     """Where a mobile base's motion is recorded (see `r4r.rago.odometry`): `feature` columns
-    `columns` holding planar poses (x, y, θ), body-frame velocities (vx, vy, ω), or wheel
-    angles (left, right[, steering]) of a caster or differential drive with its geometry."""
+    `columns` holding planar poses (x, y, θ or x, y, qz, qw), body-frame velocities
+    (vx, vy, ω), wheel angles (left, right[, steering]) of a caster or differential drive
+    with its geometry, or a swerve drive's steering angles (`columns`) and wheel ground speeds
+    (m/s, `speed_columns` of `speed_feature`, default `feature`) with each wheel's contact
+    point (x, y) in the base frame (`wheels`)."""
 
-    kind: Literal["pose", "velocity", "caster"]
+    kind: Literal["pose", "velocity", "caster", "swerve"]
     feature: str
     columns: tuple[int, ...]
     radius: float | None = None
     half_track: float | None = None
     offset: float = 0.0
     signs: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    speed_feature: str | None = None
+    speed_columns: tuple[int, ...] = ()
+    wheels: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +179,7 @@ def load_priors(root: Path) -> DatasetPriors:
             lens=c.get("lens", "pinhole"),
             focal=c.get("focal"),
             focal_range=c.get("focal_range"),
+            aspect=float(c.get("aspect", 1.0)),
             distortion=tuple(c["distortion"]) if c.get("distortion") is not None else None,
             distortion_range=c.get("distortion_range"),
             scope=c.get("scope", "dataset"),
@@ -195,6 +206,9 @@ def load_priors(root: Path) -> DatasetPriors:
             odometry.get("half_track"),
             float(odometry.get("offset", 0.0)),
             tuple(odometry.get("signs", (1.0, 1.0, 1.0))),
+            odometry.get("speed_feature"),
+            tuple(odometry.get("speed_columns", ())),
+            tuple(tuple(w) for w in odometry.get("wheels", ())),
         )
     return DatasetPriors(
         base=raw.get("base", "fixed"),

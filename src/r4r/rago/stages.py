@@ -76,6 +76,10 @@ class RigEpisode:
     frames: dict[str, Tensor[[int, 3, int, int]]]  # uint8 videos, one per camera
     # Mobile base: its pose at each timestep relative to the first, in its own frame (odometry)
     base_motion: Tensor[[int, 4, 4]] | None = None
+    # Recorded start poses (base frame, OpenCV axes) of static cameras in this episode, e.g. a
+    # dataset's own per-episode calibration (per-episode table): used instead of PnP. For a
+    # moving camera: its mount on its link in this episode (e.g. a simulator randomising it)
+    poses: dict[str, Tensor[[4, 4]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -140,8 +144,9 @@ def calibrate_rig(
 
     `intrinsics` are the focal priors (or guesses where `known_focal` is False); cameras on
     the world body are static, the others moving. Moving cameras with `known_mount` keep the
-    description's mount (no search). `lens`: the cameras' distortion priors (None: ideal
-    pinholes), refined where their std allows.
+    description's mount (no search); static ones start from it (no PnP), as do those with a
+    recorded pose for the episode (`RigEpisode.poses`). `lens`: the cameras' distortion
+    priors (None: ideal pinholes), refined where their std allows.
     """
 
     index = [robot.camera(n) for n in names]
@@ -157,14 +162,21 @@ def calibrate_rig(
         for i, e in enumerate(episodes)
     ]
     starts, intrinsics = _static_starts(
-        robot, episodes, merged, names, mounts, intrinsics, known_focal
+        robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount
     )
+    for i, e in enumerate(episodes):  # recorded per-episode mounts of moving cameras
+        for c, name in enumerate(names):
+            if not static[c] and name in e.poses:
+                starts[i, c] = e.poses[name].to(starts)
 
-    # 4-5. Bundles: all episodes, then groups; moving mounts frozen
+    # 4-5. Bundles: all episodes, then groups; moving mounts frozen, except those that change
+    # between episodes (randomising simulators: episode scope), refined per episode in range
     frozen = replace(
         robot,
         free_cameras={
-            n: f for n, f in robot.free_cameras.items() if n in names and static[names.index(n)]
+            n: f
+            for n, f in robot.free_cameras.items()
+            if n in names and (static[names.index(n)] or f.scope != "dataset")
         },
         body_from_camera=robot.body_from_camera.to(mounts).clone(),
     )
@@ -173,6 +185,7 @@ def calibrate_rig(
     # Known focals stay fixed; those found in stage 3 are refined
     fixed = known_focal
     everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config, fixed)
+    # Groups (agreement check); 0 groups: none (reconstruction with frozen priors)
     groups = [list(range(g, len(episodes), config.groups)) for g in range(config.groups)]
     corrections, group_fits = [], []
     for group in filter(None, groups):
@@ -198,7 +211,9 @@ def calibrate_rig(
         bodies=everything.world_from_body[first][:, free],
         body_corrections=_body_corrections(frozen, episodes[0].qpos, everything.world_from_body),
         camera_poses=camera_poses,
-        group_corrections=torch.stack(corrections),
+        group_corrections=torch.stack(corrections)
+        if corrections
+        else _body_corrections(frozen, episodes[0].qpos, everything.world_from_body)[None],
         median_error=everything.median_error,
         inlier_fraction=everything.inlier_fraction,
         mount_agreement=agreement,
@@ -207,8 +222,8 @@ def calibrate_rig(
         base_departure=_base_departure(frozen, episodes, everything.world_from_body),
         joint_offset=everything.joint_offset,
         time_offset=everything.time_offset,
-        group_joint_offsets=torch.stack([f.joint_offset for f in group_fits]),
-        group_time_offsets=tuple(f.time_offset for f in group_fits),
+        group_joint_offsets=torch.stack([f.joint_offset for f in group_fits or [everything]]),
+        group_time_offsets=tuple(f.time_offset for f in group_fits or [everything]),
     )
 
 
@@ -306,10 +321,14 @@ def _static_starts(
     mounts: Tensor[[int, 4, 4]],
     intrinsics: Tensor[[int, 3, 3]],
     known_focal: tuple[bool, ...],
+    known_mount: tuple[bool, ...] | None = None,
 ) -> tuple[Tensor[[int, int, 4, 4]], Tensor[[int, 3, 3]]]:
     """Stage 3: each free static camera's pose per episode (and focal, from the first episode
     where it is found, when unknown) by PnP on points the moving cameras triangulate. Episodes
-    where PnP fails keep the description's pose; cameras the priors fix keep theirs. A
+    where PnP fails keep the description's pose; cameras the priors fix keep theirs, and
+    cameras whose pose the priors give (`known_mount`) start from it: the bundle refines them
+    within the priors' ranges (PnP on robot-attached tracks can land a known camera 10 cm /
+    6 deg off and the bundle then keeps it there). A
     dataset-scope camera starts every episode from the consensus of its episodes' PnP poses
     (`_consensus`): one episode with few links can land metres away."""
 
@@ -321,7 +340,8 @@ def _static_starts(
     support = torch.zeros(len(episodes), len(names), device=device)  # PnP inliers
     focal = intrinsics[:, 0, 0].clone()
     found = [False] * len(names)
-    free = [n in robot.free_cameras for n in names]
+    known = known_mount or (False,) * len(names)
+    free = [n in robot.free_cameras and not k for n, k in zip(names, known, strict=True)]
     for i, (e, tracks) in enumerate(zip(episodes, merged, strict=True)):
         world = moved_kinematics(robot, e)
         cam = tracks.view_camera
@@ -330,6 +350,11 @@ def _static_starts(
         points = triangulate(tracks, world_from_view, ~static[observed])
         for c in static.nonzero()[:, 0].tolist():
             if not free[c]:
+                continue
+            recorded = e.poses.get(names[c])
+            if recorded is not None:  # the episode's own calibration: no PnP
+                starts[i, c] = recorded.to(starts)
+                support[i, c] = 1.0
                 continue
             seen = (observed == c) & (points.count[tracks.track] >= MIN_OBSERVATIONS)
             if int(seen.sum()) < MIN_POINTS:

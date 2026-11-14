@@ -70,10 +70,29 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
   per-unit calibrations), write them to `priors/<family>/<dataset>.episodes.parquet` (one row
   per episode and camera: `episode, camera, fx, fy, cx, cy` at the video resolution, and
   `station` when known); the loader gives each stream its K ✅. A station is a setup: `r4r rig`
-  refuses episodes from several stations. Only then is it estimated
-  (⬜ a focal tool: ARROW pooled over many frames for static cameras; the moving-camera fit
-  gives it for wrist/head cameras). Fixed by default (`focal_range: 0`); a range only for
-  datasets that really vary it (randomising simulators, per-unit calibrations).
+  refuses episodes from several stations. Only then is it estimated. Fixed by default
+  (`focal_range: 0`); a range only for datasets that really vary it (randomising simulators,
+  per-unit calibrations).
+
+  **Estimating a focal when nothing is recorded** (optional tool, not used by the solve):
+  `r4r focal <dataset> <camera> --episodes 0 1 2` ✅ runs ARROW with the gen2 adapter
+  (`/e/scratch/reformo/blanchon1/r4r-cache/arrow_gen2.safetensors`) on 64 frames per episode,
+  then again with its own answer as a draft, and prints the median per episode and over
+  episodes (one episode: ~20 s with model loading, on one GPU, < 10 GB). Measured against
+  simulator ground truth (`experiments/focal_sources/RESULTS.md`):
+  - **Static cameras**: median error 3 % (9 of 14 cameras within 10 %; base ARROW 18 %,
+    GeoCalib 61 %). Some views are far off: molmobot's wide GoPro-like camera by +150–180 %,
+    two of its randomised zed2 views by +30–40 %. Check the number against the image and the
+    camera model. A static camera's focal is weakly constrained by `r4r rig` (focal ↔
+    distance), so this is the intended use: write it as the camera's `focal` in the priors
+    (⬜ not yet validated through `r4r rig` against ground truth).
+  - **Wrist cameras**: median 3 % (10 of 16 within 10 %), but 60–310 % too long on
+    molmobot's zed-mini wrist and on maniskill's 256² wrist. Single-image estimators are worse
+    (MoGe-2 median 74 %, GeoCalib 43–52 %). For these cameras **leave the focal free in
+    `r4r fit`** (the default search over focal factors): with the focal fixed at the estimate
+    the mount fit succeeded as often as the free search (4 of 16 camera-episodes each), and
+    even the exact focal rescued only 2 of the 12 failing fits. Use the estimate as a
+    plausibility check of the focal the fit returns, not as a replacement.
 - **Scope** of each pose: `dataset` (bolted, never moves), `episode` (re-placed between
   episodes, e.g. DROID's exterior cameras), `frame` (rare).
 - **Lens** ✅: `"lens": "pinhole"` (default) or `"fisheye"`, and its `distortion`
@@ -185,8 +204,11 @@ Record what you chose and why in the priors' `notes`.
   arm moves. Check the state against the video (sheet, shift scores).
 - Simulators may randomise mounts and focals per episode (molmobot, interndata): declare
   episode-scope ranges instead of fighting for one value.
-- A blind focal guess makes the moving-camera search fail on hard datasets (wrong orientation
-  with an inflated focal): give the focal.
+- A failed moving-camera fit often comes with an inflated focal, but the focal is rarely the
+  cause: on simulators with ground truth (arx-lift-2, genie-1, maniskill, molmobot: 12 failing
+  camera-episode fits), fixing the exact focal rescued 2. Check the kinematics (state lag,
+  `r4r fit --shifts`; joints that move but are not in the state) before blaming the focal.
+  A recorded focal is still worth giving: it removes one unknown.
 - One episode rarely pins down an arm base: pool episodes.
 - Most failed wrist/head mount searches on simulators come from unmodelled kinematics (a
   video/joint lag, body sag, missing priors), not the focal: even the true focal rescues few

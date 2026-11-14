@@ -370,7 +370,8 @@ def _static_starts(
                 None if lens is None else lens.distortion[c],
                 None if lens is None else lens.fisheye[c],
             )
-            if start is not None:
+            # A degenerate PnP (few, near-collinear points) can return NaN: keep the prior pose
+            if start is not None and bool(torch.isfinite(start.world_from_camera).all()):
                 starts[i, c] = start.world_from_camera
                 support[i, c] = start.inliers
                 focal[c], found[c] = start.focal, True

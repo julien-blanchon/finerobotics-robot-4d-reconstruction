@@ -97,9 +97,14 @@ class Corrections(nn.Module):
         return torch.where(self.active[:, None], self.delta, 0.0)
 
     def prior(self, element_from_reference: Tensor[[int, 4, 4]]) -> Tensor[[]]:
-        """Gaussian cost of each row's deviation: from the reference (the description) for
-        dataset and episode scopes; for frame scope, of its step from the previous frame
-        against the starting trajectory's step.
+        """Gaussian cost of each row's deviation (the squared `prior_residuals`)."""
+
+        return (self.prior_residuals(element_from_reference) ** 2).sum()
+
+    def prior_residuals(self, element_from_reference: Tensor[[int, 4, 4]]) -> Tensor[[int, 6]]:
+        """Each row's deviation over its std: from the reference (the description) for dataset
+        and episode scopes; for frame scope, of its step from the previous frame against the
+        starting trajectory's step. Zero for rows that are not free.
 
         `element_from_reference [rows, 4, 4]`: each row's corrected pose relative to its
         reference.
@@ -113,9 +118,10 @@ class Corrections(nn.Module):
         walked = se3.inverse(expected) @ step
         relative = torch.where(walk[:, None, None], walked, pose)
         deviation = se3.se3_log(relative)
-        cost = (deviation[:, :3] ** 2).sum(-1) / self.std[:, 0] ** 2
-        cost = cost + (deviation[:, 3:] ** 2).sum(-1) / self.std[:, 1] ** 2
-        return torch.where(self.active, cost, 0.0).sum()
+        scaled = torch.cat(
+            (deviation[:, :3] / self.std[:, :1], deviation[:, 3:] / self.std[:, 1:]), -1
+        )
+        return torch.where(self.active[:, None], scaled, 0.0)
 
 
 class Rig(nn.Module):
@@ -271,10 +277,16 @@ class Rig(nn.Module):
     def prior(self) -> Tensor[[]]:
         """Priors of the free camera mounts (around the description), free bodies and focals."""
 
+        return (self.prior_residuals() ** 2).sum()
+
+    def prior_residuals(self) -> Tensor[[int]]:
+        """The priors as residuals (their squares sum to `prior`): camera rows, body rows,
+        then focals (zero where held)."""
+
         owner = self.cameras.owner
         mounts = self.initial_mount[owner] @ se3.se3_exp(self.cameras.values())
-        cameras = self.cameras.prior(se3.inverse(self.default_mount[owner]) @ mounts)
-        bodies = self.bodies.prior(se3.se3_exp(self.bodies.values()))
+        cameras = self.cameras.prior_residuals(se3.inverse(self.default_mount[owner]) @ mounts)
+        bodies = self.bodies.prior_residuals(se3.se3_exp(self.bodies.values()))
         free = self.focal_std > 0
-        focal = (self.log_focal[free] ** 2 / self.focal_std[free] ** 2).sum()
-        return cameras + bodies + focal
+        focal = torch.where(free, self.log_focal / self.focal_std.clamp_min(1e-12), 0.0)
+        return torch.cat((cameras.flatten(), bodies.flatten(), focal))

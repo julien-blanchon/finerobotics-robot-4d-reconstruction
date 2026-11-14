@@ -35,7 +35,7 @@ from .calibrate import FitConfig, fit_setup, video_tracks
 from .cross import cross_matches
 from .initialize import locate_camera, triangulate
 from .kinematics import forward_kinematics
-from .klt import klt_tracks
+from .klt import VideoTracks, klt_tracks, track_video
 from .merge import merge_tracks
 from .tracks import Tracks
 
@@ -53,6 +53,19 @@ MIN_OBSERVATIONS = 3
 # count as still (m, rad), and a mount is searched on spans of at least MIN_STILL of them
 STILL_STEP = (0.002, math.radians(0.1))
 MIN_STILL = 20
+
+
+class _Tracked:
+    """KLT tracks of each (episode, camera) video, computed once and shared by the stages."""
+
+    def __init__(self, episodes: list[RigEpisode], config: FitConfig) -> None:
+        self.episodes, self.config, self.done = episodes, config, {}
+
+    def __call__(self, episode: int, name: str) -> VideoTracks:
+        key = (episode, name)
+        if key not in self.done:
+            self.done[key] = track_video(self.episodes[episode].frames[name], self.config.klt)
+        return self.done[key]
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,10 +128,14 @@ def calibrate_rig(
 
     index = [robot.camera(n) for n in names]
     static = [robot.camera_body[i] == 0 for i in index]
+    tracked = _Tracked(episodes, config.fit)
     mounts, intrinsics, agreement = _moving_mounts(
-        robot, episodes, names, intrinsics, known_focal, known_mount, config
+        robot, episodes, names, intrinsics, known_focal, known_mount, config, tracked
     )
-    merged = [_multi_camera_tracks(e, names, intrinsics, model, config) for e in episodes]
+    merged = [
+        _multi_camera_tracks(e, names, intrinsics, model, config, [tracked(i, n) for n in names])
+        for i, e in enumerate(episodes)
+    ]
     starts, intrinsics = _static_starts(
         robot, episodes, merged, names, mounts, intrinsics, known_focal
     )
@@ -175,6 +192,7 @@ def _moving_mounts(
     known_focal: tuple[bool, ...],
     known_mount: tuple[bool, ...],
     config: RigConfig,
+    tracked: _Tracked | None = None,
 ) -> tuple[Tensor[[int, 4, 4]], Tensor[[int, 3, 3]], tuple[tuple[int, int] | None, ...]]:
     """Stage 1: each free moving camera's mount (and focal) from its own video alone."""
 
@@ -187,12 +205,14 @@ def _moving_mounts(
         if body == 0 or known_mount[c] or name not in robot.free_cameras:
             continue
         data = []
-        for e in episodes:
+        for i, e in enumerate(episodes):
             a, b = still_span(e.base_motion)
-            if b - a >= MIN_STILL:
-                data.append(
-                    (e.qpos[a:b], video_tracks(e.frames[name][a:b], intrinsics[c], config.fit.klt))
-                )
+            if b - a < MIN_STILL:
+                continue
+            whole = a == 0 and b >= len(e.qpos)  # the whole video: its tracks are shared
+            found = tracked(i, name) if whole and tracked is not None else None
+            frames = e.frames[name][a:b]
+            data.append((e.qpos[a:b], video_tracks(frames, intrinsics[c], config.fit.klt, found)))
         if not data:
             raise ValueError(
                 f"{name}: no span of {MIN_STILL} timesteps with the base still in any episode;"
@@ -212,6 +232,7 @@ def _multi_camera_tracks(
     intrinsics: Tensor[[int, 3, 3]],
     model: RoMaV2,
     config: RigConfig,
+    found: list[VideoTracks] | None = None,
 ) -> Tracks:
     """Stage 2: KLT tracks of every camera, merged through RoMa links at the same instants."""
 
@@ -220,7 +241,7 @@ def _multi_camera_tracks(
     view_camera = torch.arange(len(names), device=device).repeat_interleave(steps)
     view_time = torch.arange(steps, device=device).repeat(len(names))
     videos = [episode.frames[n] for n in names]
-    tracks = klt_tracks(videos, view_camera, view_time, intrinsics, config.fit.klt)
+    tracks = klt_tracks(videos, view_camera, view_time, intrinsics, config.fit.klt, found)
     pairs = [
         (a, t, b, t)
         for t in range(0, steps, config.link_every)

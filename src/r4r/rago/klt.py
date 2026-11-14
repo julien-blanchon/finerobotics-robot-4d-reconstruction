@@ -108,9 +108,11 @@ def klt_tracks(
     view_time: Tensor[[int]],
     intrinsics: Tensor[[int, 3, 3]],
     config: KLTConfig,
+    found: list[VideoTracks] | None = None,
 ) -> Tracks:
     """Tracks of every camera's video (frame `t` of camera `c` is view (c, t)); each track is
-    rigid with an unknown body, so all are flagged `moving` (the bundle attaches them)."""
+    rigid with an unknown body, so all are flagged `moving` (the bundle attaches them).
+    `found`: each video's tracks when already computed (`track_video`)."""
 
     from .tracks import Tracks
 
@@ -121,11 +123,11 @@ def klt_tracks(
     tracks, views, pixels = [], [], []
     offset = 0
     for c, video in enumerate(frames):
-        found = track_video(video, config)
-        tracks.append(found.track.to(view_time.device) + offset)
-        views.append(lookup[c, found.frame.to(view_time.device)])
-        pixels.append(found.pixel.to(view_time.device))
-        offset += int(found.track.max()) + 1 if len(found.track) else 0
+        one = found[c] if found is not None else track_video(video, config)
+        tracks.append(one.track.to(view_time.device) + offset)
+        views.append(lookup[c, one.frame.to(view_time.device)])
+        pixels.append(one.pixel.to(view_time.device))
+        offset += int(one.track.max()) + 1 if len(one.track) else 0
     track, view, pixel = torch.cat(tracks), torch.cat(views), torch.cat(pixels)
     assert bool((view >= 0).all()), "every video frame must be a view"
     ones = torch.ones(len(track), dtype=pixel.dtype, device=pixel.device)

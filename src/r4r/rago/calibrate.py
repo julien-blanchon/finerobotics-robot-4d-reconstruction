@@ -24,7 +24,7 @@ from r4r.geometry import se3
 
 from .bundle import BundleConfig, bundle_adjust
 from .kinematics import forward_kinematics
-from .klt import KLTConfig, klt_tracks
+from .klt import KLTConfig, VideoTracks, klt_tracks
 from .search import SearchConfig, search_mount
 
 if TYPE_CHECKING:
@@ -75,9 +75,12 @@ class SetupFit:
 
 
 def video_tracks(
-    frames: Tensor[[int, 3, int, int]], intrinsics: Tensor[[3, 3]], config: KLTConfig
+    frames: Tensor[[int, 3, int, int]],
+    intrinsics: Tensor[[3, 3]],
+    config: KLTConfig,
+    found: VideoTracks | None = None,
 ) -> Tracks:
-    """KLT tracks of one camera's video (one view per frame)."""
+    """KLT tracks of one camera's video (one view per frame); `found`: already tracked."""
 
     steps = len(frames)
     device = intrinsics.device
@@ -87,6 +90,7 @@ def video_tracks(
         torch.arange(steps, device=device),
         intrinsics[None],
         config,
+        None if found is None else [found],
     )
 
 

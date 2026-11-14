@@ -24,7 +24,7 @@ Ref: Triggs et al., Bundle Adjustment — A Modern Synthesis, 1999 (variable pro
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -33,8 +33,11 @@ import torch.nn.functional as F
 from r4r.geometry import camera, se3
 
 from .rig import MOTION_THRESHOLD, Rig
+from .solver import LMConfig, levenberg_marquardt, supports
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from shape_extensions import IntVar
     from torch import Tensor
 
@@ -74,6 +77,10 @@ class BundleConfig:
     attach_links: bool = True
     reassign_every: int = 100
     outlier_cost: float = math.log1p(9.0)  # mean error ≈ 3δ
+    # "lm": Levenberg–Marquardt (`solver.py`) when every free row is dataset or episode scope,
+    # else Adam; "adam": always Adam (`iterations` steps)
+    optimizer: str = "lm"
+    lm: LMConfig = field(default_factory=LMConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +169,9 @@ def bundle_adjust(
             return attach(rig, t, obs, track_moving, candidates, config.cauchy, config.outlier_cost)
 
     track_body = assign()
+    if config.optimizer == "lm" and supports(rig):
+        history = _levenberg_marquardt(rig, t, obs, assign, track_body, config)
+        return _result(rig, t, obs, names, config, assign, history)
     optimizer = torch.optim.Adam(rig.parameters(), lr=config.learning_rate)
     schedule = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda step: 0.5 * (1 + math.cos(math.pi * step / config.iterations))
@@ -181,7 +191,47 @@ def bundle_adjust(
         optimizer.step()
         schedule.step()
         history.append(torch.stack((loss, data, prior)).detach())
+    return _result(rig, t, obs, names, config, assign, torch.stack(history))
 
+
+def _levenberg_marquardt(
+    rig: Rig,
+    t: Tracks,
+    obs: Observations,
+    assign: Callable[[], Tensor[[int]]],
+    track_body: Tensor[[int]],
+    config: BundleConfig,
+) -> Tensor[[int, 3]]:
+    """The same objective as the Adam loop, minimised by `solver.levenberg_marquardt`."""
+
+    state = {"body": track_body[obs.track]}
+
+    def residual_fn() -> tuple[Tensor[[int, 2]], Tensor[[int]]]:
+        difference, valid, _ = residuals(rig, t, obs, state["body"].clamp_min(WORLD))
+        return difference, valid
+
+    def weight_fn(valid: Tensor[[int]]) -> Tensor[[int]]:
+        return torch.where(state["body"] >= 0, obs.weight, 0.0) * valid
+
+    def reassign() -> None:
+        state["body"] = assign()[obs.track]
+
+    time = t.view_time[obs.view]
+    steps = len(t.view_time)
+    return levenberg_marquardt(
+        rig, residual_fn, weight_fn, time, obs.track, steps, config.cauchy, config.lm, reassign
+    )
+
+
+def _result(
+    rig: Rig,
+    t: Tracks,
+    obs: Observations,
+    names: tuple[str, ...],
+    config: BundleConfig,
+    assign: Callable[[], Tensor[[int]]],
+    history: Tensor[[int, 3]],
+) -> BundleResult:
     with torch.no_grad():
         track_body = assign()
         body = track_body[obs.track]
@@ -201,7 +251,7 @@ def bundle_adjust(
             body_from_camera=rig.mounts(),
             intrinsics=rig.intrinsics(),
             world_from_view=rig.camera_poses(t.view_camera, t.view_time),
-            history=torch.stack(history),
+            history=history,
             median_error=float((error * unit)[valid].median()),
             inlier_fraction=float((error[valid] < 3 * config.cauchy).float().mean()),
             score=score,
@@ -288,7 +338,21 @@ def reprojection(
     obs: Observations,
     body: Tensor[[int]],
 ) -> tuple[Tensor[[int]], Tensor[[int]], Tensor[[int]]]:
-    """Per observation: reprojection error and whether it is usable; per track: ray spread.
+    """Per observation: reprojection error (`residuals`' length) and whether it is usable;
+    per track: ray spread."""
+
+    difference, valid, spread = residuals(rig, tracks, obs, body)
+    return torch.where(valid, difference.norm(dim=-1), 0.0), valid, spread
+
+
+def residuals(
+    rig: Rig,
+    tracks: Tracks,
+    obs: Observations,
+    body: Tensor[[int]],
+) -> tuple[Tensor[[int, 2]], Tensor[[int]], Tensor[[int]]]:
+    """Per observation: reprojection residual (projected − observed, per pixel unit) and
+    whether it is usable; per track: ray spread.
 
     Each observation's ray is expressed in the frame of `body[m]` at its view's time (the world
     body for static tracks), where its track's point is constant.
@@ -335,7 +399,7 @@ def reprojection(
     in_view = se3.transform_points(se3.inverse(pose), point[obs.track][:, None])[:, 0]
     projected = camera.project(k, in_view[:, None])[:, 0]
     unit = rig.pixel_unit[t.view_camera[obs.view]]
-    error = (projected - pixel).norm(dim=-1) / unit
     valid = in_view[:, 2] > MIN_DEPTH
+    difference = torch.where(valid[:, None], (projected - pixel) / unit[:, None], 0.0)
     spread = 1 - mean_ray.norm(dim=-1) / total
-    return torch.where(valid, error, 0.0), valid, spread
+    return difference, valid, spread

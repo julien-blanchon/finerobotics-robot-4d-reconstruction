@@ -19,7 +19,7 @@ from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import decode_video_frames
 
-from ..geometry import se3
+from ..geometry import camera, se3
 from .episode import CameraStream, Episode, JointMap
 from .priors import (
     PRIORS,
@@ -65,7 +65,7 @@ def load_episode(
     record = load_episode_record(root, episode)
     # A station's own mounts and bodies (priors `stations`) on top of the dataset's
     priors = load_priors(root).for_station(None if record is None else record.station)
-    links = {camera["key"]: camera["urdf_link"] for camera in robot.get("cameras", [])}
+    links = {c["key"]: c["urdf_link"] for c in robot.get("cameras", [])}
     cameras = []
     for key in meta.video_keys:
         if meta.features[key].get("info", {}).get("is_depth_map", False):
@@ -127,25 +127,28 @@ def _recorded_intrinsics(
     """A camera's K at the video resolution `size` (height, width) from its recorded column
     (rows: flattened K or fx, fy, cx, cy; the episode's first finite, non-zero row is used).
 
-    `stretch`: `f' = f · s`, `c' = c · s` per axis, `s = video / given`; `height`: one scale
-    `s = H / H_given` on both focals and the principal point centred (same vertical FOV).
+    `stretch`: each axis resized, `f' = f · s`, `c' = (c + ½) · s − ½`, `s = video / given`;
+    `height`: one scale `s = H / H_given` on both focals, the principal point at the image
+    centre `((W − 1)/2, (H − 1)/2)` (same vertical FOV). Pixel centres at integer coordinates.
     """
 
     finite = values.isfinite().all(1) & (values.abs().sum(1) > 0)
-    row = values[int(finite.nonzero()[0, 0]) if finite.any() else 0]
+    if not finite.any():
+        raise ValueError(f"{source.column}: no finite, non-zero intrinsics in this episode")
+    row = values[int(finite.nonzero()[0, 0])]
     if source.layout == "matrix":
         fx, fy, cx, cy = (float(row[i]) for i in (0, 4, 2, 5))
     else:
         fx, fy, cx, cy = (float(v) for v in row[:4])
+    recorded = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
     height, width = size
     given_width, given_height = source.size or (width, height)
-    if source.resize == "height":  # same vertical field of view, centred
-        scale = height / given_height
-        fx, fy, cx, cy = fx * scale, fy * scale, width / 2, height / 2
-    else:
-        sx, sy = width / given_width, height / given_height
-        fx, fy, cx, cy = fx * sx, fy * sy, cx * sx, cy * sy
-    return torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
+    if source.resize == "stretch":
+        return camera.resize_intrinsics(recorded, width / given_width, height / given_height)
+    scale = height / given_height
+    intrinsics = camera.resize_intrinsics(recorded, scale, scale)
+    intrinsics[0, 2], intrinsics[1, 2] = (width - 1) / 2, (height - 1) / 2
+    return intrinsics
 
 
 def recorded_pose(text: str, source: PoseColumn) -> Tensor[[*Mat4x4]]:

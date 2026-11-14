@@ -2,7 +2,13 @@
 
 Matches MuJoCo's `mj_kinematics`: a body's pose is its parent's pose, then its fixed offset,
 then its joints in order. A hinge rotates about an axis through its anchor; a slide translates
-along its axis. Joint values are measured from the model's reference configuration (`qpos0`).
+along its axis. Joint values are measured from the model's reference configuration (`qpos0`):
+
+    W_b(q) = W_parent(b) · P_b · Π_j M_j(q_j − q0_j)
+    hinge: M = [R, p − R p; 0, 1], R = exp([a]× θ)       slide: M = [I, a d; 0, 1]
+
+with `P_b` the body's offset (`parent_from_body`), `a` the unit axis and `p` the anchor in
+the body frame; θ in radians, d and every translation in metres.
 
 Gradients flow into `parent_from_body`, which is how RAGO optimises free body offsets
 (e.g. the second arm's base). Joint values are data and are never optimised.
@@ -22,12 +28,14 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.types import Mat4x4
+
 
 def forward_kinematics[T: IntVar, L: IntVar, Q: IntVar](
     robot: Robot[L, int, int],
     qpos: Tensor[[T, Q]],
-    parent_from_body: Tensor[[L, 4, 4]] | None = None,
-) -> Tensor[[T, L, 4, 4]]:
+    parent_from_body: Tensor[[L, *Mat4x4]] | None = None,
+) -> Tensor[[T, L, *Mat4x4]]:
     """`world_from_body` for every body at every timestep."""
 
     offsets = robot.parent_from_body if parent_from_body is None else parent_from_body
@@ -63,8 +71,11 @@ def forward_kinematics[T: IntVar, L: IntVar, Q: IntVar](
     return torch.stack(world, 1)
 
 
-def apply_couplings[T: IntVar, Q: IntVar](robot: Robot, qpos: Tensor[[T, Q]]) -> Tensor[[T, Q]]:
-    """Fill joints driven by an equality (URDF mimic) from their source joint."""
+def apply_couplings[T: IntVar, Q: IntVar](
+    robot: Robot[int, int, int], qpos: Tensor[[T, Q]]
+) -> Tensor[[T, Q]]:
+    """Fill joints driven by an equality (URDF mimic) from their source joint:
+    `q_target = c0 + c1 · q_source`."""
 
     if not robot.coupling:
         return qpos

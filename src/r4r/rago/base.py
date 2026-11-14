@@ -3,10 +3,15 @@
 With the base fixed, forward kinematics and the camera's mount predict the camera's motion
 between two frames, and every static scene point must then stay on its epipolar line. When the
 base drives or turns, the true motion differs and static tracks leave their lines: the median
-distance (pixels) over a frame pair is the evidence. It needs no odometry and no essential
-matrix, only KLT tracks. A base translating exactly along the camera's own predicted direction
-of travel goes unseen (the epipolar geometry does not change); turning and any other
-translation do not.
+distance (pixels) over a frame pair is the evidence. With the predicted motion `(R, t)` from
+frame a to frame b and rays `x = K⁻¹ (u, v, 1)`, a track's distance is
+
+    d = f · |x_bᵀ ℓ| / ‖(ℓ₁, ℓ₂)‖,   ℓ = t × R x_a       (t ≈ 0: d = f · ‖π(R x_a) − π(x_b)‖)
+
+with `π(x) = (x₁, x₂) / x₃` and `f` the focal length (pixels). It needs no odometry and no
+essential matrix, only KLT tracks. A base translating exactly along the camera's own predicted
+direction of travel goes unseen (the epipolar geometry does not change); turning and any
+other translation do not.
 
 Moving objects (the arm in view, a gripper on a wrist camera) are a minority of tracks in
 useful views; the median ignores them.
@@ -26,7 +31,10 @@ import torch
 from r4r.geometry import se3
 
 if TYPE_CHECKING:
+    from shape_extensions import IntVar
     from torch import Tensor
+
+    from r4r.types import UV, XYZ, Mat3x3, Mat4x4
 
     from .klt import VideoTracks
 
@@ -42,13 +50,13 @@ MIN_SPAN = 10  # frames: shortest still span reported
 
 
 @dataclass(frozen=True, slots=True)
-class BaseMotion:
-    # Per frame pair (start, start + gap): median epipolar distance under the fixed-base
-    # prediction (pixels; NaN where too few tracks)
+class BaseMotion[T: IntVar]:
+    # Per frame pair (start, start + gap), T − gap of them: median epipolar distance under the
+    # fixed-base prediction (pixels; NaN where too few tracks)
     start: Tensor[[int]]
     residual: Tensor[[int]]
     # Per frame: covered by a pair the fixed base does not explain
-    moving: Tensor[[int]]
+    moving: Tensor[[T]]
     # Spans (first, last + 1) of at least MIN_SPAN frames where the base is still
     still: tuple[tuple[int, int], ...]
 
@@ -57,13 +65,13 @@ class BaseMotion:
         return float(self.moving.double().mean())
 
 
-def base_motion(
+def base_motion[T: IntVar](
     video: VideoTracks,
-    world_from_camera: Tensor[[int, 4, 4]],
-    intrinsics: Tensor[[3, 3]],
+    world_from_camera: Tensor[[T, *Mat4x4]],
+    intrinsics: Tensor[[*Mat3x3]],
     gap: int = GAP,
     threshold: float = THRESHOLD,
-) -> BaseMotion:
+) -> BaseMotion[T]:
     """Fixed-base evidence of one camera; `world_from_camera` from FK × mount (base fixed)."""
 
     frames = len(world_from_camera)
@@ -101,12 +109,18 @@ def base_motion(
     return BaseMotion(start, residual, moving, _spans(~moving))
 
 
-def _rays(pixels: Tensor[[int, int, 2]], k: Tensor[[3, 3]]) -> Tensor[[int, int, 3]]:
+def _rays[N: IntVar, P: IntVar](
+    pixels: Tensor[[N, P, *UV]], k: Tensor[[*Mat3x3]]
+) -> Tensor[[N, P, *XYZ]]:
+    """`K⁻¹ (u, v, 1)` per pixel (NaN pixels give NaN rays)."""
+
     homogeneous = torch.cat((pixels, torch.ones_like(pixels[..., :1])), -1)
     return homogeneous @ torch.linalg.inv(k).T
 
 
 def _spans(still: Tensor[[int]]) -> tuple[tuple[int, int], ...]:
+    """`(first, last + 1)` of each run of True at least `MIN_SPAN` long."""
+
     spans, first = [], None
     for f, value in enumerate([*still.tolist(), False]):
         if value and first is None:

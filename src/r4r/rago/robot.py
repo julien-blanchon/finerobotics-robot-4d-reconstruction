@@ -13,7 +13,8 @@ element, so the file stays loadable by any MuJoCo tool:
     </custom>
 
 `data` is a Gaussian prior around the element's pose in the file: translation std (m),
-rotation std (rad); `inf` leaves a component unconstrained.
+rotation std (rad); `inf` leaves a component unconstrained. With the correction
+`exp(δ)`, `δ = (v, ω)`, the prior residual is `(v / σ_t, ω / σ_r)` (see `rig.Corrections`).
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 
     from r4r.data.episode import JointMap
     from r4r.data.priors import CameraPrior, DatasetPriors
+    from r4r.types import XYZ, Mat4x4
 
 PRIOR_PREFIX = "r4r:"
 HINGE, SLIDE = int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)
@@ -81,19 +83,19 @@ class Robot[L: IntVar, J: IntVar, C: IntVar]:
 
     body_names: tuple[str, ...]
     body_parent: tuple[int, ...]
-    parent_from_body: Tensor[[L, 4, 4]]
+    parent_from_body: Tensor[[L, *Mat4x4]]
     joint_names: tuple[str, ...]
     joint_body: tuple[int, ...]
     joint_kind: tuple[int, ...]
     joint_qpos: tuple[int, ...]
-    joint_axis: Tensor[[J, 3]]
-    joint_anchor: Tensor[[J, 3]]
+    joint_axis: Tensor[[J, *XYZ]]
+    joint_anchor: Tensor[[J, *XYZ]]
     joint_reference: Tensor[[J]]
     # Mimic-style couplings: qpos[target] = c0 + c1 · qpos[source]
     coupling: tuple[tuple[int, int, float, float], ...]
     camera_names: tuple[str, ...]
     camera_body: tuple[int, ...]
-    body_from_camera: Tensor[[C, 4, 4]]
+    body_from_camera: Tensor[[C, *Mat4x4]]
     # Free elements: name → (translation std m, rotation std rad)
     free_cameras: dict[str, Freedom]
     free_bodies: dict[str, Freedom]
@@ -344,14 +346,17 @@ def load_robot(
     meshdir: Path | None = None,
     cameras: tuple[CameraMount, ...] = (),
     bodies: tuple[BodyMount, ...] = (),
-) -> Robot:
-    """Compile a robot description and extract the arrays forward kinematics needs."""
+) -> Robot[int, int, int]:
+    """Compile a robot description and extract the arrays forward kinematics needs (sizes come
+    from the file)."""
 
     model = compile_model(path, meshdir, cameras, bodies)
     unsupported = {int(k) for k in model.jnt_type} - {HINGE, SLIDE}
     assert not unsupported, f"only hinge/slide joints are supported, got types {unsupported}"
 
-    def pose(pos: object, quat: object) -> Tensor:
+    def pose(pos: object, quat: object) -> Tensor[[int, *Mat4x4]]:
+        """`[R(quat), pos; 0, 1]` per row of MuJoCo's `pos [n, 3]` and `quat [n, 4]` arrays."""
+
         rotation = se3.quaternion_to_matrix(torch.as_tensor(quat, dtype=torch.float64))
         return se3.from_rotation_translation(rotation, torch.as_tensor(pos, dtype=torch.float64))
 
@@ -422,12 +427,14 @@ def _couplings(model: mujoco.MjModel) -> tuple[tuple[int, int, float, float], ..
     return tuple(couplings)
 
 
-def qpos_from_state[T: IntVar, S: IntVar](
-    robot: Robot, state: Tensor[[T, S]], joints: tuple[JointMap, ...]
+def qpos_from_state[T: IntVar, NState: IntVar](
+    robot: Robot[int, int, int], state: Tensor[[T, NState]], joints: tuple[JointMap, ...]
 ) -> Tensor[[T, int]]:
-    """MuJoCo `qpos` from a dataset state trajectory; unmapped joints stay at 0.
+    """MuJoCo `qpos [T, nq]` from a dataset state trajectory; unmapped joints stay at 0.
 
-    Mimic joints are filled later by forward kinematics (`apply_couplings`).
+    Each mapped joint: `q = σ s`, or with a range map `q = t0 + (σ s − s0)(t1 − t0)/(s1 − s0)`
+    (σ: `sign`, s: the state column). Mimic joints are filled later by forward kinematics
+    (`apply_couplings`).
     """
 
     qpos = state.new_zeros(len(state), robot.nq)

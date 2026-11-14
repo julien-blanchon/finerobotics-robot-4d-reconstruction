@@ -280,7 +280,11 @@ def _damped_step(
 
     diagonal = torch.diag(hessian.diagonal().clamp_min(1e-12))
     while damping <= config.max_damping:
-        candidate = torch.linalg.solve(hessian + damping * diagonal, -gradient)
+        try:
+            candidate = torch.linalg.solve(hessian + damping * diagonal, -gradient)
+        except torch.linalg.LinAlgError:  # singular at this damping (e.g. an unobserved unknown)
+            damping *= 4
+            continue
         value = objective(candidate)
         if bool(torch.isfinite(value[0])) and value[0] < current:
             return candidate, value, max(damping / 3, 1e-12)

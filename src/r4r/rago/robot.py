@@ -214,7 +214,14 @@ def compile_model(
     drawing the robot; kinematics never needs them, and some are unreadable).
     """
 
-    return _spec(path, meshdir, cameras, bodies, visual).compile()
+    try:
+        return _spec(path, meshdir, cameras, bodies, visual).compile()
+    except ValueError:
+        # Some visual meshes MuJoCo rejects (e.g. Flexiv Rizon4: "mesh_facenormal normal index
+        # out of bounds"): draw the collision geoms instead
+        if not visual:
+            raise
+        return _spec(path, meshdir, cameras, bodies, False).compile()
 
 
 def describe(

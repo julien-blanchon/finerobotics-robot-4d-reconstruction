@@ -4,18 +4,23 @@ Minimal-sample hypotheses (8-point, as in RANSAC) pick robust starting weights, 
 8-point inside IRLS on the Sampson error (Cauchy weights), projected on the essential
 manifold, decomposed with a cheirality vote. All pairs and hypotheses are solved at once.
 
+Epipolar constraint on normalised rays `x = K⁻¹ (u, v, 1)`: `x_bᵀ E x_a = 0`, `E = [t]× R`.
+
 Ref: Hartley & Zisserman, *Multiple View Geometry*, §9.6 and §11.4.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
+from einops import rearrange
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import IntTuple, IntVar
     from torch import Tensor
+
+    from r4r.types import UV, XYZ, Mat3x3
 
 # Batched eigh/svd on the GPU fail on very large batches: solve in chunks
 CHUNK = 4096
@@ -23,13 +28,13 @@ IRLS_ITERATIONS = 12
 HYPOTHESES = 64
 
 
-def relative_rotations[P: IntVar, N: IntVar](
-    pixels_a: Tensor[[P, N, 2]],
-    pixels_b: Tensor[[P, N, 2]],
-    mask: Tensor[[P, N]],
-    intrinsics: Tensor[[3, 3]],
+def relative_rotations[M: IntVar, N: IntVar](
+    pixels_a: Tensor[[M, N, *UV]],
+    pixels_b: Tensor[[M, N, *UV]],
+    mask: Tensor[[M, N]],
+    intrinsics: Tensor[[*Mat3x3]],
     cauchy: float = 1.0,
-) -> Tensor[[P, 3, 3]]:
+) -> Tensor[[M, *Mat3x3]]:
     """Per pair: the camera rotation `b_from_a` (x_b ∝ R x_a + t), robust to outliers.
 
     `cauchy` is the Sampson-error scale in pixels.
@@ -44,14 +49,20 @@ def relative_rotations[P: IntVar, N: IntVar](
     return _rotation(essential, xa, xb, weight)
 
 
-def _essential_irls[P: IntVar, N: IntVar](
-    xa: Tensor[[P, N, 3]],
-    xb: Tensor[[P, N, 3]],
-    weight: Tensor[[P, N]],
+def _essential_irls[M: IntVar, N: IntVar](
+    xa: Tensor[[M, N, *XYZ]],
+    xb: Tensor[[M, N, *XYZ]],
+    weight: Tensor[[M, N]],
     focal: float,
     cauchy: float,
-) -> tuple[Tensor[[P, 3, 3]], Tensor[[P, N]]]:
-    rows = (xb[..., :, None] * xa[..., None, :]).flatten(-2)  # [P, N, 9]: xbᵀ E xa = rows · vec E
+) -> tuple[Tensor[[M, *Mat3x3]], Tensor[[M, N]]]:
+    """Weighted 8-point inside IRLS: `E = argmin_{‖E‖=1} Σ w_i (x_bᵢᵀ E x_aᵢ)²`, then
+    `w_i = mask_i / (1 + (e_i / c)²)` from the Sampson errors `e_i` (pixels), `c = cauchy`.
+    Returns the essential matrices and the final robust weights.
+    """
+
+    # xbᵀ E xa = rows · vec E
+    rows = rearrange(xb[..., :, None] * xa[..., None, :], "m n i j -> m n (i j)")
 
     # Starting weights from the best of HYPOTHESES minimal samples per pair (most inliers)
     generator = torch.Generator(device=xa.device).manual_seed(0)
@@ -60,8 +71,8 @@ def _essential_irls[P: IntVar, N: IntVar](
     picked = torch.gather(
         rows[:, None].expand(-1, HYPOTHESES, -1, -1), 2, sample[..., None].expand(-1, -1, -1, 9)
     )
-    candidates = _project(_smallest(picked.mT @ picked))  # [P, H, 3, 3]
-    error = _sampson(candidates, xa[:, None], xb[:, None], focal)  # [P, H, N]
+    candidates = _project(_smallest(picked.mT @ picked))  # [M, HYPOTHESES, 3, 3]
+    error = _sampson(candidates, xa[:, None], xb[:, None], focal)  # [M, HYPOTHESES, N]
     inliers = ((error < cauchy) * weight[:, None]).sum(-1)
     best = inliers.argmax(-1)
     error = error[torch.arange(len(xa), device=xa.device), best]
@@ -74,40 +85,49 @@ def _essential_irls[P: IntVar, N: IntVar](
     return essential, robust
 
 
-def _smallest(normal: Tensor) -> Tensor:
-    """Unit eigenvector of the smallest eigenvalue of [..., 9, 9] matrices, as [..., 3, 3]."""
+def _smallest[Bs: IntTuple](normal: Tensor[[*Bs, 9, 9]]) -> Tensor[[*Bs, 3, 3]]:
+    """Unit eigenvector of the smallest eigenvalue of `AᵀA` (the least-squares null vector),
+    as a 3 × 3 matrix."""
 
     flat = normal.reshape(-1, 9, 9)
     vector = torch.cat([torch.linalg.eigh(c)[1][..., 0] for c in flat.split(CHUNK)])
-    return vector.reshape(*normal.shape[:-2], 3, 3)
+    # Unflattening the batch back to *Bs is beyond the stubs
+    return cast("Tensor[[*Bs, 3, 3]]", vector.reshape(*normal.shape[:-2], 3, 3))
 
 
-def _project(matrix: Tensor) -> Tensor:
-    """Closest essential matrix (singular values 1, 1, 0) of [..., 3, 3] matrices."""
+def _project[Bs: IntTuple](matrix: Tensor[[*Bs, 3, 3]]) -> Tensor[[*Bs, 3, 3]]:
+    """Closest essential matrix in Frobenius norm: `U diag(1, 1, 0) Vᵀ` for `M = U S Vᵀ`."""
 
     flat = matrix.reshape(-1, 3, 3)
     u, _, vh = _svd(flat)
     project = torch.diag(flat.new_tensor([1.0, 1.0, 0.0]))
-    return (u @ project @ vh).reshape(matrix.shape)
+    return cast("Tensor[[*Bs, 3, 3]]", (u @ project @ vh).reshape(matrix.shape))
 
 
-def _sampson(essential: Tensor, xa: Tensor, xb: Tensor, focal: float) -> Tensor:
-    """Sampson distance in pixels of correspondences [..., N, 3] under [..., 3, 3] matrices."""
+def _sampson[Bs: IntTuple, Ps: IntTuple, N: IntVar](
+    essential: Tensor[[*Bs, 3, 3]], xa: Tensor[[*Ps, N, 3]], xb: Tensor[[*Ps, N, 3]], focal: float
+) -> Tensor[[*Bs, N]]:
+    """Sampson distance in pixels: `f · |x_bᵀ E x_a| / ‖(E x_a)₁,₂, (Eᵀ x_b)₁,₂‖`.
+
+    The rays' batch `Ps` broadcasts against `essential`'s `Bs` (hypotheses share one set of rays).
+    """
 
     ex = xa @ essential.mT
     etx = xb @ essential
     residual = (xb * ex).sum(-1)
     norm = ex[..., 0] ** 2 + ex[..., 1] ** 2 + etx[..., 0] ** 2 + etx[..., 1] ** 2
-    return residual.abs() / norm.clamp_min(1e-18).sqrt() * focal
+    # Broadcasting *Ps against *Bs is beyond the stubs
+    return cast("Tensor[[*Bs, N]]", residual.abs() / norm.clamp_min(1e-18).sqrt() * focal)
 
 
-def _rotation[P: IntVar, N: IntVar](
-    essential: Tensor[[P, 3, 3]],
-    xa: Tensor[[P, N, 3]],
-    xb: Tensor[[P, N, 3]],
-    weight: Tensor[[P, N]],
-) -> Tensor[[P, 3, 3]]:
-    """The rotation of the four (R, ±t) decompositions with most weight in front of both views."""
+def _rotation[M: IntVar, N: IntVar](
+    essential: Tensor[[M, *Mat3x3]],
+    xa: Tensor[[M, N, *XYZ]],
+    xb: Tensor[[M, N, *XYZ]],
+    weight: Tensor[[M, N]],
+) -> Tensor[[M, *Mat3x3]]:
+    """The rotation of the four decompositions `R ∈ {U W Vᵀ, U Wᵀ Vᵀ}`, `t = ±u₃` with most
+    weight in front of both views (cheirality: both depths `z_a`, `z_b` positive)."""
 
     u, _, vh = _svd(essential)
     u = u * torch.det(u)[..., None, None].sign()
@@ -136,9 +156,10 @@ def _rotation[P: IntVar, N: IntVar](
     return best
 
 
-def _svd[P: IntVar](
-    m: Tensor[[P, 3, 3]],
-) -> tuple[Tensor[[P, 3, 3]], Tensor[[P, 3]], Tensor[[P, 3, 3]]]:
+def _svd[M: IntVar](
+    m: Tensor[[M, *Mat3x3]],
+) -> tuple[Tensor[[M, *Mat3x3]], Tensor[[M, *XYZ]], Tensor[[M, *Mat3x3]]]:
+    """Batched SVD in chunks of `CHUNK` (large GPU batches fail)."""
     parts = [torch.linalg.svd(c) for c in m.split(CHUNK)]
     u, s, vh = (torch.cat(x) for x in zip(*parts, strict=True))
     return u, s, vh

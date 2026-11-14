@@ -46,7 +46,8 @@ def so3_exp[Bs: IntTuple](omega: Tensor[[*Bs, 3]]) -> Tensor[[*Bs, 3, 3]]:
 
 
 def so3_log[Bs: IntTuple](rotation: Tensor[[*Bs, 3, 3]]) -> Tensor[[*Bs, 3]]:
-    """Axis-angle of a rotation, through a quaternion so that θ → π stays well conditioned."""
+    """Axis-angle of a rotation, through a quaternion so that θ → π stays well conditioned:
+    `θ = 2 atan2(‖q_xyz‖, q_w)`, `ω = θ · q_xyz / ‖q_xyz‖` (radians)."""
 
     q = matrix_to_quaternion(rotation)
 
@@ -76,7 +77,7 @@ def se3_exp[Bs: IntTuple](xi: Tensor[[*Bs, 6]]) -> Tensor[[*Bs, 4, 4]]:
 
 
 def se3_log[Bs: IntTuple](transform: Tensor[[*Bs, 4, 4]]) -> Tensor[[*Bs, 6]]:
-    """Logarithm map, the inverse of `se3_exp`."""
+    """Logarithm map, the inverse of `se3_exp`: `ω = log R`, `v = V⁻¹ t`."""
 
     rotation, translation = transform[..., :3, :3], transform[..., :3, 3]
     omega = so3_log(rotation)
@@ -118,7 +119,7 @@ def inverse[Bs: IntTuple](transform: Tensor[[*Bs, 4, 4]]) -> Tensor[[*Bs, 4, 4]]
 def transform_points[Bs: IntTuple, N: IntVar](
     a_from_b: Tensor[[*Bs, 4, 4]], points_b: Tensor[[*Bs, N, 3]]
 ) -> Tensor[[*Bs, N, 3]]:
-    """Map points from frame b to frame a."""
+    """Map points from frame b to frame a: `x_a = R x_b + t`."""
 
     return points_b @ a_from_b[..., :3, :3].mT + a_from_b[..., None, :3, 3]
 

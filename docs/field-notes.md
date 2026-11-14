@@ -41,6 +41,16 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   (FurnitureBench squashes the wrist to 224x224 but crops the front camera).
 - **End-effector columns of simulators name their frame:** M1's EE position equals FK of
   `panda_link8` exactly, a quick check of the joint mapping.
+- **Test the arm model first whenever an end-effector pose is recorded:** between two frames,
+  the end effector's rotation angle equals the correct FK link's, whatever the base and tool
+  offsets. That separates the right model (0.000°) from a wrong one (1.7–5°) in seconds; then
+  solve the base and tool offsets. For joint sign errors, try all 64 sign patterns. Most
+  "AgileX ALOHA" data is really Piper arms; some "AgileX" data is ARX X5.
+- **Arm-type and side labels are unreliable:** per-episode joint ranges reveal the arm type and
+  mixed datasets (Piper joint 3 always negative, ARX positive). For left/right, use an episode
+  where one arm moves and a static view (camera facing the robot: image right is robot left).
+- **Look at every camera of an episode side by side:** some openneodata episodes pair wrist and
+  third-view videos from different recordings.
 - **Recorded end-effector poses check the description for free:** they validate the joint
   mapping and locate arm bases exactly (groot: right arm 1.2 m from the description, 0.000 cm
   residual after correction). Solve for the end-effector point's offset too: it is rarely the
@@ -99,6 +109,8 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **Measure the video/joint lag on every dataset** (`r4r fit --shifts`): abc's states lag
   ~2.3 frames, the main cause of its wrist-mount scatter. Confirm on a second station or
   setup; it can differ. Then free the sub-frame part (`kinematics.time_offset_frames`).
+- **Measure the lag from the video, not from shipped camera poses:** interndata's shipped poses
+  matched the state, yet the video lagged by one frame.
 - **Solve joint offsets and the time offset together:** with the time offset held, joint
   offsets absorb the timing error and come out wrong.
 
@@ -138,6 +150,12 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   can't work when the camera doesn't see the jaws.
 - **Hand-picked joint positions** in 2–3 frames give a static camera's pose by PnP, but only when
   the picks leave the arm's plane.
+- **Reuse wrist mounts across datasets:** write them in one description's link frame per arm.
+  Mounts measured in simulation transferred to real robots (Lift-2 → openneodata arx5,
+  split-aloha → soft-fold, RoboCOIN). Same kinematics can still mean different link frames.
+- **A wrist-mount search without a prior can "converge" to nonsense at low error** (aist: mounts
+  0.5 m from the gripper at 1.5 px).
+- **Unrecorded lift:** use the frame that carries all the cameras (the arm platform) as the base.
 - **Fisheye:** declare `lens: fisheye`; recorded coefficients first (OpenCV/ROS/RealSense
   give Kannala-Brandt directly); a static fisheye needs a known focal (focal, distortion and
   distance trade off).
@@ -148,6 +166,9 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - Keep the first arm as the anchor and free the second arm's base.
   - It needs ~20 episodes to agree to millimetres (abc: 10 episodes 1.5 cm, 20 episodes 0.3 cm).
   - Arm placement differs per setup or station.
+  - Two episodes do not pin a second arm's base, even when the overlay looks right.
+  - Delivered two-arm descriptions are often wrong (right arm on the left; ALOHA arms side by
+    side instead of facing).
 - **Mobile bases:**
   - Base motion comes from the recorded state/actions, never vision.
   - First check whether the base moves within episodes at all (groot omron-base moves < 1 cm

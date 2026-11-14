@@ -72,8 +72,11 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
   from the description; offset 0 and no steering for a differential drive). Validate it: the
   translation against commanded base velocities, the turn against an on-robot camera's
   rotation over frames where the camera's joints are still (`research/hsr_yaw_check.py`);
-  pick encoder signs that way. Commanded turn rates can be a poor reference (HSR). Without
-  any record ⬜ (visual odometry). If the base never moves within episodes, the fixed-base
+  pick encoder signs that way. Commanded turn rates can be a poor reference (HSR). `r4r rig`
+  ✅ then uses the record throughout: moving-camera mounts are searched on each episode's
+  longest span where the base is parked (≥ 20 timesteps), static cameras are placed with the
+  base moved, and the bundle's per-frame base starts from the record. Without any record ⬜
+  (visual odometry). If the base never moves within episodes, the fixed-base
   pipeline applies episode by episode.
 - Always keep **one anchor** (a fixed arm, a known camera): with everything free, the whole
   scene can shift with no change in the images.

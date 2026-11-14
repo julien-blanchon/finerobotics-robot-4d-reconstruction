@@ -121,6 +121,7 @@ def bundle_adjust(
     episode: Tensor[[int]] | None = None,
     start_at: Tensor[[int, int, 4, 4]] | None = None,
     bodies_at: Tensor[[int, int, 4, 4]] | None = None,
+    known_focal: tuple[bool, ...] | None = None,
 ) -> BundleResult:
     """Refine free mounts and focal lengths by robust reprojection of triangulated tracks.
 
@@ -129,6 +130,7 @@ def bundle_adjust(
     timestep belongs to (for episode-scope unknowns); `start_at [C, T]` optional starting mounts
     per camera and timestep (episode-scope cameras placed differently in each episode);
     `bodies_at [B, T]` optional starting corrections of the free bodies (e.g. odometry).
+    Cameras with `known_focal` keep their focal length.
     """
 
     t = tracks
@@ -143,7 +145,9 @@ def bundle_adjust(
         names,
         initial_mounts.to(qpos),
         t.intrinsics.to(qpos),
-        config.focal_std,
+        config.focal_std
+        if known_focal is None
+        else torch.tensor([0.0 if k else config.focal_std for k in known_focal]),
         pixel_unit,
         episode,
         start_at,

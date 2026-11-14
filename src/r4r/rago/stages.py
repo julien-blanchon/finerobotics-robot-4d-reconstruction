@@ -12,6 +12,11 @@
 5. The same bundle per group of episodes: their agreement is the check on dataset-scope
    unknowns (residuals alone do not reveal a poorly determined one).
 
+Mobile bases: an episode's recorded base motion (`RigEpisode.base_motion`, odometry) moves the
+frame-scope free body nearest the root (the base) in stage 3 and starts its per-frame
+correction in the bundles. Stage 1 needs the base still: it uses each episode's longest span
+where the record says the base is parked.
+
 Ref: docs/architecture.md, "Solving coupled unknowns in stages".
 """
 
@@ -44,12 +49,18 @@ if TYPE_CHECKING:
 # A static camera needs this many points seen by moving cameras (≥ 3 observations each)
 MIN_POINTS = 50
 MIN_OBSERVATIONS = 3
+# Stage 1 on a mobile base: timesteps where the recorded base moves less than this per step
+# count as still (m, rad), and a mount is searched on spans of at least MIN_STILL of them
+STILL_STEP = (0.002, math.radians(0.1))
+MIN_STILL = 20
 
 
 @dataclass(frozen=True, slots=True)
 class RigEpisode:
     qpos: Tensor[[int, int]]
     frames: dict[str, Tensor[[int, 3, int, int]]]  # uint8 videos, one per camera
+    # Mobile base: its pose at each timestep relative to the first, in its own frame (odometry)
+    base_motion: Tensor[[int, 4, 4]] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -78,6 +89,11 @@ class RigFit:
     group_corrections: Tensor[[int, int, 4, 4]]
     median_error: float
     inlier_fraction: float
+    # Per camera: (agreeing, searched) episodes of its stage-1 mount search (None: not searched)
+    mount_agreement: tuple[tuple[int, int] | None, ...]
+    # Mobile base, per episode: how far the fitted base departs from its recorded motion
+    # (median cm, max cm, max degrees); empty without a record
+    base_departure: tuple[tuple[float, float, float], ...]
 
 
 def calibrate_rig(
@@ -99,7 +115,7 @@ def calibrate_rig(
 
     index = [robot.camera(n) for n in names]
     static = [robot.camera_body[i] == 0 for i in index]
-    mounts, intrinsics = _moving_mounts(
+    mounts, intrinsics, agreement = _moving_mounts(
         robot, episodes, names, intrinsics, known_focal, known_mount, config
     )
     merged = [_multi_camera_tracks(e, names, intrinsics, model, config) for e in episodes]
@@ -117,7 +133,9 @@ def calibrate_rig(
     )
     for c, i in enumerate(index):
         frozen.body_from_camera[i] = starts[0, c]
-    everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config)
+    # Known focals stay fixed; those found in stage 3 are refined
+    fixed = known_focal
+    everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config, fixed)
     groups = [list(range(g, len(episodes), config.groups)) for g in range(config.groups)]
     corrections = []
     for group in filter(None, groups):
@@ -129,6 +147,7 @@ def calibrate_rig(
             intrinsics,
             starts[group],
             config,
+            fixed,
         )
         corrections.append(_body_corrections(frozen, episodes[group[0]].qpos, fit.world_from_body))
     first = torch.cumsum(torch.tensor([0] + [len(e.qpos) for e in episodes[:-1]]), 0).tolist()
@@ -143,6 +162,8 @@ def calibrate_rig(
         group_corrections=torch.stack(corrections),
         median_error=everything.median_error,
         inlier_fraction=everything.inlier_fraction,
+        mount_agreement=agreement,
+        base_departure=_base_departure(frozen, episodes, everything.world_from_body),
     )
 
 
@@ -154,24 +175,35 @@ def _moving_mounts(
     known_focal: tuple[bool, ...],
     known_mount: tuple[bool, ...],
     config: RigConfig,
-) -> tuple[Tensor[[int, 4, 4]], Tensor[[int, 3, 3]]]:
+) -> tuple[Tensor[[int, 4, 4]], Tensor[[int, 3, 3]], tuple[tuple[int, int] | None, ...]]:
     """Stage 1: each free moving camera's mount (and focal) from its own video alone."""
 
     index = [robot.camera(n) for n in names]
     mounts = robot.body_from_camera[index].to(episodes[0].qpos).clone()
     intrinsics = intrinsics.clone()
+    agreement: list[tuple[int, int] | None] = [None] * len(names)
     for c, name in enumerate(names):
         body = robot.camera_body[index[c]]
         if body == 0 or known_mount[c] or name not in robot.free_cameras:
             continue
-        data = [
-            (e.qpos, video_tracks(e.frames[name], intrinsics[c], config.fit.klt)) for e in episodes
-        ]
+        data = []
+        for e in episodes:
+            a, b = still_span(e.base_motion)
+            if b - a >= MIN_STILL:
+                data.append(
+                    (e.qpos[a:b], video_tracks(e.frames[name][a:b], intrinsics[c], config.fit.klt))
+                )
+        if not data:
+            raise ValueError(
+                f"{name}: no span of {MIN_STILL} timesteps with the base still in any episode;"
+                " give this camera's mount in the priors"
+            )
         alone = replace(robot, free_cameras={name: robot.free_cameras[name]}, free_bodies={})
         focal_range = 0.0 if known_focal[c] else None
         setup = fit_setup(alone, data, name, (body,), intrinsics[c], config.fit, focal_range)
         mounts[c], intrinsics[c] = setup.fit.body_from_camera, setup.fit.intrinsics
-    return mounts, intrinsics
+        agreement[c] = (int(setup.agree.sum()), len(data))
+    return mounts, intrinsics, tuple(agreement)
 
 
 def _multi_camera_tracks(
@@ -226,7 +258,7 @@ def _static_starts(
     focal = intrinsics[:, 0, 0].clone()
     found = [False] * len(names)
     for i, (e, tracks) in enumerate(zip(episodes, merged, strict=True)):
-        world = forward_kinematics(robot, e.qpos)
+        world = moved_kinematics(robot, e)
         cam = tracks.view_camera
         world_from_view = world[tracks.view_time, body[cam]] @ mounts[cam]
         observed = tracks.view_camera[tracks.view]
@@ -254,6 +286,7 @@ def _bundle(
     intrinsics: Tensor[[int, 3, 3]],
     starts: Tensor[[int, int, 4, 4]],
     config: RigConfig,
+    known_focal: tuple[bool, ...] | None = None,
 ) -> BundleResult:
     """One bundle over `episodes`: their tracks pooled (distinct ids and timesteps)."""
 
@@ -287,8 +320,106 @@ def _bundle(
     )  # [C, T, 4, 4]
     qpos = torch.cat([e.qpos for e in episodes])
     return bundle_adjust(
-        robot, qpos, pooled, names, starts[0], config.bundle, episode=episode, start_at=start_at
+        robot,
+        qpos,
+        pooled,
+        names,
+        starts[0],
+        config.bundle,
+        episode=episode,
+        start_at=start_at,
+        bodies_at=_bodies_at(robot, episodes),
+        known_focal=known_focal,
     )
+
+
+def still_span(motion: Tensor[[int, 4, 4]] | None) -> tuple[int, int]:
+    """The longest span (first, last + 1) where the recorded base motion stays still."""
+
+    if motion is None:
+        return 0, 1 << 62
+    step = se3.inverse(motion[:-1]) @ motion[1:]
+    still = (step[:, :3, 3].norm(dim=-1) < STILL_STEP[0]) & (
+        se3.so3_log(step[:, :3, :3]).norm(dim=-1) < STILL_STEP[1]
+    )
+    best, start = (0, 1), 0
+    for t, ok in enumerate([*still.tolist(), False]):
+        if not ok:
+            if t + 1 - start > best[1] - best[0]:
+                best = (start, t + 1)
+            start = t + 1
+    return best
+
+
+def _base_departure(
+    robot: Robot, episodes: list[RigEpisode], fitted: Tensor[[int, int, 4, 4]]
+) -> tuple[tuple[float, float, float], ...]:
+    """Per episode with a record: the fitted base against the recorded motion."""
+
+    base = _moving_base(robot)
+    if base is None:
+        return ()
+    out, start = [], 0
+    for e in episodes:
+        n = len(e.qpos)
+        if e.base_motion is not None:
+            recorded = moved_kinematics(robot, e)[:, base]
+            delta = se3.inverse(recorded) @ fitted[start : start + n, base]
+            cm = delta[:, :3, 3].norm(dim=-1) * 100
+            deg = se3.so3_log(delta[:, :3, :3]).norm(dim=-1).rad2deg()
+            out.append((float(cm.median()), float(cm.max()), float(deg.max())))
+        start += n
+    return tuple(out)
+
+
+def _moving_base(robot: Robot) -> int | None:
+    """The body a recorded base motion moves: the frame-scope free body nearest the root."""
+
+    frame = [robot.body(n) for n, f in robot.free_bodies.items() if f.scope == "frame"]
+    return min(frame) if frame else None
+
+
+def _bodies_at(robot: Robot, episodes: list[RigEpisode]) -> Tensor[[int, int, 4, 4]] | None:
+    """Starting corrections of the free bodies [B, T] (all episodes): the base's recorded
+    motion, identity elsewhere; None without any record."""
+
+    base = _moving_base(robot)
+    if base is None or all(e.base_motion is None for e in episodes):
+        return None
+    qpos = episodes[0].qpos
+    eye = torch.eye(4, dtype=qpos.dtype, device=qpos.device)
+    free = sorted(robot.body(n) for n in robot.free_bodies)
+    total = sum(len(e.qpos) for e in episodes)
+    out = eye.repeat(len(free), total, 1, 1)
+    out[free.index(base)] = torch.cat(
+        [
+            eye.expand(len(e.qpos), 4, 4) if e.base_motion is None else e.base_motion.to(qpos)
+            for e in episodes
+        ]
+    )
+    return out
+
+
+def moved_kinematics(robot: Robot, episode: RigEpisode) -> Tensor[[int, int, 4, 4]]:
+    """`world_from_body [T, L]` with the episode's recorded base motion applied to the base's
+    subtree, as the bundle's free-body correction does (`W_p · P_b · M · J_b`)."""
+
+    world = forward_kinematics(robot, episode.qpos)
+    base = _moving_base(robot)
+    if base is None or episode.base_motion is None:
+        return world
+    parent = robot.body_parent[base]
+    offset = robot.parent_from_body[base].to(world)
+    local = offset @ episode.base_motion.to(world) @ se3.inverse(offset)
+    change = world[:, parent] @ local @ se3.inverse(world[:, parent])
+    below = torch.tensor([_under(robot, b, base) for b in range(len(robot.body_names))])
+    return torch.where(below.to(world.device)[None, :, None, None], change[:, None] @ world, world)
+
+
+def _under(robot: Robot, body: int, ancestor: int) -> bool:
+    while body > 0 and body != ancestor:
+        body = robot.body_parent[body]
+    return body == ancestor
 
 
 def _body_corrections(

@@ -121,7 +121,7 @@ class Rig(nn.Module):
         names: tuple[str, ...],
         initial_mounts: Tensor[[int, 4, 4]],
         initial_intrinsics: Tensor[[int, 3, 3]],
-        focal_std: float,
+        focal_std: float | Tensor[[int]],
         pixel_unit: Tensor[[int]] | None = None,
         episode: Tensor[[int]] | None = None,
         start_at: Tensor[[int, int, 4, 4]] | None = None,
@@ -199,13 +199,16 @@ class Rig(nn.Module):
         unit = initial_intrinsics[:, 0, 0] if pixel_unit is None else pixel_unit
         self.register_buffer("pixel_unit", unit.to(qpos))
         self.log_focal = nn.Parameter(qpos.new_zeros(len(names)))
-        self.focal_std = focal_std
+        # Per camera; 0: the focal is known and held
+        std = torch.as_tensor(focal_std, dtype=qpos.dtype, device=device).expand(len(names))
+        self.register_buffer("focal_std", std.clone())
 
     def intrinsics(self) -> Tensor[[int, 3, 3]]:
         """Per camera: initial intrinsics with corrected focal lengths (square pixels kept)."""
 
         factor = torch.ones_like(self.initial_intrinsics)
-        factor[:, [0, 1], [0, 1]] = self.log_focal.exp()[:, None]
+        log_focal = torch.where(self.focal_std > 0, self.log_focal, 0.0)
+        factor[:, [0, 1], [0, 1]] = log_focal.exp()[:, None]
         return self.initial_intrinsics * factor
 
     def world_from_body(self) -> Tensor[[int, int, 4, 4]]:
@@ -263,5 +266,6 @@ class Rig(nn.Module):
         mounts = self.initial_mount[owner] @ se3.se3_exp(self.cameras.values())
         cameras = self.cameras.prior(se3.inverse(self.default_mount[owner]) @ mounts)
         bodies = self.bodies.prior(se3.se3_exp(self.bodies.values()))
-        focal = (self.log_focal**2).sum() / self.focal_std**2
+        free = self.focal_std > 0
+        focal = (self.log_focal[free] ** 2 / self.focal_std[free] ** 2).sum()
         return cameras + bodies + focal

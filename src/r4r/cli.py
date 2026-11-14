@@ -248,7 +248,6 @@ class Rig:
     write: bool = False
 
     def run(self) -> None:
-        import math
         from dataclasses import replace
 
         import torch
@@ -262,7 +261,11 @@ class Rig:
 
         root = dataset_root(self.dataset)
         loaded = [load_episode(root, e, stride=self.stride) for e in self.episodes]
-        streams = loaded[0].cameras
+        # Pinhole cameras only (fisheye ones wait for a distortion model)
+        streams = tuple(c for c in loaded[0].cameras if c.prior.lens == "pinhole")
+        skipped = [c.name for c in loaded[0].cameras if c.prior.lens != "pinhole"]
+        if skipped:
+            print(f"skipping {skipped}: not pinhole (priors `lens`)")
         names = tuple(c.name for c in streams)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
@@ -287,7 +290,8 @@ class Rig:
         episodes = [
             RigEpisode(
                 qpos_from_state(robot, e.state.to(device), e.joints),
-                {c.name: c.frames for c in e.cameras},
+                {c.name: c.frames for c in e.cameras if c.name in names},
+                None if e.base_motion is None else e.base_motion.to(device),
             )
             for e in loaded
         ]
@@ -299,24 +303,9 @@ class Rig:
             robot, episodes, names, intrinsics, known_focal, known_mount, model, config
         )
 
-        print(f"median {fit.median_error:.2f} px, inliers {fit.inlier_fraction:.0%}")
-        for c, stream in enumerate(streams):
-            pose = fit.mounts[c].cpu()
-            where = robot.body_names[robot.camera_body[robot.camera(stream.name)]]
-            print(
-                f"{stream.name} on {where}: position "
-                f"{[round(v, 4) for v in pose[:3, 3].tolist()]} m, "
-                f"focal {float(fit.intrinsics[c, 0, 0]):.1f} px"
-            )
         free = sorted(robot.free_bodies, key=robot.body)
         disagreement = spread(fit.group_corrections)
-        for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
-            offset = fit.body_corrections[b]
-            print(
-                f"{name}: correction {[round(v, 4) for v in offset[:3, 3].tolist()]} m, "
-                f"{math.degrees(float(se3.so3_log(offset[:3, :3]).norm())):.2f} deg; "
-                f"groups disagree by {cm:.1f} cm / {deg:.2f} deg"
-            )
+        _print_rig(fit, streams, robot, self.episodes, free, disagreement)
         if self.write:
             for c, stream in enumerate(streams):
                 values: dict[str, object] = {
@@ -349,6 +338,41 @@ class Rig:
                     "fitted": {"episodes": list(self.episodes), "groups": self.groups},
                 }
                 print(f"wrote {write_body(root, name, body)}")
+
+
+def _print_rig(fit, streams, robot, episodes, free, disagreement) -> None:  # noqa: ANN001
+    """What `r4r rig` found, per camera, mobile-base episode and free body."""
+
+    import math
+
+    from r4r.geometry import se3
+
+    print(f"median {fit.median_error:.2f} px, inliers {fit.inlier_fraction:.0%}")
+    for c, agree in enumerate(fit.mount_agreement):
+        if agree is not None:
+            print(f"{streams[c].name}: mount search, {agree[0]}/{agree[1]} episodes agree")
+    for e, (median, worst, deg) in zip(episodes, fit.base_departure, strict=False):
+        print(
+            f"episode {e}: base departs from its record by {median:.1f} cm median, "
+            f"{worst:.1f} cm / {deg:.2f} deg at most"
+        )
+    for c, stream in enumerate(streams):
+        pose = fit.mounts[c].cpu()
+        where = robot.body_names[robot.camera_body[robot.camera(stream.name)]]
+        print(
+            f"{stream.name} on {where}: position "
+            f"{[round(v, 4) for v in pose[:3, 3].tolist()]} m, "
+            f"focal {float(fit.intrinsics[c, 0, 0]):.1f} px"
+        )
+    for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
+        if robot.free_bodies[name].scope == "frame":
+            continue  # held at each episode's first frame: see the departure above
+        offset = fit.body_corrections[b]
+        print(
+            f"{name}: correction {[round(v, 4) for v in offset[:3, 3].tolist()]} m, "
+            f"{math.degrees(float(se3.so3_log(offset[:3, :3]).norm())):.2f} deg; "
+            f"groups disagree by {cm:.1f} cm / {deg:.2f} deg"
+        )
 
 
 @dataclass(frozen=True, slots=True)

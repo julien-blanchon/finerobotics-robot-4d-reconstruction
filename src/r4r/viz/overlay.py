@@ -29,16 +29,21 @@ type Surface = tuple[int, np.ndarray, np.ndarray]  # body, vertices in its frame
 
 
 def surfaces(model: mujoco.MjModel) -> list[Surface]:
-    """Per geom to draw (visual ones if the description marks any, else all): its body, its
-    vertices in the body frame and its triangles."""
+    """Per geom to draw: its body, its vertices in the body frame and its triangles. Per body,
+    its visual geoms if it has any, else its other (collision) geoms: visual meshes can be
+    missing for some links (unreadable files dropped) and present for others."""
 
-    visual = [
+    visual = {
         g
         for g in range(model.ngeom)
         if model.geom_contype[g] == 0 and model.geom_conaffinity[g] == 0
+    }
+    with_visual = {int(model.geom_bodyid[g]) for g in visual}
+    chosen = [
+        g for g in range(model.ngeom) if (g in visual) == (int(model.geom_bodyid[g]) in with_visual)
     ]
     out = []
-    for g in visual or range(model.ngeom):
+    for g in chosen:
         mesh = _mesh(model, g)
         if mesh is None:
             continue

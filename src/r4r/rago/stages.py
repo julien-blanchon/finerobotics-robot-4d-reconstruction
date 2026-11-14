@@ -177,6 +177,7 @@ def calibrate_rig(
     # Known focals stay fixed; those found in stage 3 are refined
     fixed = known_focal
     everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config, fixed)
+    # Groups (agreement check); 0 groups: none (reconstruction with frozen priors)
     groups = [list(range(g, len(episodes), config.groups)) for g in range(config.groups)]
     corrections, group_fits = [], []
     for group in filter(None, groups):
@@ -202,7 +203,9 @@ def calibrate_rig(
         bodies=everything.world_from_body[first][:, free],
         body_corrections=_body_corrections(frozen, episodes[0].qpos, everything.world_from_body),
         camera_poses=camera_poses,
-        group_corrections=torch.stack(corrections),
+        group_corrections=torch.stack(corrections)
+        if corrections
+        else _body_corrections(frozen, episodes[0].qpos, everything.world_from_body)[None],
         median_error=everything.median_error,
         inlier_fraction=everything.inlier_fraction,
         mount_agreement=agreement,
@@ -211,8 +214,8 @@ def calibrate_rig(
         base_departure=_base_departure(frozen, episodes, everything.world_from_body),
         joint_offset=everything.joint_offset,
         time_offset=everything.time_offset,
-        group_joint_offsets=torch.stack([f.joint_offset for f in group_fits]),
-        group_time_offsets=tuple(f.time_offset for f in group_fits),
+        group_joint_offsets=torch.stack([f.joint_offset for f in group_fits or [everything]]),
+        group_time_offsets=tuple(f.time_offset for f in group_fits or [everything]),
     )
 
 

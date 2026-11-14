@@ -60,6 +60,18 @@ SCOPES = ("dataset", "episode", "frame")
 type Scope = Literal["dataset", "episode", "frame"]
 
 
+# An orientation range of this much or more leaves the rotation free (any rotation is within it)
+FREE_ORIENTATION_DEG = 180.0
+
+
+def rotation_std(orientation_range_deg: float) -> float:
+    """Prior std (rad) of an orientation range (deg): inf (free) from `FREE_ORIENTATION_DEG`."""
+
+    if orientation_range_deg >= FREE_ORIENTATION_DEG:
+        return math.inf
+    return math.radians(orientation_range_deg)
+
+
 @dataclass(frozen=True, slots=True)
 class Freedom:
     """How far fitting may move an element (standard deviations, m and rad; 0 holds that part,
@@ -154,19 +166,14 @@ class CameraMount:
             # pose (the origin), which pulled DROID's exteriors 12-22 cm
             unknown = (math.inf, math.inf)
             if prior.scope == "episode":
-                unknown = (
-                    prior.position_range,
-                    math.radians(prior.orientation_range_deg)
-                    if prior.orientation_range_deg < 180.0
-                    else math.inf,
-                )
+                unknown = (prior.position_range, rotation_std(prior.orientation_range_deg))
         else:
             unknown = (SEARCH_TRANSLATION_STD, SEARCH_ROTATION_STD)
         return cls(
             name,
             (prior.link or link) if moving else None,
             prior.position_range if known else unknown[0],
-            math.radians(prior.orientation_range_deg) if known else unknown[1],
+            rotation_std(prior.orientation_range_deg) if known else unknown[1],
             pose,
             prior.scope,
         )
@@ -196,8 +203,8 @@ def body_mounts(priors: DatasetPriors) -> tuple[BodyMount, ...]:
             position = torch.tensor(b.position, dtype=torch.float64)
             pose = se3.from_rotation_translation(rotation, position)
             correction = tuple(map(tuple, pose.tolist()))
-        rotation_std = math.radians(b.orientation_range_deg)
-        mounts.append(BodyMount(name, b.position_range, rotation_std, b.scope, correction))
+        rotation = rotation_std(b.orientation_range_deg)
+        mounts.append(BodyMount(name, b.position_range, rotation, b.scope, correction))
     return tuple(mounts)
 
 

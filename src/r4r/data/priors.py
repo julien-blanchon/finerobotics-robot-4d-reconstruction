@@ -14,7 +14,8 @@ take precedence over `meta/robot.json` and the camera feature info:
     "wrist_left": {"mount": "moving", "link": "panda_hand", "position": [0.05, 0.0, 0.04],
                    "orientation": [0.7071, 0.0, 0.0, 0.7071], "position_range": 0.005,
                    "orientation_range_deg": 1.0, "lens": "pinhole",
-                   "focal": 182.0, "focal_range": 0.0}
+                   "focal": 182.0, "focal_range": 0.0,
+                   "distortion": [-0.28, 0.07], "distortion_range": 0.0}
   },
   "bodies": {"right_arm_base": {"position_range": 0.1, "orientation_range_deg": 10,
                                  "scope": "episode"}},
@@ -32,7 +33,10 @@ the dataset, per episode (e.g. a static camera re-placed between episodes) or pe
 `bodies` are elements of the description whose offset from their parent is not exactly known
 (a second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the
 video resolution, a property of the lens: fixed across episodes unless `focal_range`
-(relative) says how far it may vary.
+(relative) says how far it may vary. `lens` is `pinhole` (radial `distortion`: OpenCV's
+k1, k2, k3) or `fisheye` (Kannala–Brandt, OpenCV fisheye's k1..k4); `distortion_range` is the
+prior std of each coefficient when fitting refines them (0: held; default 0 when the
+coefficients are given, wide for a fisheye without them).
 """
 
 from __future__ import annotations
@@ -60,6 +64,11 @@ class CameraPrior:
     lens: Literal["pinhole", "fisheye"] = "pinhole"
     focal: float | None = None  # pixels at the video resolution
     focal_range: float | None = None  # relative; None: unknown (searched)
+    # Pinhole: OpenCV radial k1, k2, k3; fisheye: OpenCV fisheye (Kannala–Brandt) k1..k4.
+    # None: zero (an ideal pinhole; for a fisheye, unknown: refined from the equidistant model)
+    distortion: tuple[float, ...] | None = None
+    # Prior std of each coefficient; None: held, except a fisheye without `distortion` (wide)
+    distortion_range: float | None = None
     # How often the mount may change within its ranges: dataset, episode (e.g. a static camera
     # re-placed between episodes) or frame
     scope: Literal["dataset", "episode", "frame"] = "dataset"
@@ -150,6 +159,8 @@ def load_priors(root: Path) -> DatasetPriors:
             lens=c.get("lens", "pinhole"),
             focal=c.get("focal"),
             focal_range=c.get("focal_range"),
+            distortion=tuple(c["distortion"]) if c.get("distortion") is not None else None,
+            distortion_range=c.get("distortion_range"),
             scope=c.get("scope", "dataset"),
         )
         for name, c in raw.get("cameras", {}).items()

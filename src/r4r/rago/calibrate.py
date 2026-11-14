@@ -6,7 +6,8 @@ focal factors, then a kinematic bundle against the static world from the best st
 No silhouettes, no robot geometry: the static scene is the target, the kinematics the motion.
 
 A camera's focal length is a dataset prior (fixed lens): given, the search only tries
-factors within its range and the bundle keeps it there. A setup (episodes sharing one mount)
+factors within its range and the bundle keeps it there. Its distortion (`Tracks.lens`) is
+refined by the bundle within its prior. A setup (episodes sharing one mount)
 is calibrated episode by episode first: the mount most episodes agree with is the
 consensus, disagreeing episodes are set aside, and one bundle over the agreeing episodes
 (more motion: it pins down what one short episode leaves loose) gives the answer.
@@ -30,6 +31,7 @@ from .search import SearchConfig, search_mount
 if TYPE_CHECKING:
     from torch import Tensor
 
+    from .lens import Lens
     from .robot import Robot
     from .tracks import Tracks
 
@@ -55,6 +57,8 @@ class MountFit:
     body: int
     body_from_camera: Tensor[[4, 4]]
     intrinsics: Tensor[[3, 3]]
+    # Its lens with the fitted distortion (None: an ideal pinhole)
+    lens: Lens | None
     # Robust score (dropped tracks at their capped static-world fit), median reprojection (px)
     score: float
     median_error: float
@@ -75,9 +79,12 @@ class SetupFit:
 
 
 def video_tracks(
-    frames: Tensor[[int, 3, int, int]], intrinsics: Tensor[[3, 3]], config: KLTConfig
+    frames: Tensor[[int, 3, int, int]],
+    intrinsics: Tensor[[3, 3]],
+    config: KLTConfig,
+    lens: Lens | None = None,
 ) -> Tracks:
-    """KLT tracks of one camera's video (one view per frame)."""
+    """KLT tracks of one camera's video (one view per frame); `lens` of that one camera."""
 
     steps = len(frames)
     device = intrinsics.device
@@ -87,6 +94,7 @@ def video_tracks(
         torch.arange(steps, device=device),
         intrinsics[None],
         config,
+        lens,
     )
 
 
@@ -167,7 +175,7 @@ def refine(
     result = bundle_adjust(on_body, qpos, tracks, names, start, bundle, pixel_unit, episode)
 
     short = replace(bundle, iterations=config.shift_iterations)
-    refined = replace(tracks, intrinsics=result.intrinsics)
+    refined = replace(tracks, intrinsics=result.intrinsics, lens=result.lens)
     starts = result.body_from_camera
     shift_scores = torch.tensor(
         [
@@ -186,6 +194,7 @@ def refine(
         body=body,
         body_from_camera=result.body_from_camera[0],
         intrinsics=result.intrinsics[0],
+        lens=result.lens,
         score=result.score,
         median_error=result.median_error,
         inlier_fraction=result.inlier_fraction,
@@ -232,6 +241,9 @@ def fit_setup(
     )
     start_k = single[centre].intrinsics.clone()
     start_k[:2, :2] *= focal.median() / start_k[0, 0]
+    # The distortion starts where the consensus episode's fit left it
+    lens = single[centre].lens
+    chosen = [(q, replace(t, lens=lens)) for q, t in chosen]
     pooled = refine(
         robot,
         chosen,

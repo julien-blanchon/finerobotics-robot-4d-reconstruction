@@ -4,6 +4,8 @@ A camera is rigidly mounted on a body of the kinematic tree (a wrist camera on t
 exterior camera on the world body). Its pose at time t is `world_from_body(q_t) · body_from_camera`.
 Each camera's focal length is corrected by a factor `exp(φ)` with a log-normal prior (std
 `focal_std`): wide when the initial intrinsics are a guess, tight when the dataset knows them.
+Distortion coefficients (`lens.Lens`) are corrected additively, with a Gaussian prior per
+coefficient (`Lens.std`, 0: held).
 
 Unknowns of the description (declared with priors in it, see `robot.Freedom`) are optimised
 as corrections `exp(δ)` with a scope:
@@ -20,6 +22,7 @@ description (the episode's world frame is where it starts).
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -36,6 +39,7 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from .lens import Lens
     from .robot import Freedom, Robot
 
 
@@ -134,11 +138,13 @@ class Rig(nn.Module):
         episode: Tensor[[int]] | None = None,
         start_at: Tensor[[int, int, 4, 4]] | None = None,
         bodies_at: Tensor[[int, int, 4, 4]] | None = None,
+        lens: Lens | None = None,
     ) -> None:
         """`start_at [C, T]`, when given: each camera's starting mount at each timestep (for
         episode-scope cameras placed differently in each episode). `bodies_at [B, T]`: each
         free body's starting correction at each timestep (free bodies in body order), e.g. a
-        mobile base's odometry since the episode's first frame."""
+        mobile base's odometry since the episode's first frame. `lens`: the cameras'
+        distortion (None: ideal pinholes)."""
 
         super().__init__()
         index = [robot.camera(name) for name in names]
@@ -211,6 +217,10 @@ class Rig(nn.Module):
         # Per camera; 0: the focal is known and held
         std = torch.as_tensor(focal_std, dtype=qpos.dtype, device=device).expand(len(names))
         self.register_buffer("focal_std", std.clone())
+        self.initial_lens = None if lens is None else lens.to(qpos)
+        self.distortion = (
+            None if lens is None else nn.Parameter(qpos.new_zeros(len(names), lens.std.shape[1]))
+        )
 
     def intrinsics(self) -> Tensor[[int, 3, 3]]:
         """Per camera: initial intrinsics with corrected focal lengths (square pixels kept)."""
@@ -219,6 +229,15 @@ class Rig(nn.Module):
         log_focal = torch.where(self.focal_std > 0, self.log_focal, 0.0)
         factor[:, [0, 1], [0, 1]] = log_focal.exp()[:, None]
         return self.initial_intrinsics * factor
+
+    def lens(self) -> Lens | None:
+        """Per camera: initial distortion with its corrections (held coefficients kept)."""
+
+        if self.initial_lens is None or self.distortion is None:
+            return None
+        lens = self.initial_lens
+        correction = torch.where(lens.std > 0, self.distortion, 0.0)
+        return replace(lens, distortion=lens.distortion + correction)
 
     def world_from_body(self) -> Tensor[[int, int, 4, 4]]:
         """`world_from_body [T, L]`: the kinematics with the free bodies' corrections.
@@ -277,4 +296,9 @@ class Rig(nn.Module):
         bodies = self.bodies.prior(se3.se3_exp(self.bodies.values()))
         free = self.focal_std > 0
         focal = (self.log_focal[free] ** 2 / self.focal_std[free] ** 2).sum()
-        return cameras + bodies + focal
+        if self.initial_lens is None or self.distortion is None:
+            return cameras + bodies + focal
+        std = self.initial_lens.std
+        free = std > 0
+        distortion = (self.distortion[free] ** 2 / std[free] ** 2).sum()
+        return cameras + bodies + focal + distortion

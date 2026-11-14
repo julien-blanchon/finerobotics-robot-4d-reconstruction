@@ -138,6 +138,7 @@ class Fit:
             refine,
             video_tracks,
         )
+        from r4r.rago.lens import lens_from_priors
         from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
 
         root = dataset_root(self.dataset)
@@ -159,11 +160,12 @@ class Fit:
         if stream.intrinsics is not None:  # known for this episode (per-episode table)
             k = stream.intrinsics.to(device)
         config = self._config()
+        lens = lens_from_priors((stream.prior,), k)
         episodes = []
         for e in loaded:
             frames = next(c for c in e.cameras if c.name == self.camera).frames
             qpos = qpos_from_state(robot, e.state.to(device), e.joints)
-            episodes.append((qpos, video_tracks(frames, k, config.klt)))
+            episodes.append((qpos, video_tracks(frames, k, config.klt, lens)))
         ids = tuple(robot.body(b) for b in bodies)
         focal_range = stream.prior.focal_range if stream.prior.focal else None
         if stream.intrinsics is not None:
@@ -232,6 +234,7 @@ class Fit:
                 "orientation_range_deg": round(max(spread[1], 0.2), 3),
                 "focal": round(float(fit.intrinsics[0, 0]), 2),
                 "focal_range": focal_range if focal_range is not None else 0.0,
+                **distortion_values(fit.lens, 0, stream.prior),
                 "fitted": {
                     "episodes": list(self.episodes),
                     "median_px": round(fit.median_error, 3),
@@ -272,16 +275,13 @@ class Rig:
         from r4r.data.priors import write_body, write_camera
         from r4r.geometry import se3
         from r4r.matching import RoMaV2
+        from r4r.rago.lens import lens_from_priors
         from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
         from r4r.rago.stages import RigConfig, RigEpisode, calibrate_rig, spread
 
         root = dataset_root(self.dataset)
         loaded = [load_episode(root, e, stride=self.stride) for e in self.episodes]
-        # Pinhole cameras only (fisheye ones wait for a distortion model)
-        streams = tuple(c for c in loaded[0].cameras if c.prior.lens == "pinhole")
-        skipped = [c.name for c in loaded[0].cameras if c.prior.lens != "pinhole"]
-        if skipped:
-            print(f"skipping {skipped}: not pinhole (priors `lens`)")
+        streams = loaded[0].cameras
         names = tuple(c.name for c in streams)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
@@ -315,8 +315,9 @@ class Rig:
         known_mount = tuple(m.body_from_camera is not None for m in mounts)
         model = RoMaV2.from_checkpoint(device=device)
         config = replace(RigConfig(), link_every=self.every, groups=self.groups)
+        lens = lens_from_priors([c.prior for c in streams], intrinsics)
         fit = calibrate_rig(
-            robot, episodes, names, intrinsics, known_focal, known_mount, model, config
+            robot, episodes, names, intrinsics, known_focal, known_mount, model, config, lens
         )
 
         free = sorted(robot.free_bodies, key=robot.body)
@@ -327,6 +328,7 @@ class Rig:
                 values: dict[str, object] = {
                     "focal": round(float(fit.intrinsics[c, 0, 0]), 2),
                     "focal_range": stream.prior.focal_range if known_focal[c] else 0.0,
+                    **distortion_values(fit.lens, c, stream.prior),
                 }
                 if stream.moving and not known_mount[c]:
                     pose = fit.mounts[c].cpu()
@@ -356,6 +358,20 @@ class Rig:
                 print(f"wrote {write_body(root, name, body)}")
 
 
+def distortion_values(lens, camera: int, prior) -> dict[str, object]:  # noqa: ANN001
+    """Priors fields of a camera's fitted distortion (none for an ideal pinhole): held from
+    now on unless its prior gave the coefficients with a range."""
+
+    if lens is None or not (bool(lens.fisheye[camera]) or bool(lens.distortion[camera].any())):
+        return {}
+    size = 4 if bool(lens.fisheye[camera]) else 3
+    known = prior.distortion is not None
+    return {
+        "distortion": [round(v, 6) for v in lens.distortion[camera, :size].tolist()],
+        "distortion_range": (prior.distortion_range or 0.0) if known else 0.0,
+    }
+
+
 def _print_rig(fit, streams, robot, episodes, free, disagreement) -> None:  # noqa: ANN001
     """What `r4r rig` found, per camera, mobile-base episode and free body."""
 
@@ -375,10 +391,12 @@ def _print_rig(fit, streams, robot, episodes, free, disagreement) -> None:  # no
     for c, stream in enumerate(streams):
         pose = fit.mounts[c].cpu()
         where = robot.body_names[robot.camera_body[robot.camera(stream.name)]]
+        lens = distortion_values(fit.lens, c, stream.prior).get("distortion")
         print(
             f"{stream.name} on {where}: position "
             f"{[round(v, 4) for v in pose[:3, 3].tolist()]} m, "
             f"focal {float(fit.intrinsics[c, 0, 0]):.1f} px"
+            + ("" if lens is None else f", {stream.prior.lens} distortion {lens}")
         )
     for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
         if robot.free_bodies[name].scope == "frame":

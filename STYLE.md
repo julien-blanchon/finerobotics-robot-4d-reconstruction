@@ -49,18 +49,41 @@ are checked statically, at zero runtime cost.
   `Self`, `@override`, `Literal[...]` for small closed sets. No `TypeVar(...)`, no `Optional`,
   no `typing.List`.
 
+- **Generic classes always carry their parameters**, in signatures, returns, fields and
+  locals. Sizes passed as arguments are `Int[X]` so they bind a parameter, and a result's
+  dimensions are expressions of the inputs' ones:
+
+  ```python
+  def per_frame[N: IntVar, F: IntVar](xy: Tensor[[N, 2]], frames: Int[F], ...) -> Queries[1, F * N]
+  def slice[B: IntVar, Q: IntVar](self: Queries[B, Q], start: int, stop: int) -> Queries[B, int]
+  ```
+
+  `int` in a shape means "data-dependent" (a mask, a file's length), never "not written yet".
+
 **Axis glossary.** Single-letter (or short PascalCase) dimension names mean the same thing in
 every file. Defined once in `src/r4r/types.py`; add a name there before using it.
 
 ```text
-B  batch                     S  images (observations) in an encoding  N  points / pixels
-Q  queries                   P  patch tokens per frame             D  model width
-H, W image height/width      C  cameras                            T  robot timesteps
-J  joints                    L  kinematic links                    K  correspondences
+Bs leading batch dims        B  batch                  S  images in an encoding
+N  points / pixels           Q  queries                P  patch tokens per frame
+D  model width               NHead, HD heads, head width
+H, W image height/width      C  cameras                T  robot timesteps
+J  joints                    L  kinematic links        K  correspondences
+M  tracks / pairs            V  observations           NState recorded robot-state width
+NWheel wheels of a drive
 ```
 
-No semantic shape aliases (`type Points = ...`): they hide the shape at the use site. Frozen
-dataclasses carry the semantics (`Predictions.points: Tensor[[B, Q, 3]]`).
+**Named fixed-size axes.** A fixed axis is named by its components, so the name shows the size:
+`XYZ`, `XYZW`, `UV` (pixels), `XY`, `XYTheta`, `WXYZ` (quaternion), `VxVyVzWxWyWz` (se(3)
+tangent), `Mat3x3`, `Mat4x4`, `FxFyCxCy`, `K1K2K3K4` (lens), `RGB`, all in `r4r/types.py`.
+They are unpacked into the shape: `Tensor[[N, *XYZ]]`, `Tensor[[C, *Mat4x4]]`.
+
+- Pyrefly 1.4 rejects `type XYZ = Literal[3]` (and `TypeAlias`, `Final`, `Int[3]`) as a
+  dimension; it accepts an `IntTuple[3]` alias unpacked. A shape holds at most one unpacked
+  part, so next to `*Bs` write the literal: `Tensor[[*Bs, 3, 3]]` (the geometry helpers).
+- `Scalar` is `Tensor[[]]`: losses, priors, reduced statistics.
+- No aliases for whole tensors (`type Points = Tensor[...]`): they hide the shape at the use
+  site. Frozen dataclasses carry the semantics (`Predictions.points: Tensor[[B, Q, *XYZ]]`).
 
 ## 2. Geometry conventions (single source of truth)
 
@@ -95,6 +118,16 @@ slicing on poses are allowed. They are clearer than einsum here.
 - Module and public function docstrings: a one-line imperative summary, an optional short
   why/how paragraph, and a paper reference on its own line (`Ref: Calib3R arXiv:2509.08813, Eq. 9`).
   No `Args:`/`Returns:` boilerplate unless a parameter is genuinely non-obvious.
+- **Math in docstrings** where the code implements a model or an estimator: the formula in
+  compact plain-text/Unicode, in backticks, then one line on meaning and units. Use the code's
+  names or the paper's symbols, not both.
+
+  ```python
+  """Pixel of a camera-frame point: `p = f · d(s) · (x, y)/r + c`, `s = r/z` or `θ`.
+
+  `d` is the radial lens polynomial; `p` in pixels, `x` in metres.
+  """
+  ```
 - Ported code carries a source line: `# Adapted from <url> (<license>)`.
 - Separate logical steps with a single blank line; no `# ---- banners ----`.
 

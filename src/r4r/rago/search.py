@@ -37,7 +37,14 @@ class SearchConfig:
     max_views: int = 400
     bundle: BundleConfig = field(
         default_factory=lambda: BundleConfig(
-            iterations=150, learning_rate=1e-2, focal_std=0.5, reassign_every=50, attach_links=False
+            iterations=150,
+            learning_rate=1e-2,
+            focal_std=0.5,
+            reassign_every=50,
+            attach_links=False,
+            # Many independent starts in one bundle: Adam steps each parameter on its own; LM
+            # would couple their step acceptance and need a Jacobian product per start
+            optimizer="adam",
         )
     )
     seed: int = 0

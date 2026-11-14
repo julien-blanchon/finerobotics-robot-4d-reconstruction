@@ -38,6 +38,12 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - InternData-M1: upstream annotations, exact to 0.000 px;
   - DROID: ZED factory intrinsics and DROID's own per-episode extrinsics;
   - molmobot: per-frame extrinsics and render intrinsics.
+  - SynGrasp-1B: per-episode cameras, robot placement and objects in a JSON string column
+    (`publisher.episode.extra_info`) that `info.json` doesn't describe: read free-text columns.
+  - Recorded camera names can be swapped against the video streams (SynGrasp-1B, upstream):
+    project recorded 3D object poses and compare with the dataset's 2D boxes per stream.
+  - Isaac Sim camera orientations saved with its "world" axes are x forward, z up (not
+    USD's -z forward).
   - Upstream annotations can replace missing camera fields: InternData-M1 publishes the 2D
     projections of a few known 3D points per camera; solving the projection from six points
     gives exact intrinsics and poses.
@@ -60,6 +66,14 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   mapping and locate arm bases exactly (groot: right arm 1.2 m from the description, 0.000 cm
   residual after correction). Solve for the end-effector point's offset too: it is rarely the
   hand origin, and ignoring it looked like a 5 cm error.
+- **The simulator's own model can differ from the delivered description** (robosuite's GR1 head
+  chain is 14 cm lower): re-express source cameras through a body both models share.
+- **Check every URDF for an embedded `<mujoco><compiler>` block** (G1, H1-2, Kuavo): it overrides
+  r4r's compiler settings and fuses fixed links (pelvis, camera links) away.
+- **Compare robot.json's `arms` lists against its `joints`:** they can disagree (DexMimicGen
+  can-sort: 133 mm residual, 0.2 mm after the fix).
+- **Peek one frame of every camera before trusting names:** grail's video shows the synthetic
+  human source, not the robot.
 - **Simulators define their cameras in source code** (robocasa's camera config, robosuite scene
   files). MuJoCo cameras to OpenCV: flip y and z. Focal from the field of view and the rendered
   height, not the padded one; letterboxed videos need the focal of the content area.
@@ -199,6 +213,11 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - Validate odometry against an on-robot camera's rotation (HSR: commanded yaw useless,
     wheel encoders good).
   - molmobot records the base pose exactly.
+- **A camera that never moves relative to the base can't be mounted from its own video** (fixed
+  humanoid heads): the mount search returns nothing useful. Place it from the simulator source
+  or by eye; it is only checked if the wrist cameras calibrate.
+- **Humanoid bases need full 3-D odometry:** the pelvis pitches 2–4° even standing. Judge
+  odometry by how far the free base departs from it.
 - **Humanoids:** a leg-joint range above 0.1 rad per episode separates standing from walking
   episodes (13–100% walking by dataset): calibrate on standing ones first. A head that never
   moves while standing anchors nothing: the head mount comes by eye and is held.

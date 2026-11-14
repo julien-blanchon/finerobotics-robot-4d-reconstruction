@@ -95,6 +95,20 @@ One row per episode and camera, read by the loader ✅:
 
 PnP on robot tracks alone can land a camera far off and still fit (DROID: exteriors below the
 table at 0.86 px). Images alone do not pin a per-episode mount (RB-Y1: a wrist 25° off at 0.7 px).
+A moving camera with per-episode pose columns gets `"scope": "episode"` and a tight range.
+
+Too many episodes for a table? When the dataset records each episode's camera pose in a JSON
+string column (SynGrasp-1B, 4.9M episodes), the camera prior names it instead ✅:
+
+```json
+"pose": {"column": "publisher.episode.extra_info",
+         "path": ["environment_config", "camera_info", "name=side_rand_small"],
+         "axes": "forward_left_up"}
+```
+
+`key=value` picks a list item; `axes` is `opencv` or Isaac Sim's x-forward, z-up camera axes.
+
+<img src="assets/stills/syngrasp-preview.jpg" alt="SynGrasp-1B previews from recorded cameras" width="100%">
 
 ### Lens
 

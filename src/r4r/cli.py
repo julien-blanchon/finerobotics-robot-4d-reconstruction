@@ -40,6 +40,20 @@ def pinhole_guess(focal: float, aspect: float, width: int, height: int) -> list[
     return [[focal, 0, (width - 1) / 2], [0, focal * aspect, (height - 1) / 2], [0, 0, 1]]
 
 
+# Ranges written for a fitted mount without a measured spread (m, deg): indicative
+INDICATIVE_RANGES = (0.005, 1.0)
+
+
+def range_fields(metres: float, degrees: float) -> dict[str, float]:
+    """Priors ranges for a fitted pose from the spread of independent fits, floored at 2 mm
+    and 0.2 deg (what a fit can resolve)."""
+
+    return {
+        "position_range": round(max(metres, 0.002), 4),
+        "orientation_range_deg": round(max(degrees, 0.2), 3),
+    }
+
+
 def pose_fields(pose: Tensor[[*Mat4x4]]) -> dict[str, list[float]]:
     """A pose as priors fields: `position` (m) and `orientation` (quaternion w, x, y, z)."""
 
@@ -213,7 +227,7 @@ class Fit:
                 f"inliers {fit.inlier_fraction:.0%}"
             )
 
-        spread = (0.005, 1.0)  # ranges written for a single episode (m, deg): indicative
+        spread = INDICATIVE_RANGES
         if mount.body_from_camera is not None:
             # Known mount (priors): refine within its ranges, no search
             start = robot.body_from_camera[robot.camera(self.camera)]
@@ -255,8 +269,7 @@ class Fit:
                 "mount": "moving",
                 "link": robot.body_names[fit.body],
                 **pose_fields(fit.body_from_camera.cpu()),
-                "position_range": round(max(spread[0], 0.002), 4),
-                "orientation_range_deg": round(max(spread[1], 0.2), 3),
+                **range_fields(*spread),
                 "focal": round(float(fit.intrinsics[0, 0]), 2),
                 "focal_range": focal_range if focal_range is not None else 0.0,
                 **distortion_values(fit.lens, 0, stream.prior),
@@ -465,6 +478,8 @@ def _write_rig(
                 "mount": "moving",
                 "link": robot.body_names[robot.camera_body[robot.camera(stream.name)]],
                 **pose_fields(fit.mounts[c].cpu()),
+                # No per-group mounts to measure a spread from: the indicative ranges
+                **range_fields(*INDICATIVE_RANGES),
             }
         print(f"wrote {write_camera(rig.root, stream.name, values, station)}")
     for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
@@ -473,8 +488,7 @@ def _write_rig(
         body = {
             **pose_fields(fit.body_corrections[b].cpu()),
             # The range left: how much independent groups disagree
-            "position_range": round(max(cm / 100, 0.002), 4),
-            "orientation_range_deg": round(max(deg, 0.2), 3),
+            **range_fields(cm / 100, deg),
             "fitted": {"episodes": list(episodes), "groups": groups},
         }
         print(f"wrote {write_body(rig.root, name, body, station)}")

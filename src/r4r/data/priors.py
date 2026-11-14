@@ -33,8 +33,10 @@ t + shift; `r4r fit --shifts` measures it). A camera's `position` and `orientati
 w, x, y, z of its OpenCV axes) are in the frame of `link` (moving) or of the robot base
 (static); ranges bound what fitting may change (small: fixed across episodes, fitted per episode
 within them): each is the std σ of a Gaussian prior, a residual `(x − x₀) / σ` (metres, radians
-of rotation, relative focal). `scope` says how often a value may change within its ranges: once
-for the dataset, per episode (e.g. a static camera re-placed between episodes) or per frame.
+of rotation, relative focal); `orientation_range_deg` ≥ 180 leaves the orientation free. A pose
+without both ranges is only a start (free; a warning says so). `scope` says how often a value
+may change within its ranges: once for the dataset, per episode (e.g. a static camera re-placed
+between episodes) or per frame.
 `bodies` are elements of the description whose offset from their parent is not exactly known (a
 second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the video
 resolution, a property of the lens: fixed across episodes unless `focal_range` (relative) says
@@ -63,12 +65,13 @@ video/joint time offset on top of `state_shift`.
 
 Unknown keys are errors (a typo would otherwise be ignored silently), except records kept for
 people and never read: `notes`, `base_odometry_measured` (an alternative odometry record) and
-a camera's `fitted` (provenance of a fitted mount).
+a camera's or body's `fitted` (provenance of a fit).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
@@ -78,6 +81,8 @@ from typing import Any, Literal, overload
 from .episode import JointMap
 
 PRIORS = Path(__file__).resolve().parents[3] / "priors"
+
+logger = logging.getLogger(__name__)
 
 # Parsed JSON (priors files, `meta/robot.json`): an untyped boundary, read field by field
 type JsonObject = dict[str, Any]
@@ -303,6 +308,9 @@ TOP_KEYS = _keys(DatasetPriors) - {"raw"} | {"base_odometry_measured"}
 JOINT_KEYS = frozenset({"index", "urdf_joint", "sign", "from", "to"})
 STATION_KEYS = frozenset({"cameras", "bodies"})
 CAMERA_KEYS = _keys(CameraPrior) | {"fitted"}
+BODY_KEYS = _keys(BodyPrior) | {"fitted"}
+POSE_KEYS = frozenset({"position", "orientation"})
+RANGE_KEYS = frozenset({"position_range", "orientation_range_deg"})
 
 
 def _checked(raw: JsonObject, allowed: frozenset[str], where: str) -> JsonObject:
@@ -351,6 +359,13 @@ def _pose_column(raw: JsonObject | None, where: str) -> PoseColumn | None:
 def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior]:
     for name, c in raw.items():
         _checked(c, CAMERA_KEYS, f"{where}: cameras.{name}")
+        if set(c) & POSE_KEYS and not set(c) >= RANGE_KEYS:
+            logger.warning(
+                "%s: cameras.%s gives a pose without both ranges (%s): it is only a start, free",
+                where,
+                name,
+                ", ".join(sorted(RANGE_KEYS)),
+            )
     return {
         name: CameraPrior(
             mount=c.get("mount"),
@@ -376,7 +391,7 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
 
 def _bodies(raw: Mapping[str, JsonObject], where: str) -> dict[str, BodyPrior]:
     for name, b in raw.items():
-        _checked(b, _keys(BodyPrior), f"{where}: bodies.{name}")
+        _checked(b, BODY_KEYS, f"{where}: bodies.{name}")
     return {
         name: BodyPrior(
             float(b["position_range"]),

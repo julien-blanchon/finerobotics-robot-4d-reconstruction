@@ -21,7 +21,7 @@ the body's (φ: steering angle), and the body turns ω_u − φ̇.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -129,6 +129,3 @@ def caster_steps[T: IntVar](
     dy = mid.sin() * forward + mid.cos() * sideways
     dtheta = unit_turn - torch.diff(phi, prepend=phi[:1])
     return torch.stack((dx, dy, dtheta), -1)
-
-
-Kind = Literal["pose", "velocity", "caster"]

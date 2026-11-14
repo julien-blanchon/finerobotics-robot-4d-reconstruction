@@ -79,12 +79,11 @@ class BundleConfig:
     cauchy: float = 0.01
     # Focal-length prior (log space): ~0.3 from ARROW, ~0.01 when the dataset knows it
     focal_std: float = 0.3
-    # Moving tracks: re-attach to links every this many iterations; drop a track whose mean
-    # robust cost on its best link exceeds `outlier_cost` (cauchy(e) = log(1 + (e/δ)²))
-    use_moving: bool = True
     # Tracks may attach to moving links (the robot as a calibration target); False: the
     # static world only (calibrating moving cameras, where links invite spurious fits)
     attach_links: bool = True
+    # Moving tracks: re-attach to links every this many iterations; drop a track whose mean
+    # robust cost on its best link exceeds `outlier_cost` (cauchy(e) = log(1 + (e/δ)²))
     reassign_every: int = 100
     outlier_cost: float = math.log1p(9.0)  # mean error ≈ 3δ
     # "lm": Levenberg–Marquardt (`solver.py`) when every free row is dataset or episode scope,
@@ -161,11 +160,8 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
     """
 
     t = tracks
-    keep = ~t.moving | config.use_moving
-    _, track = torch.unique(t.track[keep], return_inverse=True)
-    obs = Observations(
-        t.view[keep], t.pixel[keep].to(qpos), t.weight[keep].to(qpos), track, int(track.max()) + 1
-    )
+    _, track = torch.unique(t.track, return_inverse=True)
+    obs = Observations(t.view, t.pixel.to(qpos), t.weight.to(qpos), track, int(track.max()) + 1)
     rig = Rig(
         robot,
         qpos,
@@ -183,7 +179,7 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
         t.lens,
     )
     track_moving = torch.zeros(obs.count, dtype=torch.bool, device=qpos.device)
-    track_moving[obs.track[t.moving[keep]]] = True
+    track_moving[obs.track[t.moving]] = True
     candidates = moving_bodies(rig) if config.attach_links else []
 
     def assign() -> Tensor[[int]]:

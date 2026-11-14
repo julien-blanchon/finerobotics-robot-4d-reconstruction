@@ -101,13 +101,10 @@ def load_episode(
             stream = replace(stream, pose=recorded_pose(text, prior.pose))
         cameras.append(stream)
     feature = priors.state_feature or robot["state"]["feature"]
-    state = _columns(rows, feature)
-    if priors.state_shift:
-        # Frame t's state from t + shift (a known video/joint-state offset, in frames at the
-        # dataset's rate whatever the stride), clamped
-        full = _columns(every[:], feature)
-        index = torch.arange(0, len(full), stride)[: len(state)] + priors.state_shift
-        state = full[index.clamp(0, len(full) - 1)]
+    # The whole episode's columns (a slice of a dataset is a dict of columns)
+    state, base_motion = _measurements(
+        cast("Mapping[str, Tensor]", every[:]), priors, feature, stride
+    )
     return Episode(
         name=f"{root.name}/episode_{episode:06d}",
         fps=meta.fps / stride,
@@ -117,8 +114,25 @@ def load_episode(
         cameras=tuple(cameras),
         priors=priors,
         station=None if record is None else record.station,
-        base_motion=None if priors.base_odometry is None else _base_motion(priors, rows),
+        base_motion=base_motion,
     )
+
+
+def _measurements(
+    every: Mapping[str, Tensor], priors: DatasetPriors, feature: str | tuple[str, ...], stride: int
+) -> tuple[Tensor[[int, int]], Tensor[[int, *Mat4x4]] | None]:
+    """The robot's state and base motion at every `stride`-th frame of the episode `every`.
+
+    Both are measured with the joints: frame t's come from frame t + `state_shift` (a known
+    video/joint-state offset, in frames at the dataset's rate whatever the stride), clamped.
+    """
+
+    count = len(every["timestamp"])
+    index = (torch.arange(0, count, stride) + priors.state_shift).clamp(0, count - 1)
+    # Text columns (e.g. JSON records) come as lists: only tensors are measurements
+    rows = {name: column[index] for name, column in every.items() if torch.is_tensor(column)}
+    motion = None if priors.base_odometry is None else _base_motion(priors, rows)
+    return _columns(rows, feature), motion
 
 
 def _recorded_intrinsics(

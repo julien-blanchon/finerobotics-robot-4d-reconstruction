@@ -44,6 +44,9 @@ class CameraStream[T: IntVar, H: IntVar, W: IntVar]:
     prior: CameraPrior
     # Known intrinsics of this episode at the video resolution (per-episode table), if any
     intrinsics: Tensor[[3, 3]] | None = None
+    # Recorded pose in this episode (OpenCV axes), if any: a static camera's pose in the base
+    # frame, a moving camera's mount on its link
+    pose: Tensor[[4, 4]] | None = None
 
 
 @dataclass(frozen=True, slots=True)

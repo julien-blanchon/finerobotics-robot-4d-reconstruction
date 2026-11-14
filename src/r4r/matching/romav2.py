@@ -4,7 +4,9 @@ Weight-compatible with the released `romav2.0.1.pt` (same parameter names, see
 `load_checkpoint` for the mapping) and numerically matched to the reference "precise" setting:
 frames are squashed to 800² (coarse match + first refinement) and 1280² (second refinement),
 and both directions are predicted. Each frame's DINOv3 descriptors and fine features are
-computed once in `encode`, however many pairs use it.
+computed once in `encode`, however many pairs use it. The 1280² refinement only runs for
+frames larger than 800² (`fine`): below, it refines past the frames' own resolution, at about
+half the cost of a match (set R4R_ROMA_FINE=1 to force it).
 
 Ref: Edstedt et al., RoMa v2, arXiv:2511.15706.
 Adapted from https://github.com/Parskatt/RoMaV2 (MIT).
@@ -62,7 +64,11 @@ class Encoding[S: IntVar]:
     coarse_fine: tuple[
         Tensor[[S, 800, 800, 64]], Tensor[[S, 400, 400, 128]], Tensor[[S, 200, 200, 256]]
     ]
-    fine: tuple[Tensor[[S, 1280, 1280, 64]], Tensor[[S, 640, 640, 128]], Tensor[[S, 320, 320, 256]]]
+    # None: no 1280² refinement (frames no larger than the coarse size)
+    fine: (
+        tuple[Tensor[[S, 1280, 1280, 64]], Tensor[[S, 640, 640, 128]], Tensor[[S, 320, 320, 256]]]
+        | None
+    )
     size: tuple[int, int]  # input (H, W), for pixel coordinates
 
     def __getitem__(self, index: Tensor[[int]] | slice) -> Encoding:
@@ -71,7 +77,9 @@ class Encoding[S: IntVar]:
         return Encoding(
             self.descriptors[index],
             (self.coarse_fine[0][index], self.coarse_fine[1][index], self.coarse_fine[2][index]),
-            (self.fine[0][index], self.fine[1][index], self.fine[2][index]),
+            None
+            if self.fine is None
+            else (self.fine[0][index], self.fine[1][index], self.fine[2][index]),
             self.size,
         )
 
@@ -135,17 +143,17 @@ class RoMaV2(nn.Module):
 
         mean = images.new_tensor(IMAGENET_MEAN)[:, None, None]
         std = images.new_tensor(IMAGENET_STD)[:, None, None]
-        coarse, fine = (
-            (resized - mean) / std
-            for resized in (
-                F.interpolate(images, size=(size, size), mode="bicubic", antialias=True)
-                for size in (COARSE_SIZE, FINE_SIZE)
-            )
-        )
+
+        def normalised(size: int) -> Tensor:
+            resized = F.interpolate(images, size=(size, size), mode="bicubic", antialias=True)
+            return (resized - mean) / std
+
+        refine = max(images.shape[2:]) > COARSE_SIZE or os.environ.get("R4R_ROMA_FINE") == "1"
         with torch.autocast(images.device.type, dtype=torch.bfloat16):
+            coarse = normalised(COARSE_SIZE)
             descriptors = self.descriptor(coarse)
             coarse_fine = self.refiner_features(coarse)
-            fine_features = self.refiner_features(fine)
+            fine_features = self.refiner_features(normalised(FINE_SIZE)) if refine else None
         return Encoding(descriptors, coarse_fine, fine_features, (images.shape[2], images.shape[3]))
 
     @torch.inference_mode()
@@ -157,10 +165,10 @@ class RoMaV2(nn.Module):
         warp: Tensor[[int, int, int, 2]] = out[..., :2]
         # Precision slots start at zero; the refiners accumulate into them
         confidence: Tensor[[int, int, int, 4]] = F.pad(out[..., 2:], (0, 3))
-        for size, features_a, features_b in (
-            (COARSE_SIZE, a.coarse_fine, b.coarse_fine),
-            (FINE_SIZE, a.fine, b.fine),
-        ):
+        stages = [(COARSE_SIZE, a.coarse_fine, b.coarse_fine)]
+        if a.fine is not None and b.fine is not None:
+            stages.append((FINE_SIZE, a.fine, b.fine))
+        for size, features_a, features_b in stages:
             if size == FINE_SIZE:
                 # The coarse stage's precision is in its own pixels: restart it, keep the overlap
                 confidence = F.pad(confidence[..., :1], (0, 3))

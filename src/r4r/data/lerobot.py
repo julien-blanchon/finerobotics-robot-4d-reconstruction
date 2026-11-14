@@ -18,6 +18,7 @@ from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import decode_video_frames
 
+from ..geometry import se3
 from .episode import CameraStream, Episode, JointMap
 from .priors import (
     PRIORS,
@@ -69,6 +70,11 @@ def load_episode(
             column = every.select_columns([prior.intrinsics.column])[:][prior.intrinsics.column]
             k = _recorded_intrinsics(column, prior.intrinsics, size)
             stream = replace(stream, intrinsics=k)
+        if record is not None and name in record.poses and not stream.moving:
+            x, y, z, *q = record.poses[name]
+            rotation = se3.quaternion_to_matrix(torch.tensor(q, dtype=torch.float64))
+            position = torch.tensor([x, y, z], dtype=torch.float64)
+            stream = replace(stream, pose=se3.from_rotation_translation(rotation, position))
         cameras.append(stream)
     feature = priors.state_feature or robot["state"]["feature"]
     state = rows[feature].double()

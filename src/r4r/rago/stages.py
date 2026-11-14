@@ -37,6 +37,7 @@ from .initialize import locate_camera, triangulate
 from .kinematics import forward_kinematics
 from .klt import VideoTracks, klt_tracks, track_video
 from .merge import merge_tracks
+from .rig import KinematicFreedom
 from .tracks import Tracks
 
 if TYPE_CHECKING:
@@ -86,6 +87,8 @@ class RigConfig:
         default_factory=lambda: BundleConfig(focal_std=0.2, attach_links=True, iterations=1200)
     )
     groups: int = 2
+    # Joint-encoder and video/joint time offsets refined in the bundles (None: held)
+    kinematic: KinematicFreedom | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +117,12 @@ class RigFit:
     # Mobile base, per episode: how far the fitted base departs from its recorded motion
     # (median cm, max cm, max degrees); empty without a record
     base_departure: tuple[tuple[float, float, float], ...]
+    # Kinematic refinements (zero where held): joint offsets [J] and time offset (timesteps),
+    # from all episodes and per group ([G, J], [G])
+    joint_offset: Tensor[[int]]
+    time_offset: float
+    group_joint_offsets: Tensor[[int, int]]
+    group_time_offsets: tuple[float, ...]
 
 
 def calibrate_rig(
@@ -168,7 +177,7 @@ def calibrate_rig(
     fixed = known_focal
     everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config, fixed)
     groups = [list(range(g, len(episodes), config.groups)) for g in range(config.groups)]
-    corrections = []
+    corrections, group_fits = [], []
     for group in filter(None, groups):
         fit = _bundle(
             frozen,
@@ -181,6 +190,7 @@ def calibrate_rig(
             fixed,
         )
         corrections.append(_body_corrections(frozen, episodes[group[0]].qpos, fit.world_from_body))
+        group_fits.append(fit)
     first = torch.cumsum(torch.tensor([0] + [len(e.qpos) for e in episodes[:-1]]), 0).tolist()
     free = sorted(robot.body(n) for n in robot.free_bodies)
     camera_poses = everything.mounts_at[:, first].transpose(0, 1)
@@ -198,6 +208,10 @@ def calibrate_rig(
         world_from_body=everything.world_from_body,
         mounts_at=everything.mounts_at,
         base_departure=_base_departure(frozen, episodes, everything.world_from_body),
+        joint_offset=everything.joint_offset,
+        time_offset=everything.time_offset,
+        group_joint_offsets=torch.stack([f.joint_offset for f in group_fits]),
+        group_time_offsets=tuple(f.time_offset for f in group_fits),
     )
 
 
@@ -414,6 +428,7 @@ def _bundle(
         start_at=start_at,
         bodies_at=_bodies_at(robot, episodes),
         known_focal=known_focal,
+        kinematic=config.kinematic,
     )
 
 

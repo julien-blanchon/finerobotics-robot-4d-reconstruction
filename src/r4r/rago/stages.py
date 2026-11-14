@@ -275,17 +275,21 @@ def _static_starts(
     intrinsics: Tensor[[int, 3, 3]],
     known_focal: tuple[bool, ...],
 ) -> tuple[Tensor[[int, int, 4, 4]], Tensor[[int, 3, 3]]]:
-    """Stage 3: each static camera's pose per episode (and focal, from the first episode where
-    it is found, when unknown) by PnP on points the moving cameras triangulate. Episodes where
-    PnP fails keep the description's pose."""
+    """Stage 3: each free static camera's pose per episode (and focal, from the first episode
+    where it is found, when unknown) by PnP on points the moving cameras triangulate. Episodes
+    where PnP fails keep the description's pose; cameras the priors fix keep theirs. A
+    dataset-scope camera starts every episode from the consensus of its episodes' PnP poses
+    (`_consensus`): one episode with few links can land metres away."""
 
     device = mounts.device
     index = [robot.camera(n) for n in names]
     body = torch.tensor([robot.camera_body[i] for i in index], device=device)
     static = body == 0
     starts = mounts[None].repeat(len(episodes), 1, 1, 1)  # [E, C, 4, 4]
+    support = torch.zeros(len(episodes), len(names), device=device)  # PnP inliers
     focal = intrinsics[:, 0, 0].clone()
     found = [False] * len(names)
+    free = [n in robot.free_cameras for n in names]
     for i, (e, tracks) in enumerate(zip(episodes, merged, strict=True)):
         world = moved_kinematics(robot, e)
         cam = tracks.view_camera
@@ -293,6 +297,8 @@ def _static_starts(
         observed = tracks.view_camera[tracks.view]
         points = triangulate(tracks, world_from_view, ~static[observed])
         for c in static.nonzero()[:, 0].tolist():
+            if not free[c]:
+                continue
             seen = (observed == c) & (points.count[tracks.track] >= MIN_OBSERVATIONS)
             if int(seen.sum()) < MIN_POINTS:
                 continue
@@ -301,10 +307,29 @@ def _static_starts(
             start = locate_camera(points.point[tracks.track[seen]], tracks.pixel[seen], size, prior)
             if start is not None:
                 starts[i, c] = start.world_from_camera
+                support[i, c] = start.inliers
                 focal[c], found[c] = start.focal, True
+    for c, name in enumerate(names):
+        if bool(static[c]) and free[c] and robot.free_cameras[name].scope == "dataset":
+            starts[:, c] = _consensus(starts[:, c], support[:, c])
     intrinsics = intrinsics.clone()
     intrinsics[:, :2, :2] *= (focal / intrinsics[:, 0, 0])[:, None, None]
     return starts, intrinsics
+
+
+def _consensus(
+    poses: Tensor[[int, 4, 4]],
+    support: Tensor[[int]],
+    tolerance: tuple[float, float] = (0.1, math.radians(5.0)),
+) -> Tensor[[4, 4]]:
+    """The pose (among per-episode estimates) whose neighbours within `tolerance` (m, rad)
+    carry the most support (PnP inliers); episodes without an estimate have none."""
+
+    delta = se3.inverse(poses)[:, None] @ poses[None]
+    near = (delta[..., :3, 3].norm(dim=-1) < tolerance[0]) & (
+        se3.so3_log(delta[..., :3, :3]).norm(dim=-1) < tolerance[1]
+    )
+    return poses[int((near.to(support) @ support).argmax())]
 
 
 def _bundle(

@@ -746,6 +746,7 @@ class Preview:
             print(f"wrote {self.output} ({count} frames)")
 
 
+@dataclass(frozen=True, slots=True)
 class Focal:
     """A camera's focal length from ARROW (gen2 adapter): a draft when nothing is recorded."""
 

@@ -21,7 +21,7 @@ from safetensors.torch import load_file
 from torch import nn
 
 from .decoder import Decoder
-from .encoder import PATCH_SIZE, Encoder
+from .encoder import PATCH_SIZE, Encoder, SlotHook
 from .query_embed import ID_WIDTH, QueryEmbedding
 
 if TYPE_CHECKING:
@@ -123,9 +123,12 @@ class ARROW(nn.Module):
 
     @torch.inference_mode()
     def encode[B: IntVar, S: IntVar, H: IntVar, W: IntVar](
-        self, images: Tensor[[B, S, 3, H, W]]
+        self, images: Tensor[[B, S, 3, H, W]], slot: SlotHook | None = None
     ) -> Encoding[B, S, H, W, int]:
-        """Encode RGB in [0, 1]; any size (replicate-padded to a multiple of 14 internally)."""
+        """Encode RGB in [0, 1]; any size (replicate-padded to a multiple of 14 internally).
+
+        `slot` optionally rewrites the encoder's block-13 special tokens (pose conditioning).
+        """
 
         b, _, _, h, w = images.shape
         pad_h, pad_w = -h % PATCH_SIZE, -w % PATCH_SIZE
@@ -139,7 +142,7 @@ class ARROW(nn.Module):
             padded = rearrange(flat, "(b f) c h w -> b f c h w", b=b)
 
         with self.autocast(images.device):
-            context, id_tokens = self.encoder(padded)
+            context, id_tokens = self.encoder(padded, slot)
         context = self.context_proj(rearrange(context, "b f p c -> b (f p) c"))
         # SDPA runs in bf16 under autocast anyway: caching in bf16 halves memory, same result
         dtype = torch.bfloat16 if images.device.type == "cuda" else context.dtype

@@ -35,7 +35,8 @@ def load_episode(
     repo_id = f"local/{root.name}"
     meta = LeRobotDatasetMetadata(repo_id, root=root)
     rows = LeRobotDataset(repo_id, root=root, episodes=[episode], video_backend="pyav")
-    rows = rows.hf_dataset.with_format("torch")[::stride]
+    every = rows.hf_dataset.with_format("torch")
+    rows = every[::stride]
     timestamps = rows["timestamp"].tolist()
 
     robot = json.loads((root / "meta" / "robot.json").read_text())
@@ -57,9 +58,11 @@ def load_episode(
         cameras.append(stream)
     state = rows[robot["state"]["feature"]].double()
     if priors.state_shift:
-        # Frame t's state from t + shift (a known video/joint-state offset), clamped
-        index = (torch.arange(len(state)) + priors.state_shift).clamp(0, len(state) - 1)
-        state = state[index]
+        # Frame t's state from t + shift (a known video/joint-state offset, in frames at the
+        # dataset's rate whatever the stride), clamped
+        full = every[:][robot["state"]["feature"]].double()
+        index = torch.arange(0, len(full), stride)[: len(state)] + priors.state_shift
+        state = full[index.clamp(0, len(full) - 1)]
     return Episode(
         name=f"{root.name}/episode_{episode:06d}",
         fps=meta.fps / stride,

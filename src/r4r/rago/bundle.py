@@ -386,7 +386,7 @@ def residuals(
         fisheye = lens.fisheye[t.view_camera[obs.view]]
 
     # Gather per-observation pose and intrinsics through embedding (sorted backward)
-    table = torch.cat((world_from_view.flatten(1), intrinsics[t.view_camera].flatten(1)), -1)
+    table = torch.cat((world_from_view.flatten(1), t.view_intrinsics(intrinsics).flatten(1)), -1)
     rows = F.embedding(obs.view, table)
     world_pose, k = rows[:, :16].unflatten(-1, (4, 4)), rows[:, 16:].unflatten(-1, (3, 3))
     pose = se3.inverse(world_from_body[t.view_time[obs.view], body]) @ world_pose

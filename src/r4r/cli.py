@@ -152,8 +152,9 @@ class Fit:
         robot = load_robot(loaded[0].robot, cameras=(mount,), bodies=free).to(device, torch.float64)
         height, width = stream.frames.shape[-2:]
         focal = stream.prior.focal or self.focal or 0.7 * width
+        fy = focal * stream.prior.aspect
         k = torch.tensor(
-            [[focal, 0, (width - 1) / 2], [0, focal, (height - 1) / 2], [0, 0, 1]],
+            [[focal, 0, (width - 1) / 2], [0, fy, (height - 1) / 2], [0, 0, 1]],
             dtype=torch.float64,
             device=device,
         )
@@ -304,7 +305,8 @@ class Rig:
                 k.append(c.intrinsics.tolist())
                 continue
             f = c.prior.focal or self.focal * width
-            k.append([[f, 0, (width - 1) / 2], [0, f, (height - 1) / 2], [0, 0, 1]])
+            fy = f * c.prior.aspect
+            k.append([[f, 0, (width - 1) / 2], [0, fy, (height - 1) / 2], [0, 0, 1]])
         intrinsics = torch.tensor(k, dtype=torch.float64, device=device)
         episodes = [
             RigEpisode(
@@ -584,7 +586,8 @@ class Preview:
                 k.append(c.intrinsics.tolist())
                 continue
             f = c.prior.focal or self.focal * width
-            k.append([[f, 0, (width - 1) / 2], [0, f, (height - 1) / 2], [0, 0, 1]])
+            fy = f * c.prior.aspect
+            k.append([[f, 0, (width - 1) / 2], [0, fy, (height - 1) / 2], [0, 0, 1]])
         steps = len(qpos)
         solution = {
             "dataset": self.dataset,

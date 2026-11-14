@@ -15,8 +15,7 @@ Adapted from https://github.com/ByteDance-Seed/Depth-Anything-3 (Apache-2.0), vi
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, Protocol
 
 import torch
 import torch.nn.functional as F
@@ -27,12 +26,14 @@ from .layers.block import Block
 from .layers.rope import rope_tables
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
 
-PATCH_SIZE = 14
-WIDTH = 1536
-NUM_HEADS = 24
+    from r4r.types import RGB
+
+PATCH_SIZE: Final = 14
+WIDTH: Final = 1536
+NUM_HEADS: Final = 24
 DEPTH = 40
 FIRST_GLOBAL_BLOCK = 13
 PRETRAIN_GRID = 37  # 518 px / 14
@@ -47,15 +48,20 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(3, WIDTH, PATCH_SIZE, PATCH_SIZE)
 
     def forward[N: IntVar, H: IntVar, W: IntVar](
-        self, images: Tensor[[N, 3, H, W]]
-    ) -> Tensor[[N, int, 1536]]:
+        self, images: Tensor[[N, *RGB, H, W]]
+    ) -> Tensor[[N, (H // 14) * (W // 14), 1536]]:
         return rearrange(self.proj(images), "n c h w -> n (h w) c")
 
 
-# Rewrites the block-13 special tokens: (pretrained tokens [B, S, 1536] in input frame order,
-# reference frame [B] or None when S < 3) → tokens [B, S, 1536] in input frame order. This is the
-# slot where DA3 writes its camera-encoder tokens (pose conditioning); ARROW leaves it unused.
-type SlotHook = Callable[[Tensor, Tensor | None], Tensor]
+class SlotHook(Protocol):
+    """Rewrites the block-13 special tokens, in input frame order; `reference` is the reference
+    frame per batch (None when S < 3). This is the slot where DA3 writes its camera-encoder
+    tokens (pose conditioning); ARROW leaves it unused.
+    """
+
+    def __call__[B: IntVar, S: IntVar](
+        self, tokens: Tensor[[B, S, 1536]], reference: Tensor[[B]] | None, /
+    ) -> Tensor[[B, S, 1536]]: ...
 
 
 class Encoder(nn.Module):
@@ -79,8 +85,8 @@ class Encoder(nn.Module):
         self.register_buffer("image_std", torch.tensor(IMAGENET_STD).view(1, 1, 3, 1, 1))
 
     def forward[B: IntVar, S: IntVar, H: IntVar, W: IntVar](
-        self, images: Tensor[[B, S, 3, H, W]], slot: SlotHook | None = None
-    ) -> tuple[Tensor[[B, S, int, 3072]], Tensor[[B, S, 3072]]]:
+        self, images: Tensor[[B, S, *RGB, H, W]], slot: SlotHook | None = None
+    ) -> tuple[Tensor[[B, S, (H // 14) * (W // 14), 3072]], Tensor[[B, S, 3072]]]:
         b, f, _, h, w = images.shape
         x = self.tokens((images - self.image_mean) / self.image_std)
         local_rope, global_rope = self.rope(h // PATCH_SIZE, w // PATCH_SIZE, f, images.device)
@@ -116,8 +122,8 @@ class Encoder(nn.Module):
         return context, id_tokens
 
     def tokens[B: IntVar, S: IntVar, H: IntVar, W: IntVar](
-        self, images: Tensor[[B, S, 3, H, W]]
-    ) -> Tensor[[B, S, int, 1536]]:
+        self, images: Tensor[[B, S, *RGB, H, W]]
+    ) -> Tensor[[B, S, 1 + (H // 14) * (W // 14), 1536]]:
         """Special token + patch tokens, with the learned position embedding."""
 
         b, f, _, h, w = images.shape
@@ -126,7 +132,9 @@ class Encoder(nn.Module):
         x = x + self.position_embedding(h // PATCH_SIZE, w // PATCH_SIZE).to(x.dtype)
         return rearrange(x, "(b f) n c -> b f n c", b=b)
 
-    def position_embedding(self, rows: int, columns: int) -> Tensor[[1, int, 1536]]:
+    def position_embedding[R: IntVar, Cl: IntVar](
+        self, rows: Int[R], columns: Int[Cl]
+    ) -> Tensor[[1, 1 + R * Cl, 1536]]:
         """Bicubic resize of the 37×37 pretraining grid (scale factors, not sizes, as DINOv2)."""
 
         if rows == columns == PRETRAIN_GRID:
@@ -141,15 +149,17 @@ class Encoder(nn.Module):
         assert grid.shape[-2:] == (rows, columns), "position grid interpolation rounding"
         return torch.cat((embed[:, :1], rearrange(grid, "1 c h w -> 1 (h w) c")), dim=1)
 
-    def camera_tokens(self, b: int, f: int) -> Tensor[[int, int, 1, 1536]]:
+    def camera_tokens[B: IntVar, S: IntVar](self, b: Int[B], f: Int[S]) -> Tensor[[B, S, 1, 1536]]:
+        """Camera token 0 for the (reference-first) frame 0, token 1 for every other frame."""
+
         reference, others = self.camera_token[:, :1], self.camera_token[:, 1:]
         tokens = torch.cat((reference, others.expand(1, f - 1, -1)), dim=1)
         return rearrange(tokens.expand(b, -1, -1), "b f c -> b f 1 c")
 
     @staticmethod
-    def rewrite_slot(
-        special: Tensor[[int, int, 1, 1536]], reference: Tensor | None, slot: SlotHook
-    ) -> Tensor[[int, int, 1, 1536]]:
+    def rewrite_slot[B: IntVar, S: IntVar](
+        special: Tensor[[B, S, 1, 1536]], reference: Tensor[[B]] | None, slot: SlotHook
+    ) -> Tensor[[B, S, 1, 1536]]:
         """Apply `slot` in input frame order (`special` is reference-first when S ≥ 3)."""
 
         tokens = special[:, :, 0]
@@ -161,9 +171,9 @@ class Encoder(nn.Module):
         return tokens[:, :, None]
 
     @staticmethod
-    def rope(
-        rows: int, columns: int, frames: int, device: torch.device
-    ) -> tuple[Tensor[[2, 2, int, int]], Tensor[[2, 2, int, int]]]:
+    def rope[R: IntVar, Cl: IntVar, S: IntVar](
+        rows: Int[R], columns: Int[Cl], frames: Int[S], device: torch.device
+    ) -> tuple[Tensor[[2, 2, 1 + R * Cl, 32]], Tensor[[2, 2, S * (1 + R * Cl), 32]]]:
         """RoPE tables for frame-wise blocks (patch (r, c) at (r+1, c+1)) and global blocks.
 
         Globally every patch sits at (1, 1) and the special token at (0, 0): RoPE then only tells

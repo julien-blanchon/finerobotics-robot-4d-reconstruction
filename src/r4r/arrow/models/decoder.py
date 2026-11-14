@@ -17,19 +17,19 @@ from torch import nn
 from .layers.block import CrossBlock
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
 
 
-class Decoder(nn.Module):
-    def __init__(self, width: int, depth: int, num_heads: int) -> None:
+class Decoder[D: IntVar, NHead: IntVar](nn.Module):
+    def __init__(self, width: Int[D], depth: int, num_heads: Int[NHead]) -> None:
         super().__init__()
         self.width = width
         self.blocks = nn.ModuleList(CrossBlock(width, num_heads) for _ in range(depth))
 
     def keys_values[B: IntVar, N: IntVar](
-        self, context: Tensor[[B, N, int]], dtype: torch.dtype
-    ) -> tuple[Tensor[[int, B, int, N, int]], Tensor[[int, B, int, N, int]]]:
+        self, context: Tensor[[B, N, D]], dtype: torch.dtype
+    ) -> tuple[Tensor[[int, B, NHead, N, D // NHead]], Tensor[[int, B, NHead, N, D // NHead]]]:
         """Per-block keys and values in `dtype`: `[blocks, B, heads, N, head_dim]`.
 
         Written block by block into one preallocated buffer: for long contexts this cache is
@@ -48,10 +48,10 @@ class Decoder(nn.Module):
 
     def forward[B: IntVar, Q: IntVar, N: IntVar](
         self,
-        query: Tensor[[B, Q, int]],
-        keys: Tensor[[int, B, int, N, int]],
-        values: Tensor[[int, B, int, N, int]],
-    ) -> Tensor[[B, Q, int]]:
+        query: Tensor[[B, Q, D]],
+        keys: Tensor[[int, B, NHead, N, D // NHead]],
+        values: Tensor[[int, B, NHead, N, D // NHead]],
+    ) -> Tensor[[B, Q, D]]:
         for block, k, v in zip(self.blocks, keys, values, strict=True):
             query = block(query, k, v)
         return query

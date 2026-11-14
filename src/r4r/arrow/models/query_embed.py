@@ -9,7 +9,7 @@ Ref: ARROW arXiv:2610.01314, Eq. 3 and App. B.1.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import torch
 import torch.nn.functional as F
@@ -17,21 +17,25 @@ from einops import rearrange
 from torch import nn
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
+
+    from r4r.types import RGB, UV
 
     from ..queries import Queries
 
-ID_WIDTH = 3072
+ID_WIDTH: Final = 3072
 FOURIER_BASE = 100.0
 
 
-def mlp(width_in: int, width: int) -> nn.Sequential:
+def mlp[In: IntVar, D: IntVar](
+    width_in: Int[In], width: Int[D]
+) -> nn.Sequential[nn.Linear[In, D], nn.GELU, nn.Linear[D, D]]:
     return nn.Sequential(nn.Linear(width_in, width), nn.GELU(), nn.Linear(width, width))
 
 
-class QueryEmbedding(nn.Module):
-    def __init__(self, width: int, crop: int) -> None:
+class QueryEmbedding[D: IntVar](nn.Module):
+    def __init__(self, width: Int[D], crop: int) -> None:
         super().__init__()
         self.width = width
         self.crop = crop
@@ -42,10 +46,10 @@ class QueryEmbedding(nn.Module):
 
     def forward[B: IntVar, S: IntVar, H: IntVar, W: IntVar, Q: IntVar](
         self,
-        images: Tensor[[B, S, 3, H, W]],
+        images: Tensor[[B, S, *RGB, H, W]],
         id_tokens: Tensor[[B, S, 3072]],
         queries: Queries[B, Q],
-    ) -> Tensor[[B, Q, int]]:
+    ) -> Tensor[[B, Q, D]]:
         _, frames, _, height, width = images.shape
         source, target, reference = (
             q.clamp(0, frames - 1) for q in (queries.source, queries.target, queries.reference)
@@ -67,8 +71,8 @@ class QueryEmbedding(nn.Module):
         ]
         return tokens + self.camera_relation_embed(torch.cat(identities, -1))
 
-    def fourier[B: IntVar, Q: IntVar](self, uv: Tensor[[B, Q, 2]]) -> Tensor[[B, Q, int]]:
-        """`[sin uω, cos uω, sin vω, cos vω]`, ω_k = 100^(−k / (width/4))."""
+    def fourier[B: IntVar, Q: IntVar](self, uv: Tensor[[B, Q, *UV]]) -> Tensor[[B, Q, int]]:
+        """`[sin uω, cos uω, sin vω, cos vω]`, `ω_k = 100^(−k / (D/4))`, k < D/4 (uv in [−1, 1])."""
 
         per_axis = self.width // 4
         omega = 1.0 / FOURIER_BASE ** (
@@ -78,7 +82,7 @@ class QueryEmbedding(nn.Module):
         return torch.cat((u.sin(), u.cos(), v.sin(), v.cos()), -1)
 
     def crops[B: IntVar, S: IntVar, H: IntVar, W: IntVar, Q: IntVar](
-        self, images: Tensor[[B, S, 3, H, W]], frame: Tensor[[B, Q]], xy: Tensor[[B, Q, 2]]
+        self, images: Tensor[[B, S, *RGB, H, W]], frame: Tensor[[B, Q]], xy: Tensor[[B, Q, *UV]]
     ) -> Tensor[[B, Q, int]]:
         """Raw-RGB `crop × crop` patch at the nearest pixel, replicate-padded, channel-major."""
 

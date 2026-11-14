@@ -61,6 +61,11 @@ class Tracks[M: IntVar, V: IntVar, C: IntVar]:
 
     Observation `m` sees track `track[m]` in view `view[m]` at native `pixel[m]`; `moving[m]`
     when its track's point moves (it is then rigid with some link, or an outlier).
+
+    `view_scaling [V]`, when a camera's recorded intrinsics change between episodes (randomising
+    simulators): view v sees through `view_scaling[v] · intrinsics[view_camera[v]]`, i.e. its
+    episode's recorded K times the inverse of the reference episode's (identity where they are
+    equal). A focal correction of the camera then scales every episode's focal alike.
     """
 
     view_camera: Tensor[[V]]
@@ -72,6 +77,13 @@ class Tracks[M: IntVar, V: IntVar, C: IntVar]:
     moving: Tensor[[M]]
     intrinsics: Tensor[[C, 3, 3]]  # median of ARROW's per-view fits (initialisation only)
     lens: Lens | None = None  # distortion per camera; None: ideal pinholes
+    view_scaling: Tensor[[V, 3, 3]] | None = None  # None: every view sees its camera's K
+
+    def view_intrinsics(self, intrinsics: Tensor[[C, 3, 3]]) -> Tensor[[V, 3, 3]]:
+        """Each view's intrinsics from its camera's `intrinsics` (with `view_scaling`)."""
+
+        k = intrinsics[self.view_camera]
+        return k if self.view_scaling is None else self.view_scaling.to(k) @ k
 
 
 @dataclass(frozen=True, slots=True)

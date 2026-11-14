@@ -19,7 +19,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import decode_video_frames
 
 from .episode import CameraStream, Episode, JointMap
-from .priors import CameraPrior, DatasetPriors, load_episode_record, load_priors
+from .priors import PRIORS, CameraPrior, DatasetPriors, load_episode_record, load_priors
 
 IMAGE_PREFIX = "observation.images."
 
@@ -68,12 +68,20 @@ def load_episode(
         fps=meta.fps / stride,
         state=state,
         joints=priors.joint_map(_joints(robot, priors.replaced)),
-        robot=root / "meta" / robot["urdf"],
+        robot=_description(root, robot, priors),
         cameras=tuple(cameras),
         priors=priors,
         station=None if record is None else record.station,
         base_motion=None if priors.base_odometry is None else _base_motion(priors, rows),
     )
+
+
+def _description(root: Path, robot: dict, priors: DatasetPriors) -> Path:
+    """The robot description: the corrected one of the priors, else the delivered one."""
+
+    if priors.description:
+        return PRIORS / priors.description
+    return root / "meta" / robot["urdf"]
 
 
 def _base_motion(priors: DatasetPriors, rows) -> torch.Tensor:  # noqa: ANN001

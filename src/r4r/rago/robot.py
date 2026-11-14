@@ -145,10 +145,18 @@ class CameraMount:
             position = torch.tensor(prior.position, dtype=torch.float64)
             pose = tuple(map(tuple, se3.from_rotation_translation(rotation, position).tolist()))
         if not moving:
-            # Free: the bundle's prior is centred on the description's pose, not on the
-            # camera's start (PnP or a recorded per-episode pose), so a finite range here
-            # would pull the camera towards the origin (DROID: 12-22 cm)
+            # Episode scope: the priors' ranges bound the departure from each episode's
+            # start (PnP or a recorded per-episode pose; `rig` centres them there). Dataset
+            # scope with no pose: free, since its prior would be centred on the description's
+            # pose (the origin), which pulled DROID's exteriors 12-22 cm
             unknown = (math.inf, math.inf)
+            if prior.scope == "episode":
+                unknown = (
+                    prior.position_range,
+                    math.radians(prior.orientation_range_deg)
+                    if prior.orientation_range_deg < 180.0
+                    else math.inf,
+                )
         else:
             unknown = (SEARCH_TRANSLATION_STD, SEARCH_ROTATION_STD)
         return cls(

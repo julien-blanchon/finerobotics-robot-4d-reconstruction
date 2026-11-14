@@ -131,13 +131,18 @@ def _recorded_intrinsics(
     return torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
 
 
-def recorded_pose(text: str, source: PoseColumn) -> torch.Tensor:
-    """A camera's recorded pose (OpenCV axes) from one row of its JSON column: [4, 4]."""
+def recorded_pose(text: str | torch.Tensor, source: PoseColumn) -> torch.Tensor:
+    """A camera's recorded pose (OpenCV axes) from one row of its column: [4, 4]. A JSON
+    string is walked along the source's path; a numeric row is x, y, z, qw, qx, qy, qz."""
 
-    item = json.loads(text)
-    for step in source.path:
-        key, _, value = step.partition("=")
-        item = next(i for i in item if str(i[key]) == value) if value else item[key]
+    if isinstance(text, str):
+        item = json.loads(text)
+        for step in source.path:
+            key, _, value = step.partition("=")
+            item = next(i for i in item if str(i[key]) == value) if value else item[key]
+    else:
+        values = torch.as_tensor(text, dtype=torch.float64).flatten()
+        item = {"position": values[:3].tolist(), "orientation": values[3:7].tolist()}
     q = torch.tensor(item["orientation"], dtype=torch.float64)
     rotation = se3.quaternion_to_matrix(q / q.norm())
     if source.axes == "forward_left_up":

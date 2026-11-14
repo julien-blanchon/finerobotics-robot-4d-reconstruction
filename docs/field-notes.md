@@ -130,6 +130,12 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **A per-episode reference calibration is only a start:** DROID's own calibration is off in
   some episodes, and the rig can drift on a dark episode where it is right. Tight ranges, and
   read every episode's overlay.
+- **Where a range is measured from:** a dataset-scope camera's range is measured from the
+  description's (prior) pose; an episode-scope camera's from that episode's start (recorded or
+  estimated placement). Ranges on a camera with no prior pose used to pull it towards the robot
+  origin (DROID exteriors 12–22 cm).
+- **A consistent offset across episodes points at the reference, not the episodes:** M1's free
+  base came out ~3 cm low in all 4 episodes; suspect the frame the placement was derived from.
 - **A mount written in the priors is not searched by `r4r rig`:** refine a by-eye mount with
   `r4r fit` first.
 - **Static camera starts:**

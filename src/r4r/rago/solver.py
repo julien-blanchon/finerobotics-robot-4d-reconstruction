@@ -7,8 +7,10 @@ solves the reweighted normal equations (IRLS: weight `w / (1 + s)`, the robust c
 
     (H + λ diag H) Δ = −g,   H = Σ ω Jᵀ J + Jₚᵀ Jₚ / T,   g = Σ ω Jᵀ r + Jₚᵀ rₚ / T
 
-accepting Δ only if the true robust objective decreases (λ shrinks), else retrying with a
-larger λ. Tens of steps replace the Adam loop's ~1000.
+with `ω` the IRLS weights `ρ'(s) · w / Σ w`, `J = ∂r/∂x`, `(Jₚ, rₚ)` the priors' Jacobian
+and residuals (`rig.prior_residuals`) and `T` = `steps`, the prior's normaliser. Δ is accepted
+only if the true robust objective decreases, and then λ ← λ/3; otherwise λ ← 4λ and the step
+is retried (up to `max_damping`). Tens of steps replace the Adam loop's ~1000.
 
 The Jacobian of the residuals comes from forward-mode products, compressed: an observation
 depends on a single row of each scoped element (the dataset row, or its episode's row: tracks
@@ -32,7 +34,10 @@ import torch
 from torch import nn
 
 if TYPE_CHECKING:
+    from shape_extensions import IntVar
     from torch import Tensor
+
+    from r4r.types import UV, VxVyVzWxWyWz
 
     from .rig import Corrections, Rig
 
@@ -52,15 +57,15 @@ class LMConfig:
 class _Call(nn.Module):
     """Calls a closure with the rig's parameters swapped (`torch.func.functional_call`)."""
 
-    def __init__(self, rig: Rig) -> None:
+    def __init__(self, rig: Rig[int, int, int]) -> None:
         super().__init__()
         self.rig = rig
 
-    def forward(self, fn: Callable[[], object]) -> object:
+    def forward[R](self, fn: Callable[[], R]) -> R:
         return fn()
 
 
-def supports(rig: Rig) -> bool:
+def supports(rig: Rig[int, int, int]) -> bool:
     """Whether every free row is dataset or episode scope (no frame-scope walk)."""
 
     return not any(bool((c.active & (c.previous >= 0)).any()) for c in (rig.cameras, rig.bodies))
@@ -71,8 +76,8 @@ class _Columns:
     """The free unknowns as one vector: camera rows, body rows (6 each), then the free entries
     of the dataset-wide vectors (`VECTORS`)."""
 
-    camera: Tensor[[int, 6]]  # column of each (row, dof), −1 where held
-    body: Tensor[[int, 6]]
+    camera: Tensor[[int, *VxVyVzWxWyWz]]  # column of each (row, dof), −1 where held
+    body: Tensor[[int, *VxVyVzWxWyWz]]
     vectors: dict[str, Tensor[[int]]]  # per vector: column of each entry, −1 where held
     count: int
 
@@ -86,11 +91,11 @@ VECTORS = {
 }
 
 
-def _vectors(rig: Rig) -> list[str]:
+def _vectors(rig: Rig[int, int, int]) -> list[str]:
     return [name for name in VECTORS if getattr(rig, name, None) is not None]
 
 
-def _columns(rig: Rig) -> _Columns:
+def _columns(rig: Rig[int, int, int]) -> _Columns:
     device = rig.log_focal.device
     next_column = 0
     tables = []
@@ -111,8 +116,8 @@ def _columns(rig: Rig) -> _Columns:
     return _Columns(tables[0], tables[1], vectors, next_column)
 
 
-def _apply(rig: Rig, columns: _Columns, x: Tensor[[int]]) -> dict[str, Tensor]:
-    """The rig's parameters moved by `x` (differentiable in `x`)."""
+def _apply(rig: Rig[int, int, int], columns: _Columns, x: Tensor[[int]]) -> dict[str, Tensor]:
+    """The rig's parameters moved by `x` (differentiable in `x`), by name (each its own rank)."""
 
     out = {}
     for name, corrections, table in (
@@ -133,9 +138,9 @@ def _apply(rig: Rig, columns: _Columns, x: Tensor[[int]]) -> dict[str, Tensor]:
     return out
 
 
-def _colors(
-    rig: Rig, columns: _Columns, time: Tensor[[int]], track: Tensor[[int]]
-) -> tuple[Tensor[[int, int]], Tensor[[int, int]]]:
+def _colors[M: IntVar](
+    rig: Rig[int, int, int], columns: _Columns, time: Tensor[[M]], track: Tensor[[M]]
+) -> tuple[Tensor[[int, int]], Tensor[[int, M]]]:
     """Compressed directions: per color, its tangent `[K, P]` and, per observation, the
     column its entry belongs to `[K, N]` (−1: none)."""
 
@@ -154,14 +159,14 @@ def _colors(
     return torch.stack(tangents), torch.stack(owners)
 
 
-def _add_element_colors(
-    corrections: Corrections,
-    table: Tensor[[int, 6]],
-    time: Tensor[[int]],
-    track: Tensor[[int]],
+def _add_element_colors[M: IntVar](
+    corrections: Corrections[int],
+    table: Tensor[[int, *VxVyVzWxWyWz]],
+    time: Tensor[[M]],
+    track: Tensor[[M]],
     count: int,
-    tangents: list[Tensor],
-    owners: list[Tensor],
+    tangents: list[Tensor[[int]]],
+    owners: list[Tensor[[M]]],
 ) -> None:
     for element in range(corrections.row.shape[0]):
         rows = (corrections.owner == element) & corrections.active
@@ -184,7 +189,7 @@ def _add_element_colors(
             owners.append(table[row_of, dof])
 
 
-def _spanning(row_of: Tensor[[int]], track: Tensor[[int]]) -> bool:
+def _spanning[M: IntVar](row_of: Tensor[[M]], track: Tensor[[M]]) -> bool:
     """Whether any track's observations use more than one row."""
 
     count = int(track.max()) + 1
@@ -198,12 +203,12 @@ def _spanning(row_of: Tensor[[int]], track: Tensor[[int]]) -> bool:
     return bool((low[used] != high[used]).any())
 
 
-def levenberg_marquardt(
-    rig: Rig,
-    residual_fn: Callable[[], tuple[Tensor[[int, 2]], Tensor[[int]]]],
-    weight_fn: Callable[[Tensor[[int]]], Tensor[[int]]],
-    time: Tensor[[int]],
-    track: Tensor[[int]],
+def levenberg_marquardt[M: IntVar](
+    rig: Rig[int, int, int],
+    residual_fn: Callable[[], tuple[Tensor[[M, *UV]], Tensor[[M]]]],
+    weight_fn: Callable[[Tensor[[M]]], Tensor[[M]]],
+    time: Tensor[[M]],
+    track: Tensor[[M]],
     steps: int,
     cauchy: float,
     config: LMConfig,
@@ -230,7 +235,7 @@ def levenberg_marquardt(
     def swapped(x: Tensor[[int]]) -> dict[str, Tensor]:
         return {f"rig.{k}": v for k, v in _apply(rig, columns, x).items()}
 
-    def at(x: Tensor[[int]]) -> tuple[Tensor[[int, 2]], Tensor[[int]]]:
+    def at(x: Tensor[[int]]) -> tuple[Tensor[[M, *UV]], Tensor[[M]]]:
         return torch.func.functional_call(call, swapped(x), (residual_fn,))
 
     def prior_at(x: Tensor[[int]]) -> Tensor[[int]]:
@@ -272,11 +277,12 @@ def _damped_step(
     gradient: Tensor[[int]],
     damping: float,
     current: Tensor[[]],
-    objective: Callable[[Tensor], Tensor],
+    objective: Callable[[Tensor[[int]]], Tensor[[3]]],
     config: LMConfig,
 ) -> tuple[Tensor[[int]], Tensor[[3]], float] | None:
-    """The first damping (from `damping` up) whose step lowers the objective: (step, its
-    objective, the next damping); None if none does."""
+    """The first damping (from `damping` up, ×4 per rejection) whose step
+    `Δ = −(H + λ diag H)⁻¹ g` lowers the objective: (Δ, its objective, λ/3 for the next step);
+    None if none does up to `max_damping`."""
 
     # Parameters the data do not constrain (zero rows) keep a damping relative to the others,
     # so the damped system stays solvable
@@ -294,17 +300,17 @@ def _damped_step(
     return None
 
 
-def _normal_equations(
-    at: Callable[[Tensor], tuple[Tensor, Tensor]],
-    prior_at: Callable[[Tensor], Tensor],
-    weight_fn: Callable[[Tensor], Tensor],
+def _normal_equations[M: IntVar](
+    at: Callable[[Tensor[[int]]], tuple[Tensor[[M, *UV]], Tensor[[M]]]],
+    prior_at: Callable[[Tensor[[int]]], Tensor[[int]]],
+    weight_fn: Callable[[Tensor[[M]]], Tensor[[M]]],
     tangents: Tensor[[int, int]],
-    owners: Tensor[[int, int]],
+    owners: Tensor[[int, M]],
     zero: Tensor[[int]],
     cauchy: float,
     steps: int,
 ) -> tuple[Tensor[[int, int]], Tensor[[int]]]:
-    """IRLS normal equations at the current parameters (see module doc)."""
+    """IRLS normal equations `(H, g)` at the current parameters (see module doc)."""
 
     count = len(zero)
     with torch.no_grad():
@@ -341,7 +347,7 @@ def _normal_equations(
     return hessian, gradient
 
 
-def _commit(rig: Rig, columns: _Columns, x: Tensor[[int]]) -> None:
+def _commit(rig: Rig[int, int, int], columns: _Columns, x: Tensor[[int]]) -> None:
     with torch.no_grad():
         moved = _apply(rig, columns, x)
         rig.cameras.delta.copy_(moved["cameras.delta"])

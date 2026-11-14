@@ -277,6 +277,15 @@ def pool(
     episode = torch.cat(
         [torch.full((len(q),), i, device=device) for i, (q, _) in enumerate(episodes)]
     )
+    scaling = None  # per view, when some episode's intrinsics differ (identity elsewhere)
+    if any(t.view_scaling is not None for _, t in episodes):
+        eye = torch.eye(3, dtype=qpos.dtype, device=device)
+        scaling = torch.cat(
+            [
+                eye.expand(len(q), 3, 3) if t.view_scaling is None else t.view_scaling.to(eye)
+                for q, t in episodes
+            ]
+        )
     return (
         qpos,
         replace(
@@ -288,6 +297,7 @@ def pool(
             pixel=torch.cat([t.pixel for t in parts]),
             weight=torch.cat([t.weight for t in parts]),
             moving=torch.cat([t.moving for t in parts]),
+            view_scaling=scaling,
         ),
         episode,
     )

@@ -28,7 +28,10 @@ import torch
 from r4r.geometry import se3
 
 if TYPE_CHECKING:
+    from shape_extensions import IntVar
     from torch import Tensor
+
+    from r4r.types import WXYZ, XY, XYZ, Mat4x4, XYTheta
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +43,11 @@ class CasterGeometry:
     signs: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
 
-def from_poses(x: Tensor[[int]], y: Tensor[[int]], theta: Tensor[[int]]) -> Tensor[[int, 4, 4]]:
-    """Base motion from planar poses in any fixed world frame."""
+def from_poses[T: IntVar](
+    x: Tensor[[T]], y: Tensor[[T]], theta: Tensor[[T]]
+) -> Tensor[[T, *Mat4x4]]:
+    """Base motion from planar poses in any fixed world frame: `M_t = P_0⁻¹ P_t`,
+    `P_t = [R_z(θ_t), (x_t, y_t, 0); 0, 1]` (metres, radians)."""
 
     pose = torch.eye(4, dtype=x.dtype, device=x.device).repeat(len(x), 1, 1)
     c, s = theta.cos(), theta.sin()
@@ -50,18 +56,22 @@ def from_poses(x: Tensor[[int]], y: Tensor[[int]], theta: Tensor[[int]]) -> Tens
     return se3.inverse(pose[:1]) @ pose
 
 
-def from_poses_3d(position: Tensor[[int, 3]], quaternion: Tensor[[int, 4]]) -> Tensor[[int, 4, 4]]:
+def from_poses_3d[T: IntVar](
+    position: Tensor[[T, *XYZ]], quaternion: Tensor[[T, *WXYZ]]
+) -> Tensor[[T, *Mat4x4]]:
     """Base motion from full poses (position, quaternion w x y z) in any fixed world frame: a
-    recorded root pose (simulator free joint, a legged robot's state estimator)."""
+    recorded root pose (simulator free joint, a legged robot's state estimator).
+    `M_t = P_0⁻¹ P_t` as in `from_poses`."""
 
     rotation = se3.quaternion_to_matrix(quaternion / quaternion.norm(dim=-1, keepdim=True))
     pose = se3.from_rotation_translation(rotation, position)
     return se3.inverse(pose[:1]) @ pose
 
 
-def from_steps(step: Tensor[[int, 3]]) -> Tensor[[int, 4, 4]]:
+def from_steps[T: IntVar](step: Tensor[[T, *XYTheta]]) -> Tensor[[T, *Mat4x4]]:
     """Base motion from per-step body-frame displacements (dx, dy, dθ) between consecutive
-    timesteps (row t: from t − 1 to t; row 0 ignored), each a constant-twist arc."""
+    timesteps (row t: from t − 1 to t; row 0 ignored), each a constant-twist arc:
+    `M_t = M_{t−1} · exp(dx, dy, 0, 0, 0, dθ)`."""
 
     zero = torch.zeros_like(step[:, 0])
     twist = torch.stack((step[:, 0], step[:, 1], zero, zero, zero, step[:, 2]), -1)
@@ -73,17 +83,20 @@ def from_steps(step: Tensor[[int, 3]]) -> Tensor[[int, 4, 4]]:
     return torch.stack(poses)
 
 
-def from_velocity(velocity: Tensor[[int, 3]], time: Tensor[[int]]) -> Tensor[[int, 4, 4]]:
-    """Base motion from body-frame planar velocities (vx, vy, ω) at timestamps `time` (s)."""
+def from_velocity[T: IntVar](
+    velocity: Tensor[[T, *XYTheta]], time: Tensor[[T]]
+) -> Tensor[[T, *Mat4x4]]:
+    """Base motion from body-frame planar velocities (vx, vy, ω) at timestamps `time` (s):
+    trapezoidal steps `Δ_t = ½ (u_{t−1} + u_t) (t_t − t_{t−1})`, integrated by `from_steps`."""
 
     dt = torch.diff(time, prepend=time[:1])
     mean = torch.cat((velocity[:1], 0.5 * (velocity[1:] + velocity[:-1])))
     return from_steps(mean * dt[:, None])
 
 
-def swerve_twist(
-    steering: Tensor[[int, int]], speed: Tensor[[int, int]], wheels: Tensor[[int, 2]]
-) -> Tensor[[int, 3]]:
+def swerve_twist[T: IntVar, NWheel: IntVar](
+    steering: Tensor[[T, NWheel]], speed: Tensor[[T, NWheel]], wheels: Tensor[[NWheel, *XY]]
+) -> Tensor[[T, *XYTheta]]:
     """Body-frame twist (vx, vy, ω) of a swerve drive per timestep, by least squares over its
     wheels: wheel i at (x_i, y_i), steered to θ_i and rolling at s_i (m/s) moves at
     s_i (cos θ_i, sin θ_i) = (vx − ω y_i, vy + ω x_i)."""
@@ -97,9 +110,9 @@ def swerve_twist(
     return target.reshape(len(target), -1) @ torch.linalg.pinv(design).T
 
 
-def caster_steps(
-    wheels: Tensor[[int, 2]], steering: Tensor[[int]] | None, geometry: CasterGeometry
-) -> Tensor[[int, 3]]:
+def caster_steps[T: IntVar](
+    wheels: Tensor[[T, 2]], steering: Tensor[[T]] | None, geometry: CasterGeometry
+) -> Tensor[[T, *XYTheta]]:
     """Per-step body-frame displacements (dx, dy, dθ) from wheel angles (left, right) and the
     steering angle (None: no steering, a plain differential drive)."""
 

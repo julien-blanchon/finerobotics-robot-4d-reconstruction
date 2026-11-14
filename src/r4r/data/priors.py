@@ -35,7 +35,8 @@ the dataset, per episode (e.g. a static camera re-placed between episodes) or pe
 `bodies` are elements of the description whose offset from their parent is not exactly known
 (a second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the
 video resolution, a property of the lens: fixed across episodes unless `focal_range`
-(relative) says how far it may vary; `aspect` (fy / fx, default 1) for non-square pixels. `lens` is `pinhole` (radial `distortion`: OpenCV's
+(relative) says how far it may vary; `aspect` (fy / fx, default 1) for non-square pixels.
+`lens` is `pinhole` (radial `distortion`: OpenCV's
 k1, k2, k3) or `fisheye` (Kannala–Brandt, OpenCV fisheye's k1..k4); `distortion_range` is the
 prior std of each coefficient when fitting refines them (0: held; default 0 when the
 coefficients are given, wide for a fisheye without them).

@@ -126,6 +126,9 @@ def search_mount(
         moving=tracks.moving[keep].repeat(copies),
         intrinsics=intrinsics,
         lens=None if tracks.lens is None else tracks.lens.select(view.new_full((copies,), c)),
+        view_scaling=None
+        if tracks.view_scaling is None
+        else tracks.view_scaling[views].repeat(copies, 1, 1),
     )
     copy_names = tuple(f"{camera}#{i}" for i in range(copies))
     # Prior centres: the description's mount, moved to the origin of other bodies

@@ -242,7 +242,7 @@ class Fit:
                     "score": round(fit.score, 4),
                 },
             }
-            print(f"wrote {write_camera(root, self.camera, values)}")
+            print(f"wrote {write_camera(root, self.camera, values, station_of(loaded))}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +299,11 @@ def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: flo
             {c.name: c.frames for c in e.cameras if c.name in names},
             None if e.base_motion is None else e.base_motion.to(device),
             {c.name: c.pose.to(device) for c in e.cameras if c.pose is not None},
+            {
+                c.name: c.intrinsics.to(device)
+                for c in e.cameras
+                if c.name in names and c.intrinsics is not None
+            },
         )
         for e in loaded
     ]
@@ -389,6 +394,7 @@ class Rig:
                 "names": names,
                 "lengths": [len(e.qpos) for e in episodes],
                 "intrinsics": fit.intrinsics.cpu(),
+                "episode_intrinsics": fit.episode_intrinsics.detach().cpu(),
                 "world_from_body": fit.world_from_body.detach().float().cpu(),
                 "mounts_at": fit.mounts_at.detach().cpu(),
                 "camera_body": [robot.camera_body[robot.camera(n)] for n in names],
@@ -406,6 +412,8 @@ class Rig:
                     "focal_range": stream.prior.focal_range if known_focal[c] else 0.0,
                     **distortion_values(fit.lens, c, stream.prior),
                 }
+                if _focal_varies(fit, c):  # recorded per episode: no single focal to write
+                    del values["focal"], values["focal_range"]
                 prior = robot.free_cameras.get(stream.name)
                 if not stream.moving and prior is not None and prior.scope == "dataset":
                     # A static camera fixed for the dataset: its pose in the base frame
@@ -433,7 +441,7 @@ class Rig:
                             round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
                         ],
                     }
-                print(f"wrote {write_camera(root, stream.name, values)}")
+                print(f"wrote {write_camera(root, stream.name, values, station_of(loaded))}")
             for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
                 if robot.free_bodies[name].scope != "dataset":
                     continue
@@ -448,7 +456,22 @@ class Rig:
                     "orientation_range_deg": round(max(deg, 0.2), 3),
                     "fitted": {"episodes": list(self.episodes), "groups": self.groups},
                 }
-                print(f"wrote {write_body(root, name, body)}")
+                print(f"wrote {write_body(root, name, body, station_of(loaded))}")
+
+
+def _focal_varies(fit, camera: int) -> bool:  # noqa: ANN001
+    """Whether the camera's intrinsics differ between the solved episodes."""
+
+    k = fit.episode_intrinsics[:, camera]
+    return bool((k != k[:1]).any())
+
+
+def station_of(loaded) -> str | None:  # noqa: ANN001
+    """Where fitted values go: the episodes' station when the priors keep per-station
+    values (`stations`), else the dataset level (None)."""
+
+    first = loaded[0]
+    return first.station if first.station is not None and first.priors.stations else None
 
 
 def distortion_values(lens, camera: int, prior) -> dict[str, object]:  # noqa: ANN001
@@ -533,10 +556,16 @@ def _print_rig(fit, streams, robot, episodes, free, disagreement) -> None:  # no
         pose = fit.mounts[c].cpu()
         where = robot.body_names[robot.camera_body[robot.camera(stream.name)]]
         lens = distortion_values(fit.lens, c, stream.prior).get("distortion")
+        focal = fit.episode_intrinsics[:, c, 0, 0]
         print(
             f"{stream.name} on {where}: position "
             f"{[round(v, 4) for v in pose[:3, 3].tolist()]} m, "
             f"focal {float(fit.intrinsics[c, 0, 0]):.1f} px"
+            + (
+                f" (per episode {float(focal.min()):.1f}-{float(focal.max()):.1f})"
+                if _focal_varies(fit, c)
+                else ""
+            )
             + ("" if lens is None else f", {stream.prior.lens} distortion {lens}")
         )
     for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
@@ -748,6 +777,7 @@ class Preview:
             print(f"wrote {self.output} ({count} frames)")
 
 
+@dataclass(frozen=True, slots=True)
 class Focal:
     """A camera's focal length from ARROW (gen2 adapter): a draft when nothing is recorded."""
 
@@ -858,7 +888,7 @@ def _write_poses(path: Path, number: int, stride: int, rig: _RigInputs, fit) -> 
 
     world = fit.world_from_body.detach().cpu().double()
     mounts = fit.mounts_at.detach().cpu().double()
-    k = fit.intrinsics.detach().cpu().double()
+    k = fit.episode_intrinsics[0].detach().cpu().double()  # one episode: its own intrinsics
     rows: dict[str, list] = {
         k_: [] for k_ in ("episode", "frame", "camera", "world_from_camera", "fx", "fy", "cx", "cy")
     }

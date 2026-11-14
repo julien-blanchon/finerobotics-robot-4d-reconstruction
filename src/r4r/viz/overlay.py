@@ -200,7 +200,13 @@ def overlay_frames(
     steps = solution["lengths"][episode_index]
     world = solution["world_from_body"][start : start + steps].double().numpy()
     mounts = solution["mounts_at"][:, start : start + steps].double().numpy()
-    intrinsics = solution["intrinsics"].double().numpy()
+    # Per episode when saved so (recorded intrinsics that change between episodes)
+    per_episode = solution.get("episode_intrinsics")
+    intrinsics = (
+        (solution["intrinsics"] if per_episode is None else per_episode[episode_index])
+        .double()
+        .numpy()
+    )
     # Lens per camera (absent from pinhole-only solutions): distortion [C, 4], fisheye [C]
     distortion, fisheye = solution.get("distortion"), solution.get("fisheye")
     geoms, frames = surfaces(model), leaves(model)

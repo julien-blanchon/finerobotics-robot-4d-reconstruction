@@ -23,6 +23,8 @@ take precedence over `meta/robot.json` and the camera feature info:
 }
 ```
 
+`state_feature` names the joint-state feature when `meta/robot.json` names a wrong one (a list:
+the features' columns concatenated, e.g. leg joints recorded apart from the arms).
 `description` replaces the delivered robot description by a corrected one kept under
 `priors/` (fixes to the URDF/MJCF itself: wrong joints, frames, meshes). `joints` add or
 replace (by URDF joint name) entries of the state mapping; `removed_joints`
@@ -39,7 +41,21 @@ video resolution, a property of the lens: fixed across episodes unless `focal_ra
 `lens` is `pinhole` (radial `distortion`: OpenCV's
 k1, k2, k3) or `fisheye` (Kannala–Brandt, OpenCV fisheye's k1..k4); `distortion_range` is the
 prior std of each coefficient when fitting refines them (0: held; default 0 when the
-coefficients are given, wide for a fisheye without them).
+coefficients are given, wide for a fisheye without them). `intrinsics` reads a camera's
+intrinsics from a column of the dataset itself, per episode (simulators that randomise the
+focal): `{"column": "publisher.<name>_intrinsics", "layout": "fx_fy_cx_cy" | "matrix",
+"size": [w, h], "resize": "stretch" | "height"}`: `size` is the resolution the values are
+given at (default: the video's), `resize` how they map to the video (`stretch`: each axis
+scaled; `height`: the same vertical field of view, centred). `pose` reads a camera's recorded
+pose per episode from a JSON string column of the dataset (simulators that re-place cameras
+per episode and record them with the episode, too many episodes for a table):
+`{"column": "publisher.episode.extra_info", "path": ["config", "cameras", "name=front"],
+"axes": "forward_left_up"}`: `path` walks the JSON (`key=value` picks the list item whose `key`
+equals `value`) to an object with `position` (x, y, z) and `orientation` (w, x, y, z) in the
+robot base frame (moving camera: on its link); `axes` are the recorded camera axes (`opencv`,
+or `forward_left_up`: x forward, y left, z up, Isaac Sim's "world" camera axes). An episodes
+table pose takes precedence. `ignore` leaves a camera out (one that rides on no robot body,
+e.g. worn by a person).
 """
 
 from __future__ import annotations
@@ -54,6 +70,25 @@ from typing import Literal
 from .episode import JointMap
 
 PRIORS = Path(__file__).resolve().parents[3] / "priors"
+
+
+@dataclass(frozen=True, slots=True)
+class IntrinsicsColumn:
+    """Where a dataset records a camera's intrinsics (see the module doc)."""
+
+    column: str
+    layout: Literal["fx_fy_cx_cy", "matrix"] = "fx_fy_cx_cy"
+    size: tuple[int, int] | None = None  # width, height the values are given at
+    resize: Literal["stretch", "height"] = "stretch"
+
+
+@dataclass(frozen=True, slots=True)
+class PoseColumn:
+    """Where a dataset records a camera's pose per episode (see the module doc)."""
+
+    column: str
+    path: tuple[str, ...]
+    axes: Literal["opencv", "forward_left_up"] = "opencv"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +113,12 @@ class CameraPrior:
     # How often the mount may change within its ranges: dataset, episode (e.g. a static camera
     # re-placed between episodes) or frame
     scope: Literal["dataset", "episode", "frame"] = "dataset"
+    # Intrinsics recorded in the dataset's own columns (per episode), if any
+    intrinsics: IntrinsicsColumn | None = None
+    # Pose recorded in the dataset's own JSON column (per episode), if any
+    pose: PoseColumn | None = None
+    # Left out of every command (a camera on no robot body, e.g. worn by a person)
+    ignore: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,14 +137,15 @@ class BodyPrior:
 @dataclass(frozen=True, slots=True)
 class BaseOdometry:
     """Where a mobile base's motion is recorded (see `r4r.rago.odometry`): `feature` columns
-    `columns` holding planar poses (x, y, θ or x, y, qz, qw), body-frame velocities
-    (vx, vy, ω), wheel angles (left, right[, steering]) of a caster or differential drive
-    with its geometry, or a swerve drive's steering angles (`columns`) and wheel ground speeds
-    (m/s, `speed_columns` of `speed_feature`, default `feature`) with each wheel's contact
-    point (x, y) in the base frame (`wheels`)."""
+    `columns` holding planar poses (x, y, θ or x, y, qz, qw), full poses (x, y, z, qw, qx, qy,
+    qz: list the columns in that order), body-frame velocities (vx, vy, ω), wheel angles (left,
+    right[, steering]) of a caster or differential drive with its geometry, or a swerve drive's
+    steering angles (`columns`) and wheel ground speeds (m/s, `speed_columns` of
+    `speed_feature`, default `feature`) with each wheel's contact point (x, y) in the base
+    frame (`wheels`)."""
 
     kind: Literal["pose", "velocity", "caster", "swerve"]
-    feature: str
+    feature: str | tuple[str, ...]  # several: their columns concatenated
     columns: tuple[int, ...]
     radius: float | None = None
     half_track: float | None = None
@@ -127,10 +169,17 @@ class DatasetPriors:
     # (e.g. `descriptions/<embodiment>/robot.xml`, shared by an embodiment's datasets). Meshes
     # may point back into the delivery (absolute `meshdir` / filenames).
     description: str | None = None
+    # The feature holding the joint state, when `meta/robot.json` names a wrong one
+    state_feature: str | tuple[str, ...] | None = None  # several: concatenated
     # Kinematic refinement in `r4r rig` (prior stds; absent: held): joint-encoder offsets
     # (`joint_offset_deg` for hinges, `joint_offset_mm` for slides, optionally only `joints`)
     # and a video/joint time offset on top of `state_shift` (`time_offset_frames`)
     kinematics: dict | None = None
+    # Per-station overrides (raw priors fields `cameras`, `bodies`, set on top of the
+    # dataset's, entry by entry): {station: {"cameras": {...}, "bodies": {...}}}
+    stations: dict = field(default_factory=dict)
+    # The raw dataset-level `cameras` and `bodies` (for merging station overrides)
+    raw: dict = field(default_factory=dict, repr=False, compare=False)
     notes: str = ""
 
     @property
@@ -143,6 +192,18 @@ class DatasetPriors:
         """The dataset's joint mapping with these priors applied."""
 
         return tuple(j for j in metadata if j.name not in self.replaced) + self.joints
+
+    def for_station(self, station: str | None) -> DatasetPriors:
+        """These priors with a station's overrides (cameras, bodies) applied, if any."""
+
+        override = self.stations.get(str(station)) if station is not None else None
+        if not override:
+            return self
+        from dataclasses import replace
+
+        cameras = _merged(self.raw.get("cameras", {}), override.get("cameras", {}))
+        bodies = _merged(self.raw.get("bodies", {}), override.get("bodies", {}))
+        return replace(self, cameras=_cameras(cameras), bodies=_bodies(bodies))
 
 
 def priors_path(root: Path) -> Path:
@@ -168,39 +229,13 @@ def load_priors(root: Path) -> DatasetPriors:
         )
         for j in raw.get("joints", [])
     )
-    cameras = {
-        name: CameraPrior(
-            mount=c.get("mount"),
-            link=c.get("link"),
-            position=tuple(c["position"]) if c.get("position") else None,
-            position_range=float(c.get("position_range", math.inf)),
-            orientation=tuple(c["orientation"]) if c.get("orientation") else None,
-            orientation_range_deg=float(c.get("orientation_range_deg", 180.0)),
-            lens=c.get("lens", "pinhole"),
-            focal=c.get("focal"),
-            focal_range=c.get("focal_range"),
-            aspect=float(c.get("aspect", 1.0)),
-            distortion=tuple(c["distortion"]) if c.get("distortion") is not None else None,
-            distortion_range=c.get("distortion_range"),
-            scope=c.get("scope", "dataset"),
-        )
-        for name, c in raw.get("cameras", {}).items()
-    }
-    bodies = {
-        name: BodyPrior(
-            float(b["position_range"]),
-            float(b["orientation_range_deg"]),
-            b.get("scope", "dataset"),
-            tuple(b["position"]) if b.get("position") else None,
-            tuple(b["orientation"]) if b.get("orientation") else None,
-        )
-        for name, b in raw.get("bodies", {}).items()
-    }
+    cameras = _cameras(raw.get("cameras", {}))
+    bodies = _bodies(raw.get("bodies", {}))
     odometry = raw.get("base_odometry")
     if odometry is not None:
         odometry = BaseOdometry(
             odometry["kind"],
-            odometry["feature"],
+            _feature(odometry["feature"]),
             tuple(odometry["columns"]),
             odometry.get("radius"),
             odometry.get("half_track"),
@@ -219,9 +254,79 @@ def load_priors(root: Path) -> DatasetPriors:
         state_shift=int(raw.get("state_shift", 0)),
         cameras=cameras,
         description=raw.get("description"),
+        state_feature=_feature(raw.get("state_feature")),
         kinematics=raw.get("kinematics"),
+        stations=raw.get("stations", {}),
+        raw={"cameras": raw.get("cameras", {}), "bodies": raw.get("bodies", {})},
         notes=raw.get("notes", ""),
     )
+
+
+def _feature(value: str | list[str] | None) -> str | tuple[str, ...] | None:
+    return tuple(value) if isinstance(value, list) else value
+
+
+def _intrinsics_column(raw: dict | None) -> IntrinsicsColumn | None:
+    if raw is None:
+        return None
+    return IntrinsicsColumn(
+        raw["column"],
+        raw.get("layout", "fx_fy_cx_cy"),
+        tuple(raw["size"]) if raw.get("size") else None,
+        raw.get("resize", "stretch"),
+    )
+
+
+def _pose_column(raw: dict | None) -> PoseColumn | None:
+    if raw is None:
+        return None
+    return PoseColumn(raw["column"], tuple(raw["path"]), raw.get("axes", "opencv"))
+
+
+def _cameras(raw: Mapping[str, dict]) -> dict[str, CameraPrior]:
+    return {
+        name: CameraPrior(
+            mount=c.get("mount"),
+            link=c.get("link"),
+            position=tuple(c["position"]) if c.get("position") else None,
+            position_range=float(c.get("position_range", math.inf)),
+            orientation=tuple(c["orientation"]) if c.get("orientation") else None,
+            orientation_range_deg=float(c.get("orientation_range_deg", 180.0)),
+            lens=c.get("lens", "pinhole"),
+            focal=c.get("focal"),
+            focal_range=c.get("focal_range"),
+            aspect=float(c.get("aspect", 1.0)),
+            distortion=tuple(c["distortion"]) if c.get("distortion") is not None else None,
+            distortion_range=c.get("distortion_range"),
+            scope=c.get("scope", "dataset"),
+            intrinsics=_intrinsics_column(c.get("intrinsics")),
+            pose=_pose_column(c.get("pose")),
+            ignore=bool(c.get("ignore", False)),
+        )
+        for name, c in raw.items()
+    }
+
+
+def _bodies(raw: Mapping[str, dict]) -> dict[str, BodyPrior]:
+    return {
+        name: BodyPrior(
+            float(b["position_range"]),
+            float(b["orientation_range_deg"]),
+            b.get("scope", "dataset"),
+            tuple(b["position"]) if b.get("position") else None,
+            tuple(b["orientation"]) if b.get("orientation") else None,
+        )
+        for name, b in raw.items()
+    }
+
+
+def _merged(base: Mapping[str, dict], override: Mapping[str, dict]) -> dict[str, dict]:
+    """`base` entries with `override`'s fields set on top (entry by entry)."""
+
+    out = {name: dict(values) for name, values in base.items()}
+    for name, values in override.items():
+        out.setdefault(name, {}).update(values)
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,22 +381,30 @@ def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
     )
 
 
-def write_camera(root: Path, camera: str, values: Mapping[str, object]) -> Path:
-    """Set fields of one camera's priors (e.g. a fitted mount), keeping everything else."""
+def write_camera(
+    root: Path, camera: str, values: Mapping[str, object], station: str | None = None
+) -> Path:
+    """Set fields of one camera's priors (e.g. a fitted mount), keeping everything else; under
+    `stations.<station>` when a station is given."""
 
-    return _write(root, "cameras", camera, values)
+    return _write(root, "cameras", camera, values, station)
 
 
-def write_body(root: Path, body: str, values: Mapping[str, object]) -> Path:
+def write_body(
+    root: Path, body: str, values: Mapping[str, object], station: str | None = None
+) -> Path:
     """Set fields of one free body's priors (e.g. a fitted correction), keeping the rest."""
 
-    return _write(root, "bodies", body, values)
+    return _write(root, "bodies", body, values, station)
 
 
-def _write(root: Path, kind: str, name: str, values: Mapping[str, object]) -> Path:
+def _write(
+    root: Path, kind: str, name: str, values: Mapping[str, object], station: str | None
+) -> Path:
     path = priors_path(root)
     raw = json.loads(path.read_text()) if path.exists() else {}
-    raw.setdefault(kind, {}).setdefault(name, {}).update(values)
+    target = raw if station is None else raw.setdefault("stations", {}).setdefault(station, {})
+    target.setdefault(kind, {}).setdefault(name, {}).update(values)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(raw, indent=2) + "\n")
     return path

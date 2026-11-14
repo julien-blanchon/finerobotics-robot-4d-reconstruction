@@ -145,14 +145,18 @@ class CameraMount:
             position = torch.tensor(prior.position, dtype=torch.float64)
             pose = tuple(map(tuple, se3.from_rotation_translation(rotation, position).tolist()))
         if not moving:
-            # Ranges the priors give bound the bundle around the camera's start (PnP or a
-            # recorded per-episode pose); none: free
-            unknown = (
-                prior.position_range,
-                math.radians(prior.orientation_range_deg)
-                if prior.orientation_range_deg < 180.0
-                else math.inf,
-            )
+            # Episode scope: the priors' ranges bound the departure from each episode's
+            # start (PnP or a recorded per-episode pose; `rig` centres them there). Dataset
+            # scope with no pose: free, since its prior would be centred on the description's
+            # pose (the origin), which pulled DROID's exteriors 12-22 cm
+            unknown = (math.inf, math.inf)
+            if prior.scope == "episode":
+                unknown = (
+                    prior.position_range,
+                    math.radians(prior.orientation_range_deg)
+                    if prior.orientation_range_deg < 180.0
+                    else math.inf,
+                )
         else:
             unknown = (SEARCH_TRANSLATION_STD, SEARCH_ROTATION_STD)
         return cls(
@@ -214,7 +218,14 @@ def compile_model(
     drawing the robot; kinematics never needs them, and some are unreadable).
     """
 
-    return _spec(path, meshdir, cameras, bodies, visual).compile()
+    try:
+        return _spec(path, meshdir, cameras, bodies, visual).compile()
+    except ValueError:
+        # Some visual meshes MuJoCo rejects (e.g. Flexiv Rizon4: "mesh_facenormal normal index
+        # out of bounds"): draw the collision geoms instead
+        if not visual:
+            raise
+        return _spec(path, meshdir, cameras, bodies, False).compile()
 
 
 def describe(

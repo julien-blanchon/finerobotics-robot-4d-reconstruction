@@ -41,7 +41,13 @@ video resolution, a property of the lens: fixed across episodes unless `focal_ra
 `lens` is `pinhole` (radial `distortion`: OpenCV's
 k1, k2, k3) or `fisheye` (Kannala–Brandt, OpenCV fisheye's k1..k4); `distortion_range` is the
 prior std of each coefficient when fitting refines them (0: held; default 0 when the
-coefficients are given, wide for a fisheye without them).
+coefficients are given, wide for a fisheye without them). `intrinsics` reads a camera's
+intrinsics from a column of the dataset itself, per episode (simulators that randomise the
+focal): `{"column": "publisher.<name>_intrinsics", "layout": "fx_fy_cx_cy" | "matrix",
+"size": [w, h], "resize": "stretch" | "height"}`: `size` is the resolution the values are
+given at (default: the video's), `resize` how they map to the video (`stretch`: each axis
+scaled; `height`: the same vertical field of view, centred). `ignore` leaves a camera out (one
+that rides on no robot body, e.g. worn by a person).
 """
 
 from __future__ import annotations
@@ -56,6 +62,16 @@ from typing import Literal
 from .episode import JointMap
 
 PRIORS = Path(__file__).resolve().parents[3] / "priors"
+
+
+@dataclass(frozen=True, slots=True)
+class IntrinsicsColumn:
+    """Where a dataset records a camera's intrinsics (see the module doc)."""
+
+    column: str
+    layout: Literal["fx_fy_cx_cy", "matrix"] = "fx_fy_cx_cy"
+    size: tuple[int, int] | None = None  # width, height the values are given at
+    resize: Literal["stretch", "height"] = "stretch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +96,10 @@ class CameraPrior:
     # How often the mount may change within its ranges: dataset, episode (e.g. a static camera
     # re-placed between episodes) or frame
     scope: Literal["dataset", "episode", "frame"] = "dataset"
+    # Intrinsics recorded in the dataset's own columns (per episode), if any
+    intrinsics: IntrinsicsColumn | None = None
+    # Left out of every command (a camera on no robot body, e.g. worn by a person)
+    ignore: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +208,8 @@ def load_priors(root: Path) -> DatasetPriors:
             distortion=tuple(c["distortion"]) if c.get("distortion") is not None else None,
             distortion_range=c.get("distortion_range"),
             scope=c.get("scope", "dataset"),
+            intrinsics=_intrinsics_column(c.get("intrinsics")),
+            ignore=bool(c.get("ignore", False)),
         )
         for name, c in raw.get("cameras", {}).items()
     }
@@ -232,6 +254,17 @@ def load_priors(root: Path) -> DatasetPriors:
 
 def _feature(value: str | list[str] | None) -> str | tuple[str, ...] | None:
     return tuple(value) if isinstance(value, list) else value
+
+
+def _intrinsics_column(raw: dict | None) -> IntrinsicsColumn | None:
+    if raw is None:
+        return None
+    return IntrinsicsColumn(
+        raw["column"],
+        raw.get("layout", "fx_fy_cx_cy"),
+        tuple(raw["size"]) if raw.get("size") else None,
+        raw.get("resize", "stretch"),
+    )
 
 
 @dataclass(frozen=True, slots=True)

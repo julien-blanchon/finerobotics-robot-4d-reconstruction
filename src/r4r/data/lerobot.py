@@ -20,7 +20,14 @@ from lerobot.datasets.video_utils import decode_video_frames
 
 from ..geometry import se3
 from .episode import CameraStream, Episode, JointMap
-from .priors import PRIORS, CameraPrior, DatasetPriors, load_episode_record, load_priors
+from .priors import (
+    PRIORS,
+    CameraPrior,
+    DatasetPriors,
+    IntrinsicsColumn,
+    load_episode_record,
+    load_priors,
+)
 
 IMAGE_PREFIX = "observation.images."
 
@@ -51,10 +58,17 @@ def load_episode(
         name = key.removeprefix(IMAGE_PREFIX)
         frames = None if decode is None or name in decode else torch.empty(0, 3, 0, 0)
         prior = priors.cameras.get(name, CameraPrior())
+        if prior.ignore:
+            continue
         stream = _camera(meta, root, episode, key, timestamps, links.get(key), prior, frames)
         if record is not None and name in record.intrinsics:
             fx, fy, cx, cy = record.intrinsics[name]
             k = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
+            stream = replace(stream, intrinsics=k)
+        elif prior.intrinsics is not None:
+            size = meta.features[key]["shape"][:2]  # height, width
+            column = every.select_columns([prior.intrinsics.column])[:][prior.intrinsics.column]
+            k = _recorded_intrinsics(column, prior.intrinsics, size)
             stream = replace(stream, intrinsics=k)
         # A static camera's pose in the base frame, or a moving camera's mount on its link
         if record is not None and name in record.poses:
@@ -82,6 +96,30 @@ def load_episode(
         station=None if record is None else record.station,
         base_motion=None if priors.base_odometry is None else _base_motion(priors, rows),
     )
+
+
+def _recorded_intrinsics(
+    values: torch.Tensor, source: IntrinsicsColumn, size: tuple[int, int]
+) -> torch.Tensor:
+    """A camera's K at the video resolution `size` (height, width) from its recorded column
+    (the episode's first finite, non-zero row)."""
+
+    values = values.double().flatten(1)
+    finite = values.isfinite().all(1) & (values.abs().sum(1) > 0)
+    row = values[int(finite.nonzero()[0, 0]) if finite.any() else 0]
+    if source.layout == "matrix":
+        fx, fy, cx, cy = (float(row[i]) for i in (0, 4, 2, 5))
+    else:
+        fx, fy, cx, cy = (float(v) for v in row[:4])
+    height, width = size
+    given_width, given_height = source.size or (width, height)
+    if source.resize == "height":  # same vertical field of view, centred
+        scale = height / given_height
+        fx, fy, cx, cy = fx * scale, fy * scale, width / 2, height / 2
+    else:
+        sx, sy = width / given_width, height / given_height
+        fx, fy, cx, cy = fx * sx, fy * sy, cx * sx, cy * sy
+    return torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
 
 
 def _description(root: Path, robot: dict, priors: DatasetPriors) -> Path:

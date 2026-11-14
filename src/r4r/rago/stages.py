@@ -474,14 +474,18 @@ def _static_starts[C: IntVar](
             seen = (observed == c) & (points.count[tracks.track] >= MIN_OBSERVATIONS)
             if int(seen.sum()) < MIN_POINTS:
                 continue
-            size = tuple(e.frames[names[c]].shape[-2:])
-            # This episode's focal over the camera's (1 unless recorded ones change)
-            scale = 1.0
-            if tracks.view_scaling is not None:
-                scale = float(tracks.view_scaling[int((cam == c).nonzero()[0, 0]), 0, 0])
-            prior = float(focal[c]) * scale if known_focal[c] or found[c] else None
+            width = int(e.frames[names[c]].shape[-1])
+            # This episode's K: the camera's at the current focal (fx, fy scaled together),
+            # through its view scaling; `scale` its focal over the camera's (1 unless recorded
+            # ones change)
+            camera_k = intrinsics[c].clone()
+            camera_k[:2, :2] *= focal[c] / intrinsics[c, 0, 0]
+            view_k = tracks.view_intrinsics(camera_k.expand(len(names), 3, 3))
+            k = view_k[int((cam == c).nonzero()[0, 0])]
+            scale = float(k[0, 0] / camera_k[0, 0])
+            known = known_focal[c] or found[c]
             freedom = robot.free_cameras[names[c]]
-            start = _checked_pnp(tracks, points, seen, c, size, prior, mounts[c], freedom)
+            start = _checked_pnp(tracks, points, seen, c, k, width, known, mounts[c], freedom)
             if start is not None:
                 starts[i, c] = start.world_from_camera
                 support[i, c] = start.inliers
@@ -499,20 +503,23 @@ def _checked_pnp[M: IntVar, C: IntVar](
     points: Points[int],
     seen: Tensor[[M]],
     camera: int,
-    size: tuple[int, int],
-    focal: float | None,
+    intrinsics: Tensor[[*Mat3x3]],
+    width: int,
+    known_focal: bool,
     prior: Tensor[[*Mat4x4]],
     freedom: Freedom,
 ) -> CameraStart | None:
-    """PnP start of static `camera` from its `seen` observations of triangulated `points`; None
-    when PnP fails, is degenerate (NaN) or lands outside `_within_prior` (keep the prior)."""
+    """PnP start of static `camera` (seen through `intrinsics`, its focal searched unless
+    `known_focal`) from its `seen` observations of triangulated `points`; None when PnP
+    fails, is degenerate (NaN) or lands outside `_within_prior` (keep the prior)."""
 
     lens = tracks.lens
     start = locate_camera(
         points.point[tracks.track[seen]],
         tracks.pixel[seen],
-        size,
-        focal,
+        intrinsics,
+        width,
+        known_focal,
         None if lens is None else lens.distortion[camera],
         None if lens is None else lens.fisheye[camera],
     )

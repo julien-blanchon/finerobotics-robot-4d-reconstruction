@@ -93,18 +93,22 @@ class CameraStart:
 def locate_camera[N: IntVar](
     points: Tensor[[N, *XYZ]],
     pixels: Tensor[[N, *UV]],
-    size: tuple[int, int],
-    focal: float | None = None,
+    intrinsics: Tensor[[*Mat3x3]],
+    width: int,
+    known_focal: bool = True,
     distortion: Tensor[[*K1K2K3K4]] | None = None,
     fisheye: Scalar | None = None,
 ) -> CameraStart | None:
-    """PnP-RANSAC pose (and focal from a grid when `focal` is None) of a camera; None if no
+    """PnP-RANSAC pose of a camera with `intrinsics` (its focal tried over a grid of
+    `FOCAL_GRID · width`, fx and fy scaled together, unless `known_focal`); None if no
     solution. `distortion`, `fisheye`: its lens (None: an ideal pinhole)."""
 
-    h, w = size
+    base = intrinsics.double().cpu().numpy()
+    fx = float(base[0, 0])
     best = None
-    for f in [focal] if focal is not None else (FOCAL_GRID * w).tolist():
-        k = np.array([[f, 0, (w - 1) / 2], [0, f, (h - 1) / 2], [0, 0, 1]])
+    for f in [fx] if known_focal else (FOCAL_GRID * width).tolist():
+        k = base.copy()
+        k[:2, :2] *= f / fx
         world, image = undistort(points, pixels, torch.from_numpy(k), distortion, fisheye)
         if len(world) < MIN_PNP_POINTS:
             continue

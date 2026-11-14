@@ -106,12 +106,25 @@ class Fit:
     focal: float | None = None
     # Video/joint-state offsets to test (frames), on top of the priors' state_shift
     shifts: tuple[int, ...] = (0,)
+    # Episodes agreeing within (metres, degrees) of the consensus are pooled; large values
+    # pool every episode
+    agreement: tuple[float, float] | None = None
     # Store the result in the camera's priors (mount, focal, ranges from episode agreement)
     write: bool = False
 
-    def run(self) -> None:
+    def _config(self):  # noqa: ANN202
         import math
         from dataclasses import replace
+
+        from r4r.rago.calibrate import FitConfig
+
+        config = replace(FitConfig(), shifts=self.shifts)
+        if self.agreement is not None:
+            config = replace(config, agreement=(self.agreement[0], math.radians(self.agreement[1])))
+        return config
+
+    def run(self) -> None:
+        import math
 
         import torch
 
@@ -119,7 +132,6 @@ class Fit:
         from r4r.data.priors import write_camera
         from r4r.geometry import se3
         from r4r.rago.calibrate import (
-            FitConfig,
             MountFit,
             fit_moving_camera,
             fit_setup,
@@ -144,7 +156,9 @@ class Fit:
             dtype=torch.float64,
             device=device,
         )
-        config = replace(FitConfig(), shifts=self.shifts)
+        if stream.intrinsics is not None:  # known for this episode (per-episode table)
+            k = stream.intrinsics.to(device)
+        config = self._config()
         episodes = []
         for e in loaded:
             frames = next(c for c in e.cameras if c.name == self.camera).frames
@@ -152,6 +166,8 @@ class Fit:
             episodes.append((qpos, video_tracks(frames, k, config.klt)))
         ids = tuple(robot.body(b) for b in bodies)
         focal_range = stream.prior.focal_range if stream.prior.focal else None
+        if stream.intrinsics is not None:
+            focal_range = 0.0
 
         def describe(fit: MountFit) -> str:
             t = [round(v, 4) for v in fit.body_from_camera[:3, 3].tolist()]

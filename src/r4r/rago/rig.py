@@ -32,6 +32,13 @@ values of frame t read at t + τ, linearly interpolated within the episode):
 with priors `o / σ_o` (rad or m) and `τ / σ_τ` (timesteps). Forward kinematics is then
 recomputed at each evaluation; otherwise it is computed once.
 
+τ shifts the joint values only, not the free bodies' starting trajectory (`bodies_at`, e.g. a
+mobile base's odometry, recorded on the joints' clock). Dataset- and episode-scope bodies use
+only its value at their row's first timestep, a start that any correction moves away from. A
+frame-scope body's walk prior compares each step with the start's step at the same frame, so
+with τ ≠ 0 it centres on odometry read τ frames off: its cost is the base's motion over |τ|
+frames against the walk std. Not interpolated: it would make the prior depend on τ, and no
+dataset refines τ with a frame-scope base.
 """
 
 from __future__ import annotations

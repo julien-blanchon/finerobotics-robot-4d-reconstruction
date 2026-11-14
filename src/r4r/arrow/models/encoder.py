@@ -15,6 +15,7 @@ Adapted from https://github.com/ByteDance-Seed/Depth-Anything-3 (Apache-2.0), vi
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -51,10 +52,17 @@ class PatchEmbed(nn.Module):
         return rearrange(self.proj(images), "n c h w -> n (h w) c")
 
 
+# Rewrites the block-13 special tokens: (pretrained tokens [B, S, 1536] in input frame order,
+# reference frame [B] or None when S < 3) → tokens [B, S, 1536] in input frame order. This is the
+# slot where DA3 writes its camera-encoder tokens (pose conditioning); ARROW leaves it unused.
+type SlotHook = Callable[[Tensor, Tensor | None], Tensor]
+
+
 class Encoder(nn.Module):
     """Encode RGB `[B, S, 3, H, W]` in [0, 1] (H, W multiples of 14).
 
     Returns context tokens `[B, S, P, 3072]` and ID tokens `[B, S, 3072]`, in input frame order.
+    `slot` optionally rewrites the block-13 special tokens (see `SlotHook`); None keeps ARROW.
     """
 
     def __init__(self) -> None:
@@ -71,7 +79,7 @@ class Encoder(nn.Module):
         self.register_buffer("image_std", torch.tensor(IMAGENET_STD).view(1, 1, 3, 1, 1))
 
     def forward[B: IntVar, S: IntVar, H: IntVar, W: IntVar](
-        self, images: Tensor[[B, S, 3, H, W]]
+        self, images: Tensor[[B, S, 3, H, W]], slot: SlotHook | None = None
     ) -> tuple[Tensor[[B, S, int, 3072]], Tensor[[B, S, 3072]]]:
         b, f, _, h, w = images.shape
         x = self.tokens((images - self.image_mean) / self.image_std)
@@ -87,7 +95,10 @@ class Encoder(nn.Module):
                     to_reference_first(local_x, reference),
                 )
             if i == FIRST_GLOBAL_BLOCK:
-                x = torch.cat((self.camera_tokens(b, f).to(x.dtype), x[:, :, 1:]), dim=2)
+                special = self.camera_tokens(b, f)
+                if slot is not None:
+                    special = self.rewrite_slot(special, reference, slot)
+                x = torch.cat((special.to(x.dtype), x[:, :, 1:]), dim=2)
 
             if i >= FIRST_GLOBAL_BLOCK and i % 2 == 1:
                 tokens = block(rearrange(x, "b f n c -> b (f n) c"), global_rope)
@@ -134,6 +145,20 @@ class Encoder(nn.Module):
         reference, others = self.camera_token[:, :1], self.camera_token[:, 1:]
         tokens = torch.cat((reference, others.expand(1, f - 1, -1)), dim=1)
         return rearrange(tokens.expand(b, -1, -1), "b f c -> b f 1 c")
+
+    @staticmethod
+    def rewrite_slot(
+        special: Tensor[[int, int, 1, 1536]], reference: Tensor | None, slot: SlotHook
+    ) -> Tensor[[int, int, 1, 1536]]:
+        """Apply `slot` in input frame order (`special` is reference-first when S ≥ 3)."""
+
+        tokens = special[:, :, 0]
+        if reference is not None:
+            tokens = from_reference_first(tokens[:, :, None], reference)[:, :, 0]
+        tokens = slot(tokens, reference)
+        if reference is not None:
+            tokens = to_reference_first(tokens[:, :, None], reference)[:, :, 0]
+        return tokens[:, :, None]
 
     @staticmethod
     def rope(

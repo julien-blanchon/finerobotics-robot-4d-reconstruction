@@ -122,6 +122,10 @@ class DatasetPriors:
     description: str | None = None
     # The feature holding the joint state, when `meta/robot.json` names a wrong one
     state_feature: str | tuple[str, ...] | None = None  # several: concatenated
+    # Kinematic refinement in `r4r rig` (prior stds; absent: held): joint-encoder offsets
+    # (`joint_offset_deg` for hinges, `joint_offset_mm` for slides, optionally only `joints`)
+    # and a video/joint time offset on top of `state_shift` (`time_offset_frames`)
+    kinematics: dict | None = None
     notes: str = ""
 
     @property
@@ -207,6 +211,7 @@ def load_priors(root: Path) -> DatasetPriors:
         cameras=cameras,
         description=raw.get("description"),
         state_feature=_feature(raw.get("state_feature")),
+        kinematics=raw.get("kinematics"),
         notes=raw.get("notes", ""),
     )
 

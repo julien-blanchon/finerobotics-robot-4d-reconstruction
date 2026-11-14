@@ -199,13 +199,15 @@ def compile_model(
     meshdir: Path | None = None,
     cameras: tuple[CameraMount, ...] = (),
     bodies: tuple[BodyMount, ...] = (),
+    visual: bool = False,
 ) -> mujoco.MjModel:
     """Compile an MJCF or URDF file with MuJoCo, adding any `cameras` it does not define.
 
-    `meshdir` overrides where meshes are read.
+    `meshdir` overrides where meshes are read. `visual`: keep a URDF's visual meshes (for
+    drawing the robot; kinematics never needs them, and some are unreadable).
     """
 
-    return _spec(path, meshdir, cameras, bodies).compile()
+    return _spec(path, meshdir, cameras, bodies, visual).compile()
 
 
 def describe(
@@ -230,10 +232,14 @@ def _spec(
     meshdir: Path | None,
     cameras: tuple[CameraMount, ...],
     bodies: tuple[BodyMount, ...] = (),
+    visual: bool = False,
 ) -> mujoco.MjSpec:
     xml = path.read_text()
     if path.suffix.lower() == ".urdf" and "<mujoco>" not in xml:
-        xml = re.sub(r"(<robot[^>]*>)", rf"\1{URDF_COMPILER}", xml, count=1)
+        compiler = URDF_COMPILER
+        if visual:
+            compiler = compiler.replace('discardvisual="true"', 'discardvisual="false"')
+        xml = re.sub(r"(<robot[^>]*>)", rf"\1{compiler}", xml, count=1)
 
     spec = mujoco.MjSpec.from_string(xml)
     spec.meshdir = str(meshdir or path.parent)

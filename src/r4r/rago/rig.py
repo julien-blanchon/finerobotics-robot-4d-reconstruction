@@ -204,8 +204,11 @@ class Rig(nn.Module):
                 subtree[i, b] = node == body
         # A free mount and a free body above it on the same chain trade off against each other
         # (a base offset is absorbed by the mount): such unknowns are solved in stages
+        # A frame-scope body (a driving base) is held at each episode's first frame: it does
+        # not trade off against a mount there
+        scopes = [robot.free_bodies[robot.body_names[b]].scope for b in free]
         for i, body in enumerate(free):
-            coupled = [
+            coupled = scopes[i] != "frame" and [
                 n
                 for n, b, f in zip(names, self.camera_body, self.cameras.free_elements, strict=True)
                 if f and bool(subtree[i, b])

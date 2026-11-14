@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
-import torch.nn.functional as F
 
 from r4r.matching import RoMaV2, sample
 
@@ -52,23 +51,19 @@ def cross_matches(
         chunk = pairs[start : start + BATCH]
         keys = sorted({(c, t) for a, ta, b, tb in chunk for c, t in ((a, ta), (b, tb))})
         position = {key: i for i, key in enumerate(keys)}
-        # Cameras of different sizes share a batch at a common size (RoMa squashes every image
-        # to its working sizes anyway); pixels are mapped back to each camera's own size
-        sizes = {c: tuple(frames[c].shape[-2:]) for c, _ in keys}
-        common = (max(h for h, _ in sizes.values()), max(w for _, w in sizes.values()))
+        # Cameras of different sizes are matched at a common size (the largest), pixels mapped
+        # back to each camera's own
+        common = (
+            max(frames[c].shape[-2] for c, _ in keys),
+            max(frames[c].shape[-1] for c, _ in keys),
+        )
         images = torch.stack(
-            [
-                F.interpolate(frames[c][t][None].float(), size=common, mode="bilinear")[0]
-                if sizes[c] != common
-                else frames[c][t].float()
-                for c, t in keys
-            ]
-        ).to(device) / 255
+            [_resized(frames[c][t].to(device).float() / 255, common) for c, t in keys]
+        )
         encoding = model.encode(images)
         a = torch.tensor([position[(c, t)] for c, t, _, _ in chunk], device=device)
         b = torch.tensor([position[(c, t)] for _, _, c, t in chunk], device=device)
         found = sample(model.match(encoding[a], encoding[b]), per_pair, generator)
-
         for i, (ca, ta, cb, tb) in enumerate(chunk):
             sure = found.certainty[i] > certainty
             n = int(sure.sum())
@@ -76,18 +71,30 @@ def cross_matches(
                 (
                     torch.full((n,), ca, device=device),
                     torch.full((n,), ta, device=device),
-                    _own(found.pixels_a[i][sure], sizes[ca], common),
+                    _rescaled(found.pixels_a[i][sure], common, frames[ca].shape[-2:]),
                     torch.full((n,), cb, device=device),
                     torch.full((n,), tb, device=device),
-                    _own(found.pixels_b[i][sure], sizes[cb], common),
+                    _rescaled(found.pixels_b[i][sure], common, frames[cb].shape[-2:]),
                 )
             ):
                 parts[slot].append(value)
     return CrossMatches(*(torch.cat(p) for p in parts))
 
 
-def _own(pixels: Tensor, size: tuple[int, int], common: tuple[int, int]) -> Tensor:
-    """Pixels at the batch's common size → at the camera's own size (pixel centres kept)."""
+def _resized(image: Tensor[[3, int, int]], size: tuple[int, int]) -> Tensor[[3, int, int]]:
+    if tuple(image.shape[-2:]) == size:
+        return image
+    return torch.nn.functional.interpolate(
+        image[None], size=size, mode="bilinear", align_corners=False, antialias=True
+    )[0]
 
-    scale = pixels.new_tensor((size[1] / common[1], size[0] / common[0]))
+
+def _rescaled(
+    pixels: Tensor[[int, 2]], common: tuple[int, int], own: tuple[int, int]
+) -> Tensor[[int, 2]]:
+    """Pixel centres (x, y) at the `common` size → the camera's `own` (height, width)."""
+
+    if tuple(own) == common:
+        return pixels
+    scale = pixels.new_tensor((own[1] / common[1], own[0] / common[0]))
     return (pixels + 0.5) * scale - 0.5

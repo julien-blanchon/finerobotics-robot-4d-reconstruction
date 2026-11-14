@@ -246,6 +246,78 @@ class Fit:
 
 
 @dataclass(frozen=True, slots=True)
+class _RigInputs:
+    root: Path
+    loaded: list
+    streams: tuple
+    names: tuple[str, ...]
+    robot: object
+    device: str
+    intrinsics: object
+    episodes: list
+    known_focal: tuple[bool, ...]
+    known_mount: tuple[bool, ...]
+    lens: object
+
+
+def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: float) -> _RigInputs:
+    """Load episodes of one station and build what `calibrate_rig` needs from the priors."""
+
+    import torch
+
+    from r4r.data.lerobot import load_episode
+    from r4r.rago.lens import lens_from_priors
+    from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
+    from r4r.rago.stages import RigEpisode
+
+    root = dataset_root(dataset)
+    loaded = [load_episode(root, e, stride=stride) for e in numbers]
+    streams = loaded[0].cameras
+    names = tuple(c.name for c in streams)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
+    bodies = body_mounts(loaded[0].priors)
+    robot = load_robot(loaded[0].robot, cameras=mounts, bodies=bodies).to(device, torch.float64)
+    stations = {e.station for e in loaded}
+    if len(stations) > 1:
+        raise SystemExit(
+            f"episodes come from several stations {sorted(map(str, stations))}: a rig is "
+            "calibrated per station (pick episodes of one)"
+        )
+    k = []
+    for c in streams:
+        height, width = c.frames.shape[-2:]
+        if c.intrinsics is not None:  # known for this episode (per-episode table)
+            k.append(c.intrinsics.tolist())
+            continue
+        f = c.prior.focal or focal * width
+        k.append([[f, 0, (width - 1) / 2], [0, f * c.prior.aspect, (height - 1) / 2], [0, 0, 1]])
+    intrinsics = torch.tensor(k, dtype=torch.float64, device=device)
+    episodes = [
+        RigEpisode(
+            qpos_from_state(robot, e.state.to(device), e.joints),
+            {c.name: c.frames for c in e.cameras if c.name in names},
+            None if e.base_motion is None else e.base_motion.to(device),
+            {c.name: c.pose.to(device) for c in e.cameras if c.pose is not None},
+        )
+        for e in loaded
+    ]
+    return _RigInputs(
+        root=root,
+        loaded=loaded,
+        streams=streams,
+        names=names,
+        robot=robot,
+        device=device,
+        intrinsics=intrinsics,
+        episodes=episodes,
+        known_focal=tuple(c.intrinsics is not None or c.prior.focal is not None for c in streams),
+        known_mount=tuple(m.body_from_camera is not None for m in mounts),
+        lens=lens_from_priors([c.prior for c in streams], intrinsics),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class Rig:
     """Calibrate a whole rig in stages: moving mounts, then free bodies (arm bases) and static
     cameras over pooled episodes, checked by agreement between groups of episodes.
@@ -275,60 +347,34 @@ class Rig:
 
         import torch
 
-        from r4r.data.lerobot import load_episode
         from r4r.data.priors import write_body, write_camera
         from r4r.geometry import se3
         from r4r.matching import RoMaV2
-        from r4r.rago.lens import lens_from_priors
-        from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
-        from r4r.rago.stages import RigConfig, RigEpisode, calibrate_rig, spread
+        from r4r.rago.stages import RigConfig, calibrate_rig, spread
 
-        root = dataset_root(self.dataset)
-        loaded = [load_episode(root, e, stride=self.stride) for e in self.episodes]
-        streams = loaded[0].cameras
-        names = tuple(c.name for c in streams)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
-        bodies = body_mounts(loaded[0].priors)
-        robot = load_robot(loaded[0].robot, cameras=mounts, bodies=bodies)
-        robot = robot.to(device, torch.float64)
-        stations = {e.station for e in loaded}
-        if len(stations) > 1:
-            raise SystemExit(
-                f"episodes come from several stations {sorted(map(str, stations))}: a rig is "
-                "calibrated per station (pick episodes of one)"
-            )
-        k = []
-        for c in streams:
-            height, width = c.frames.shape[-2:]
-            if c.intrinsics is not None:  # known for this episode (per-episode table)
-                k.append(c.intrinsics.tolist())
-                continue
-            f = c.prior.focal or self.focal * width
-            fy = f * c.prior.aspect
-            k.append([[f, 0, (width - 1) / 2], [0, fy, (height - 1) / 2], [0, 0, 1]])
-        intrinsics = torch.tensor(k, dtype=torch.float64, device=device)
-        episodes = [
-            RigEpisode(
-                qpos_from_state(robot, e.state.to(device), e.joints),
-                {c.name: c.frames for c in e.cameras if c.name in names},
-                None if e.base_motion is None else e.base_motion.to(device),
-            )
-            for e in loaded
-        ]
-        known_focal = tuple(c.intrinsics is not None or c.prior.focal is not None for c in streams)
-        known_mount = tuple(m.body_from_camera is not None for m in mounts)
-        model = RoMaV2.from_checkpoint(device=device)
+        rig = _prepare_rig(self.dataset, self.episodes, self.stride, self.focal)
+        root, loaded, streams = rig.root, rig.loaded, rig.streams
+        names, robot = rig.names, rig.robot
+        known_focal, known_mount = rig.known_focal, rig.known_mount
+        model = RoMaV2.from_checkpoint(device=rig.device)
         config = replace(
             RigConfig(),
             link_every=self.every,
             groups=self.groups,
             kinematic=kinematic_freedom(loaded[0].priors, robot, self.stride),
         )
-        lens = lens_from_priors([c.prior for c in streams], intrinsics)
         fit = calibrate_rig(
-            robot, episodes, names, intrinsics, known_focal, known_mount, model, config, lens
+            robot,
+            rig.episodes,
+            names,
+            rig.intrinsics,
+            known_focal,
+            known_mount,
+            model,
+            config,
+            rig.lens,
         )
+        episodes = rig.episodes
 
         free = sorted(robot.free_bodies, key=robot.body)
         disagreement = spread(fit.group_corrections)
@@ -348,6 +394,9 @@ class Rig:
                 "camera_body": [robot.camera_body[robot.camera(n)] for n in names],
                 "median_error": fit.median_error,
             }
+            if fit.lens is not None:
+                solution["distortion"] = fit.lens.distortion.detach().cpu()
+                solution["fisheye"] = fit.lens.fisheye.cpu()
             torch.save(solution, self.save)
             print(f"saved {self.save}")
         if self.write:
@@ -357,6 +406,23 @@ class Rig:
                     "focal_range": stream.prior.focal_range if known_focal[c] else 0.0,
                     **distortion_values(fit.lens, c, stream.prior),
                 }
+                prior = robot.free_cameras.get(stream.name)
+                if not stream.moving and prior is not None and prior.scope == "dataset":
+                    # A static camera fixed for the dataset: its pose in the base frame
+                    pose = fit.camera_poses[0, c].cpu()
+                    values |= {
+                        "mount": "static",
+                        "position": [round(v, 5) for v in pose[:3, 3].tolist()],
+                        "orientation": [
+                            round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
+                        ],
+                        "position_range": stream.prior.position_range
+                        if stream.prior.position is not None
+                        else 0.02,
+                        "orientation_range_deg": stream.prior.orientation_range_deg
+                        if stream.prior.position is not None
+                        else 2.0,
+                    }
                 if stream.moving and not known_mount[c]:
                     pose = fit.mounts[c].cpu()
                     values |= {
@@ -619,6 +685,7 @@ class Preview:
 
         from r4r.data.lerobot import load_episode
         from r4r.rago.kinematics import forward_kinematics
+        from r4r.rago.lens import lens_from_priors
         from r4r.rago.robot import (
             CameraMount,
             body_mounts,
@@ -646,15 +713,22 @@ class Preview:
             fy = f * c.prior.aspect
             k.append([[f, 0, (width - 1) / 2], [0, fy, (height - 1) / 2], [0, 0, 1]])
         steps = len(qpos)
+        placed = robot.body_from_camera[index].clone()
+        for c, stream in enumerate(streams):  # a static camera's recorded pose this episode
+            if stream.pose is not None:
+                placed[c] = stream.pose.to(placed)
         solution = {
             "dataset": self.dataset,
             "names": names,
             "lengths": [steps],
             "world_from_body": forward_kinematics(robot, qpos),
-            "mounts_at": robot.body_from_camera[index][:, None].expand(-1, steps, 4, 4),
+            "mounts_at": placed[:, None].expand(-1, steps, 4, 4),
             "camera_body": [robot.camera_body[i] for i in index],
             "intrinsics": torch.tensor(k, dtype=torch.float64),
         }
+        lens = lens_from_priors([c.prior for c in streams], solution["intrinsics"])
+        if lens is not None:
+            solution["distortion"], solution["fisheye"] = lens.distortion, lens.fisheye
         model = compile_model(episode.robot, None, mounts, bodies, visual=True)
         videos = {c.name: c.frames.permute(0, 2, 3, 1).numpy() for c in streams}
         label = f"{self.dataset}  episode {self.episode}  PRIORS ONLY (no solve)"
@@ -714,6 +788,98 @@ class Focal:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class Reconstruct:
+    """Every episode with the dataset's frozen priors (after `r4r rig --write`): per episode,
+    only what is free per episode or frame is solved (re-placed static cameras, a moving base,
+    unknown focals), no agreement groups. Writes `<out>/<family>/<dataset>/episode_<n>.parquet`:
+    per frame and camera, `world_from_camera` (robot base frame, OpenCV axes, 16 values,
+    row-major), fx, fy, cx, cy, and the episode's median reprojection error and inlier share."""
+
+    dataset: tyro.conf.Positional[str]
+    out: tyro.conf.Positional[Path]
+    episodes: tuple[int, ...] = (0,)
+    stride: int = 1
+    # RoMa links between cameras every this many (strided) timesteps
+    every: int = 10
+    focal: float = 0.7
+
+    def run(self) -> None:
+        import time
+        from dataclasses import replace
+
+        from r4r.matching import RoMaV2
+        from r4r.rago.stages import RigConfig, calibrate_rig
+
+        model = None
+        family = dataset_root(self.dataset).parent.parent.name
+        target = self.out / family / dataset_root(self.dataset).name
+        target.mkdir(parents=True, exist_ok=True)
+        for number in self.episodes:
+            start = time.perf_counter()
+            rig = _prepare_rig(self.dataset, (number,), self.stride, self.focal)
+            unknown = [
+                n
+                for n, s, k in zip(rig.names, rig.streams, rig.known_mount, strict=True)
+                if s.moving and not k
+            ]
+            if unknown:
+                print(f"warning: mounts of {unknown} are not in the priors: searched per episode")
+            if model is None:
+                model = RoMaV2.from_checkpoint(device=rig.device)
+            config = replace(
+                RigConfig(),
+                link_every=self.every,
+                groups=0,
+                kinematic=kinematic_freedom(rig.loaded[0].priors, rig.robot, self.stride),
+            )
+            fit = calibrate_rig(
+                rig.robot,
+                rig.episodes,
+                rig.names,
+                rig.intrinsics,
+                rig.known_focal,
+                rig.known_mount,
+                model,
+                config,
+                rig.lens,
+            )
+            path = target / f"episode_{number:06d}.parquet"
+            _write_poses(path, number, self.stride, rig, fit)
+            print(
+                f"episode {number}: median {fit.median_error:.2f} px, inliers "
+                f"{fit.inlier_fraction:.0%} -> {path} ({time.perf_counter() - start:.0f} s)"
+            )
+
+
+def _write_poses(path: Path, number: int, stride: int, rig: _RigInputs, fit) -> None:  # noqa: ANN001
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    world = fit.world_from_body.detach().cpu().double()
+    mounts = fit.mounts_at.detach().cpu().double()
+    k = fit.intrinsics.detach().cpu().double()
+    rows: dict[str, list] = {
+        k_: [] for k_ in ("episode", "frame", "camera", "world_from_camera", "fx", "fy", "cx", "cy")
+    }
+    for c, name in enumerate(rig.names):
+        body = rig.robot.camera_body[rig.robot.camera(name)]
+        poses = world[:, body] @ mounts[c]
+        for t in range(len(poses)):
+            rows["episode"].append(number)
+            rows["frame"].append(t * stride)
+            rows["camera"].append(name)
+            rows["world_from_camera"].append(poses[t].flatten().tolist())
+            rows["fx"].append(float(k[c, 0, 0]))
+            rows["fy"].append(float(k[c, 1, 1]))
+            rows["cx"].append(float(k[c, 0, 2]))
+            rows["cy"].append(float(k[c, 1, 2]))
+    table = pa.table(rows).replace_schema_metadata(
+        {"median_px": f"{fit.median_error:.4f}", "inliers": f"{fit.inlier_fraction:.4f}"}
+    )
+    pq.write_table(table, path)
+
+
 type Command = (
     Annotated[Inspect, tyro.conf.subcommand("inspect")]
     | Annotated[Links, tyro.conf.subcommand("links")]
@@ -724,6 +890,7 @@ type Command = (
     | Annotated[Overlay, tyro.conf.subcommand("overlay")]
     | Annotated[Preview, tyro.conf.subcommand("preview")]
     | Annotated[Focal, tyro.conf.subcommand("focal")]
+    | Annotated[Reconstruct, tyro.conf.subcommand("reconstruct")]
 )
 
 

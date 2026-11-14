@@ -15,22 +15,24 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
+
+    from r4r.types import UV
 
     from .tracks import Tracks
 
 RADIUS = 1.0  # pixels
 
 
-def merge_tracks[K: IntVar](
-    tracks: Tracks,
+def merge_tracks[K: IntVar, V: IntVar, C: IntVar](
+    tracks: Tracks[int, V, C],
     view_a: Tensor[[K]],
-    pixel_a: Tensor[[K, 2]],
+    pixel_a: Tensor[[K, *UV]],
     view_b: Tensor[[K]],
-    pixel_b: Tensor[[K, 2]],
+    pixel_b: Tensor[[K, *UV]],
     radius: float = RADIUS,
-) -> Tracks:
+) -> Tracks[int, V, C]:
     """`tracks` with every link's two ends in one track."""
 
     track, view, pixel = tracks.track, tracks.view, tracks.pixel.to(pixel_a)
@@ -60,12 +62,12 @@ def merge_tracks[K: IntVar](
     )
 
 
-def _attach[K: IntVar](
-    view: Tensor[[int]],
-    pixel: Tensor[[int, 2]],
-    track: Tensor[[int]],
+def _attach[M: IntVar, K: IntVar](
+    view: Tensor[[M]],
+    pixel: Tensor[[M, *UV]],
+    track: Tensor[[M]],
     query_view: Tensor[[K]],
-    query_pixel: Tensor[[K, 2]],
+    query_pixel: Tensor[[K, *UV]],
     radius: float,
 ) -> tuple[Tensor[[K]], Tensor[[K]]]:
     """Track of the nearest observation in the same view within `radius` (−1 and True when
@@ -82,8 +84,9 @@ def _attach[K: IntVar](
     return found, found < 0
 
 
-def _components[K: IntVar](count: int, a: Tensor[[K]], b: Tensor[[K]]) -> Tensor[[int]]:
-    """Connected-component label (smallest id) of `count` nodes joined by edges a–b."""
+def _components[N: IntVar, K: IntVar](count: Int[N], a: Tensor[[K]], b: Tensor[[K]]) -> Tensor[[N]]:
+    """Connected-component label (smallest id) of `count` nodes joined by edges a–b: per edge
+    `ℓ(a), ℓ(b) ← min(ℓ(a), ℓ(b))`, then pointer jumping `ℓ ← ℓ[ℓ]`, until nothing changes."""
 
     label = torch.arange(count, device=a.device)
     while True:

@@ -2,7 +2,8 @@
 
 The kinematic bundle converges from ~25 cm / 10° away, not from anywhere. Instead of trusting
 one starting point, short bundles start from the 24 axis-aligned orientations of the camera on
-its link (at the description's mount position) × a few focal-length hypotheses, on a subsample
+its link (at the description's mount position) × a few focal-length hypotheses `f = α · f₀`
+(α ∈ `focal_factors`, f₀ the prior or guess, pixels), on a subsample
 of the camera's own tracks, all in one batched bundle; the start with the best score is kept.
 Scores count dropped observations as outliers, so they compare across starts. Only the static
 world is used (no link attachment): on the camera's own videos, links invite spurious fits.
@@ -21,7 +22,10 @@ import torch
 from .bundle import BundleConfig, bundle_adjust
 
 if TYPE_CHECKING:
+    from shape_extensions import IntVar
     from torch import Tensor
+
+    from r4r.types import Mat3x3, Mat4x4
 
     from .robot import Robot
     from .tracks import Tracks
@@ -51,17 +55,18 @@ class SearchConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class SearchResult:
-    # Body the best start rides on; mounts of all cameras (the searched one on `body`)
+class SearchResult[C: IntVar]:
+    # Body the best start rides on; mounts of all `C` cameras (the searched one on `body`)
     body: int
-    body_from_camera: Tensor[[int, 4, 4]]
-    intrinsics: Tensor[[int, 3, 3]]
+    body_from_camera: Tensor[[C, *Mat4x4]]
+    intrinsics: Tensor[[C, *Mat3x3]]
     # Scores of every start (body-major, then orientation, then focal factor): lower is better
     scores: Tensor[[int]]
 
 
-def cube_rotations() -> Tensor[[24, 3, 3]]:
-    """The 24 rotations mapping the axes onto signed axes."""
+def cube_rotations() -> Tensor[[24, *Mat3x3]]:
+    """The 24 rotations mapping the axes onto signed axes: the signed permutation matrices
+    with `det R = +1`."""
 
     rotations = []
     for permutation in itertools.permutations(range(3)):
@@ -73,15 +78,15 @@ def cube_rotations() -> Tensor[[24, 3, 3]]:
     return torch.stack(rotations)
 
 
-def search_mount(
-    robot: Robot,
-    qpos: Tensor[[int, int]],
-    tracks: Tracks,
+def search_mount[T: IntVar, NQ: IntVar, C: IntVar](
+    robot: Robot[int, int, int],
+    qpos: Tensor[[T, NQ]],
+    tracks: Tracks[int, int, C],
     names: tuple[str, ...],
     camera: str,
     config: SearchConfig,
     bodies: tuple[int, ...] = (),
-) -> SearchResult:
+) -> SearchResult[C]:
     """Best start for `camera`'s mount and its focal length, from its own tracks only.
 
     Starts ride on each of `bodies` (default: the camera's own body), at the description's

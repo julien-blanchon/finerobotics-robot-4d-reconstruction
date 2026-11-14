@@ -7,6 +7,11 @@ detected where tracks are missing, followed frame to frame, and kept only if tra
 returns to the start (forward–backward check). Nothing assumes the point is static: the bundle
 decides which body (world or link) each track is rigid with.
 
+- Lucas–Kanade: the step `d` minimising `Σ_w (I₁(x + d) − I₀(x))²` over a window solves
+  `G d = Σ_w ∇I (I₀ − I₁)`, `G = Σ_w ∇I ∇Iᵀ`, coarse to fine over `levels` pyramid levels;
+- Shi–Tomasi: corners where `λ_min(G) ≥ quality · max λ_min`, at least `min_distance` apart;
+- forward–backward: kept where `‖x − LK₁₀(LK₀₁(x))‖ < max_error` (pixels).
+
 Ref: Lucas & Kanade 1981; Shi & Tomasi, Good Features to Track, 1994; Kalal et al. 2010
      (forward–backward error).
 """
@@ -19,9 +24,13 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 import torch
+from einops import rearrange
 
 if TYPE_CHECKING:
+    from shape_extensions import IntVar
     from torch import Tensor
+
+    from r4r.types import RGB, UV, Mat3x3
 
     from .lens import Lens
     from .tracks import Tracks
@@ -42,18 +51,23 @@ class KLTConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class VideoTracks:
-    """Observations of one camera's feature tracks: track id, frame index, pixel."""
+class VideoTracks[M: IntVar]:
+    """`M` observations of one camera's feature tracks: track id, frame index, pixel."""
 
-    track: Tensor[[int]]
-    frame: Tensor[[int]]
-    pixel: Tensor[[int, 2]]
+    track: Tensor[[M]]
+    frame: Tensor[[M]]
+    pixel: Tensor[[M, *UV]]
 
 
-def track_video(frames: Tensor[[int, 3, int, int]], config: KLTConfig) -> VideoTracks:
+def track_video[T: IntVar, H: IntVar, W: IntVar](
+    frames: Tensor[[T, *RGB, H, W]], config: KLTConfig
+) -> VideoTracks[int]:
     """KLT tracks through `frames` (uint8 RGB, in time order)."""
 
-    gray = [cv2.cvtColor(f.permute(1, 2, 0).cpu().numpy(), cv2.COLOR_RGB2GRAY) for f in frames]
+    gray = [
+        cv2.cvtColor(rearrange(f, "c h w -> h w c").cpu().numpy(), cv2.COLOR_RGB2GRAY)
+        for f in frames
+    ]
     height, width = gray[0].shape
     flow = {
         "winSize": (config.window, config.window),
@@ -103,15 +117,15 @@ def track_video(frames: Tensor[[int, 3, int, int]], config: KLTConfig) -> VideoT
     )
 
 
-def klt_tracks(
-    frames: list[Tensor[[int, 3, int, int]]],
-    view_camera: Tensor[[int]],
-    view_time: Tensor[[int]],
-    intrinsics: Tensor[[int, 3, 3]],
+def klt_tracks[V: IntVar, C: IntVar](
+    frames: list[Tensor[[int, *RGB, int, int]]],
+    view_camera: Tensor[[V]],
+    view_time: Tensor[[V]],
+    intrinsics: Tensor[[C, *Mat3x3]],
     config: KLTConfig,
-    found: list[VideoTracks] | None = None,
+    found: list[VideoTracks[int]] | None = None,
     lens: Lens | None = None,
-) -> Tracks:
+) -> Tracks[int, V, C]:
     """Tracks of every camera's video (frame `t` of camera `c` is view (c, t)); each track is
     rigid with an unknown body, so all are flagged `moving` (the bundle attaches them).
     `found`: each video's tracks when already computed (`track_video`)."""

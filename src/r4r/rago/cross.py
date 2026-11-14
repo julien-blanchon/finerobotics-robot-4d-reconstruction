@@ -16,7 +16,10 @@ import torch
 from r4r.matching import RoMaV2, sample
 
 if TYPE_CHECKING:
+    from shape_extensions import IntVar
     from torch import Tensor
+
+    from r4r.types import RGB, UV
 
 CERTAINTY = 0.8
 PER_PAIR = 2000
@@ -24,29 +27,30 @@ BATCH = 4
 
 
 @dataclass(frozen=True, slots=True)
-class CrossMatches:
+class CrossMatches[K: IntVar]:
     """`K` correspondences: (camera, timestep, pixel) at each end."""
 
-    camera_a: Tensor[[int]]
-    time_a: Tensor[[int]]
-    pixel_a: Tensor[[int, 2]]
-    camera_b: Tensor[[int]]
-    time_b: Tensor[[int]]
-    pixel_b: Tensor[[int, 2]]
+    camera_a: Tensor[[K]]
+    time_a: Tensor[[K]]
+    pixel_a: Tensor[[K, *UV]]
+    camera_b: Tensor[[K]]
+    time_b: Tensor[[K]]
+    pixel_b: Tensor[[K, *UV]]
 
 
 def cross_matches(
     model: RoMaV2,
-    frames: list[Tensor[[int, 3, int, int]]],
+    frames: list[Tensor[[int, *RGB, int, int]]],
     pairs: list[tuple[int, int, int, int]],
     certainty: float = CERTAINTY,
     per_pair: int = PER_PAIR,
-) -> CrossMatches:
-    """Certain RoMa correspondences for `pairs` of (camera, time) frames (uint8 videos)."""
+) -> CrossMatches[int]:
+    """Certain RoMa correspondences for `pairs` of (camera, time) frames (uint8 videos):
+    those with `P(overlap) > certainty`."""
 
     device = next(model.parameters()).device
     generator = torch.Generator(device=device).manual_seed(0)
-    parts: list[list[Tensor]] = [[] for _ in range(6)]
+    parts: list[CrossMatches[int]] = []
     for start in range(0, len(pairs), BATCH):
         chunk = pairs[start : start + BATCH]
         keys = sorted({(c, t) for a, ta, b, tb in chunk for c, t in ((a, ta), (b, tb))})
@@ -67,8 +71,8 @@ def cross_matches(
         for i, (ca, ta, cb, tb) in enumerate(chunk):
             sure = found.certainty[i] > certainty
             n = int(sure.sum())
-            for slot, value in enumerate(
-                (
+            parts.append(
+                CrossMatches(
                     torch.full((n,), ca, device=device),
                     torch.full((n,), ta, device=device),
                     _rescaled(found.pixels_a[i][sure], common, frames[ca].shape[-2:]),
@@ -76,12 +80,20 @@ def cross_matches(
                     torch.full((n,), tb, device=device),
                     _rescaled(found.pixels_b[i][sure], common, frames[cb].shape[-2:]),
                 )
-            ):
-                parts[slot].append(value)
-    return CrossMatches(*(torch.cat(p) for p in parts))
+            )
+    return CrossMatches(
+        torch.cat([m.camera_a for m in parts]),
+        torch.cat([m.time_a for m in parts]),
+        torch.cat([m.pixel_a for m in parts]),
+        torch.cat([m.camera_b for m in parts]),
+        torch.cat([m.time_b for m in parts]),
+        torch.cat([m.pixel_b for m in parts]),
+    )
 
 
-def _resized(image: Tensor[[3, int, int]], size: tuple[int, int]) -> Tensor[[3, int, int]]:
+def _resized[H: IntVar, W: IntVar](
+    image: Tensor[[*RGB, H, W]], size: tuple[int, int]
+) -> Tensor[[*RGB, int, int]]:
     if tuple(image.shape[-2:]) == size:
         return image
     return torch.nn.functional.interpolate(
@@ -89,10 +101,11 @@ def _resized(image: Tensor[[3, int, int]], size: tuple[int, int]) -> Tensor[[3, 
     )[0]
 
 
-def _rescaled(
-    pixels: Tensor[[int, 2]], common: tuple[int, int], own: tuple[int, int]
-) -> Tensor[[int, 2]]:
-    """Pixel centres (x, y) at the `common` size → the camera's `own` (height, width)."""
+def _rescaled[N: IntVar](
+    pixels: Tensor[[N, *UV]], common: tuple[int, int], own: tuple[int, int]
+) -> Tensor[[N, *UV]]:
+    """Pixel centres (x, y) at the `common` size → the camera's `own` (height, width):
+    `x' = (x + ½) · s − ½`, `s = own / common` per axis."""
 
     if tuple(own) == common:
         return pixels

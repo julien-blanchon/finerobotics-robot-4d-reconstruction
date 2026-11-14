@@ -317,7 +317,12 @@ class Rig:
         known_focal = tuple(c.intrinsics is not None or c.prior.focal is not None for c in streams)
         known_mount = tuple(m.body_from_camera is not None for m in mounts)
         model = RoMaV2.from_checkpoint(device=device)
-        config = replace(RigConfig(), link_every=self.every, groups=self.groups)
+        config = replace(
+            RigConfig(),
+            link_every=self.every,
+            groups=self.groups,
+            kinematic=kinematic_freedom(loaded[0].priors, robot, self.stride),
+        )
         lens = lens_from_priors([c.prior for c in streams], intrinsics)
         fit = calibrate_rig(
             robot, episodes, names, intrinsics, known_focal, known_mount, model, config, lens
@@ -326,6 +331,8 @@ class Rig:
         free = sorted(robot.free_bodies, key=robot.body)
         disagreement = spread(fit.group_corrections)
         _print_rig(fit, streams, robot, self.episodes, free, disagreement)
+        if config.kinematic is not None:
+            _print_kinematics(fit, robot, self.stride)
         if self.save is not None:
             solution = {
                 "dataset": self.dataset,
@@ -388,6 +395,54 @@ def distortion_values(lens, camera: int, prior) -> dict[str, object]:  # noqa: A
         "distortion": [round(v, 6) for v in lens.distortion[camera, :size].tolist()],
         "distortion_range": (prior.distortion_range or 0.0) if known else 0.0,
     }
+
+
+def kinematic_freedom(priors, robot, stride: int):  # noqa: ANN001, ANN201
+    """The priors' `kinematics` block as a `KinematicFreedom` for `robot` (None if absent):
+    hinge offsets in degrees, slide offsets in millimetres, the time offset in frames at the
+    dataset's rate (converted to strided timesteps)."""
+
+    import math
+
+    from r4r.rago.rig import KinematicFreedom
+    from r4r.rago.robot import HINGE
+
+    spec = priors.kinematics
+    if not spec:
+        return None
+    only = set(spec.get("joints", robot.joint_names))
+    stds = []
+    for name, kind in zip(robot.joint_names, robot.joint_kind, strict=True):
+        if name not in only:
+            stds.append(0.0)
+        elif kind == HINGE:
+            stds.append(math.radians(float(spec.get("joint_offset_deg", 0.0))))
+        else:
+            stds.append(float(spec.get("joint_offset_mm", 0.0)) / 1000)
+    time = float(spec.get("time_offset_frames", 0.0)) / stride
+    return KinematicFreedom(joint_std=tuple(stds), time_std=time)
+
+
+def _print_kinematics(fit, robot, stride: int) -> None:  # noqa: ANN001
+    """Fitted joint and time offsets, with each group's value (their spread is the check)."""
+
+    import math
+
+    from r4r.rago.robot import HINGE
+
+    groups = fit.group_time_offsets
+    print(
+        f"time offset: {fit.time_offset * stride:+.2f} frames (groups "
+        + ", ".join(f"{t * stride:+.2f}" for t in groups)
+        + ") on top of state_shift"
+    )
+    for j, name in enumerate(robot.joint_names):
+        value = float(fit.joint_offset[j])
+        if value == 0.0:
+            continue
+        scale, unit = (math.degrees(1), "deg") if robot.joint_kind[j] == HINGE else (1000, "mm")
+        each = ", ".join(f"{float(g[j]) * scale:+.2f}" for g in fit.group_joint_offsets)
+        print(f"joint offset {name}: {value * scale:+.2f} {unit} (groups {each})")
 
 
 def _print_rig(fit, streams, robot, episodes, free, disagreement) -> None:  # noqa: ANN001

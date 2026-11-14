@@ -40,9 +40,10 @@ def load_episode(
     timestamps = rows["timestamp"].tolist()
 
     robot = json.loads((root / "meta" / "robot.json").read_text())
-    priors = load_priors(root)
-    links = {camera["key"]: camera["urdf_link"] for camera in robot.get("cameras", [])}
     record = load_episode_record(root, episode)
+    # A station's own mounts and bodies (priors `stations`) on top of the dataset's
+    priors = load_priors(root).for_station(None if record is None else record.station)
+    links = {camera["key"]: camera["urdf_link"] for camera in robot.get("cameras", [])}
     cameras = []
     for key in meta.video_keys:
         if meta.features[key].get("info", {}).get("is_depth_map", False):

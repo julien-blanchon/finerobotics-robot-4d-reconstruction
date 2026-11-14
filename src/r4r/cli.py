@@ -241,7 +241,7 @@ class Fit:
                     "score": round(fit.score, 4),
                 },
             }
-            print(f"wrote {write_camera(root, self.camera, values)}")
+            print(f"wrote {write_camera(root, self.camera, values, station_of(loaded))}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,7 +365,7 @@ class Rig:
                             round(v, 6) for v in se3.matrix_to_quaternion(pose[:3, :3]).tolist()
                         ],
                     }
-                print(f"wrote {write_camera(root, stream.name, values)}")
+                print(f"wrote {write_camera(root, stream.name, values, station_of(loaded))}")
             for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
                 if robot.free_bodies[name].scope != "dataset":
                     continue
@@ -380,7 +380,15 @@ class Rig:
                     "orientation_range_deg": round(max(deg, 0.2), 3),
                     "fitted": {"episodes": list(self.episodes), "groups": self.groups},
                 }
-                print(f"wrote {write_body(root, name, body)}")
+                print(f"wrote {write_body(root, name, body, station_of(loaded))}")
+
+
+def station_of(loaded) -> str | None:  # noqa: ANN001
+    """Where fitted values go: the episodes' station when the priors keep per-station
+    values (`stations`), else the dataset level (None)."""
+
+    first = loaded[0]
+    return first.station if first.station is not None and first.priors.stations else None
 
 
 def distortion_values(lens, camera: int, prior) -> dict[str, object]:  # noqa: ANN001

@@ -26,7 +26,8 @@ take precedence over `meta/robot.json` and the camera feature info:
 `description` replaces the delivered robot description by a corrected one kept under
 `priors/` (fixes to the URDF/MJCF itself: wrong joints, frames, meshes). `joints` add or
 replace (by URDF joint name) entries of the state mapping; `removed_joints`
-drops wrong ones; `state_shift` fixes a video/joint-state offset (frame t's state is taken
+drops wrong ones; `state_feature` names the state column when the metadata names a wrong one;
+`state_shift` fixes a video/joint-state offset (frame t's state is taken
 from t + shift; `r4r fit --shifts` measures it). A camera's `position` and `orientation`
 (quaternion w, x, y, z of its OpenCV axes) are in the frame of `link` (moving) or of the robot
 base (static); ranges bound what fitting may change (small: fixed across episodes, fitted per
@@ -127,6 +128,8 @@ class DatasetPriors:
     joints: tuple[JointMap, ...] = ()
     removed_joints: tuple[str, ...] = ()
     state_shift: int = 0
+    # The state feature, when the metadata names a wrong one (None: `robot.json`'s)
+    state_feature: str | None = None
     cameras: dict[str, CameraPrior] = field(default_factory=dict)
     bodies: dict[str, BodyPrior] = field(default_factory=dict)
     base_odometry: BaseOdometry | None = None
@@ -217,6 +220,7 @@ def load_priors(root: Path) -> DatasetPriors:
         joints=joints,
         removed_joints=tuple(raw.get("removed_joints", [])),
         state_shift=int(raw.get("state_shift", 0)),
+        state_feature=raw.get("state_feature"),
         cameras=cameras,
         description=raw.get("description"),
         notes=raw.get("notes", ""),

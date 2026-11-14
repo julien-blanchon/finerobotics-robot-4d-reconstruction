@@ -68,11 +68,12 @@ def load_episode(
             k = _recorded_intrinsics(column, prior.intrinsics, size)
             stream = replace(stream, intrinsics=k)
         cameras.append(stream)
-    state = rows[robot["state"]["feature"]].double()
+    feature = priors.state_feature or robot["state"]["feature"]
+    state = rows[feature].double()
     if priors.state_shift:
         # Frame t's state from t + shift (a known video/joint-state offset, in frames at the
         # dataset's rate whatever the stride), clamped
-        full = every[:][robot["state"]["feature"]].double()
+        full = every.select_columns([feature])[:][feature].double()
         index = torch.arange(0, len(full), stride)[: len(state)] + priors.state_shift
         state = full[index.clamp(0, len(full) - 1)]
     return Episode(

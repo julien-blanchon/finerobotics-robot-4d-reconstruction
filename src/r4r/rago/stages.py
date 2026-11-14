@@ -173,8 +173,6 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
     episode's where episodes record their own (`RigEpisode.intrinsics`).
     """
 
-    index = [robot.camera(n) for n in names]
-    static = [robot.camera_body[i] == 0 for i in index]
     tracked = _Tracked(episodes, config.fit)
     scaling = episode_scaling(episodes, names)
     mounts, intrinsics, lens, agreement = _moving_mounts(
@@ -196,10 +194,7 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
     starts, intrinsics = _static_starts(
         robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount
     )
-    for i, e in enumerate(episodes):  # recorded per-episode mounts of moving cameras
-        for c, name in enumerate(names):
-            if not static[c] and name in e.poses:
-                starts[i, c] = e.poses[name].to(starts)
+    starts = _recorded_mounts(robot, episodes, names, starts)
 
     # 4-5. Bundles: all episodes, then groups. Known focals stay fixed; those found in stage 3
     # are refined
@@ -238,6 +233,33 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
         group_joint_offsets=torch.stack([f.joint_offset for f in fits]),
         group_time_offsets=tuple(f.time_offset for f in fits),
     )
+
+
+def _recorded_mounts[E: IntVar, C: IntVar](
+    robot: Robot[int, int, int],
+    episodes: list[RigEpisode[int, int]],
+    names: tuple[str, ...],
+    starts: Tensor[[E, C, *Mat4x4]],
+) -> Tensor[[E, C, *Mat4x4]]:
+    """`starts` with the moving cameras' recorded per-episode mounts (`RigEpisode.poses`).
+
+    Raises when they differ between episodes for a camera the bundles freeze (dataset scope,
+    or held: `_freeze_moving_mounts` keeps the first episode's mount for all)."""
+
+    for c, name in enumerate(names):
+        if robot.camera_body[robot.camera(name)] == 0:
+            continue
+        for i, e in enumerate(episodes):
+            if name in e.poses:
+                starts[i, c] = e.poses[name].to(starts)
+        freedom = robot.free_cameras.get(name)
+        frozen = freedom is None or freedom.scope == "dataset"
+        if frozen and bool((starts[:, c] != starts[0, c]).any()):
+            raise ValueError(
+                f"{name}: recorded mounts differ between episodes, but the mount is held or "
+                "dataset scope (one for all episodes); give it episode scope in the priors"
+            )
+    return starts
 
 
 def _freeze_moving_mounts[L: IntVar, J: IntVar, C: IntVar](

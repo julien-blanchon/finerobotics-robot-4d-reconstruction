@@ -75,6 +75,8 @@ G  groups of episodes        F  frames in a query      NB free bodies
 NQ qpos width                NState robot-state width  NWheel wheels of a drive
 NPair image/motion pairs     In, Out, Hidden layer widths
 R, Cl patch-grid rows/columns
+Ho, Wo output height/width   Side square resize side   Radius correlation radius
+Depth decoder blocks         Crop query RGB crop side  Start, Stop slice bounds
 ```
 
 **Named fixed-size axes.** A fixed axis is named by its components, so the name shows the size:

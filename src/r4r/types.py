@@ -15,6 +15,9 @@ Dimension type parameters mean the same thing in every file:
     NPair   image or motion pairs
     In, Out, Hidden  layer input / output / hidden width
     R, Cl   patch-grid rows / columns
+    Ho, Wo  output height / width        Side  side of a square resize
+    Radius  correlation window radius    Depth  decoder blocks   Crop  query RGB crop side
+    Start, Stop  slice bounds
 
 A fixed-size axis is named by an alias that spells its components, so the name shows the
 size: `Tensor[[N, *XYZ]]` is `Tensor[[N, 3]]`. Pyrefly accepts these only as unpacked

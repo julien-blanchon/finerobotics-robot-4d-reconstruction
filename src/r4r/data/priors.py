@@ -50,7 +50,8 @@ focal): `{"column": "publisher.<name>_intrinsics", "layout": "fx_fy_cx_cy" | "ma
 "size": [w, h], "resize": "stretch" | "height"}`: `size` is the resolution the values are
 given at (default: the video's), `resize` how they map to the video (`stretch`: each axis
 scaled; `height`: the same vertical field of view, centred). `pose` reads a camera's recorded
-pose per episode from a JSON string column of the dataset (simulators that re-place cameras
+pose per episode from a column of the dataset, its first row (a JSON string; or numbers
+x, y, z, qw, qx, qy, qz with no `path`) (simulators that re-place cameras
 per episode and record them with the episode, too many episodes for a table):
 `{"column": "publisher.episode.extra_info", "path": ["config", "cameras", "name=front"],
 "axes": "forward_left_up"}`: `path` walks the JSON (`key=value` picks the list item whose `key`
@@ -353,7 +354,7 @@ def _pose_column(raw: JsonObject | None, where: str) -> PoseColumn | None:
     if raw is None:
         return None
     _checked(raw, _keys(PoseColumn), f"{where}.pose")
-    return PoseColumn(raw["column"], tuple(raw["path"]), raw.get("axes", "opencv"))
+    return PoseColumn(raw["column"], tuple(raw.get("path", ())), raw.get("axes", "opencv"))
 
 
 def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior]:

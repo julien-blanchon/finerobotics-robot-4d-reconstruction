@@ -28,13 +28,13 @@ IRLS_ITERATIONS = 12
 HYPOTHESES = 64
 
 
-def relative_rotations[M: IntVar, N: IntVar](
-    pixels_a: Tensor[[M, N, *UV]],
-    pixels_b: Tensor[[M, N, *UV]],
-    mask: Tensor[[M, N]],
+def relative_rotations[NPair: IntVar, N: IntVar](
+    pixels_a: Tensor[[NPair, N, *UV]],
+    pixels_b: Tensor[[NPair, N, *UV]],
+    mask: Tensor[[NPair, N]],
     intrinsics: Tensor[[*Mat3x3]],
     cauchy: float = 1.0,
-) -> Tensor[[M, *Mat3x3]]:
+) -> Tensor[[NPair, *Mat3x3]]:
     """Per pair: the camera rotation `b_from_a` (x_b ∝ R x_a + t), robust to outliers.
 
     `cauchy` is the Sampson-error scale in pixels.
@@ -49,13 +49,13 @@ def relative_rotations[M: IntVar, N: IntVar](
     return _rotation(essential, xa, xb, weight)
 
 
-def _essential_irls[M: IntVar, N: IntVar](
-    xa: Tensor[[M, N, *XYZ]],
-    xb: Tensor[[M, N, *XYZ]],
-    weight: Tensor[[M, N]],
+def _essential_irls[NPair: IntVar, N: IntVar](
+    xa: Tensor[[NPair, N, *XYZ]],
+    xb: Tensor[[NPair, N, *XYZ]],
+    weight: Tensor[[NPair, N]],
     focal: float,
     cauchy: float,
-) -> tuple[Tensor[[M, *Mat3x3]], Tensor[[M, N]]]:
+) -> tuple[Tensor[[NPair, *Mat3x3]], Tensor[[NPair, N]]]:
     """Weighted 8-point inside IRLS: `E = argmin_{‖E‖=1} Σ w_i (x_bᵢᵀ E x_aᵢ)²`, then
     `w_i = mask_i / (1 + (e_i / c)²)` from the Sampson errors `e_i` (pixels), `c = cauchy`.
     Returns the essential matrices and the final robust weights.
@@ -71,8 +71,8 @@ def _essential_irls[M: IntVar, N: IntVar](
     picked = torch.gather(
         rows[:, None].expand(-1, HYPOTHESES, -1, -1), 2, sample[..., None].expand(-1, -1, -1, 9)
     )
-    candidates = _project(_smallest(picked.mT @ picked))  # [M, HYPOTHESES, 3, 3]
-    error = _sampson(candidates, xa[:, None], xb[:, None], focal)  # [M, HYPOTHESES, N]
+    candidates = _project(_smallest(picked.mT @ picked))  # [NPair, HYPOTHESES, 3, 3]
+    error = _sampson(candidates, xa[:, None], xb[:, None], focal)  # [NPair, HYPOTHESES, N]
     inliers = ((error < cauchy) * weight[:, None]).sum(-1)
     best = inliers.argmax(-1)
     error = error[torch.arange(len(xa), device=xa.device), best]
@@ -120,12 +120,12 @@ def _sampson[Bs: IntTuple, Ps: IntTuple, N: IntVar](
     return cast("Tensor[[*Bs, N]]", residual.abs() / norm.clamp_min(1e-18).sqrt() * focal)
 
 
-def _rotation[M: IntVar, N: IntVar](
-    essential: Tensor[[M, *Mat3x3]],
-    xa: Tensor[[M, N, *XYZ]],
-    xb: Tensor[[M, N, *XYZ]],
-    weight: Tensor[[M, N]],
-) -> Tensor[[M, *Mat3x3]]:
+def _rotation[NPair: IntVar, N: IntVar](
+    essential: Tensor[[NPair, *Mat3x3]],
+    xa: Tensor[[NPair, N, *XYZ]],
+    xb: Tensor[[NPair, N, *XYZ]],
+    weight: Tensor[[NPair, N]],
+) -> Tensor[[NPair, *Mat3x3]]:
     """The rotation of the four decompositions `R ∈ {U W Vᵀ, U Wᵀ Vᵀ}`, `t = ±u₃` with most
     weight in front of both views (cheirality: both depths `z_a`, `z_b` positive)."""
 
@@ -156,9 +156,9 @@ def _rotation[M: IntVar, N: IntVar](
     return best
 
 
-def _svd[M: IntVar](
-    m: Tensor[[M, *Mat3x3]],
-) -> tuple[Tensor[[M, *Mat3x3]], Tensor[[M, *XYZ]], Tensor[[M, *Mat3x3]]]:
+def _svd[NPair: IntVar](
+    m: Tensor[[NPair, *Mat3x3]],
+) -> tuple[Tensor[[NPair, *Mat3x3]], Tensor[[NPair, *XYZ]], Tensor[[NPair, *Mat3x3]]]:
     """Batched SVD in chunks of `CHUNK` (large GPU batches fail)."""
     parts = [torch.linalg.svd(c) for c in m.split(CHUNK)]
     u, s, vh = (torch.cat(x) for x in zip(*parts, strict=True))

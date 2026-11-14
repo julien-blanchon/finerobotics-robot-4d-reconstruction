@@ -158,7 +158,7 @@ class RoMaV2(nn.Module):
         mean = images.new_tensor(IMAGENET_MEAN)[:, None, None]
         std = images.new_tensor(IMAGENET_STD)[:, None, None]
 
-        def normalised[R: IntVar](size: Int[R]) -> Tensor[[S, *RGB, R, R]]:
+        def normalised[Side: IntVar](size: Int[Side]) -> Tensor[[S, *RGB, Side, Side]]:
             resized = F.interpolate(images, size=(size, size), mode="bicubic", antialias=True)
             return (resized - mean) / std
 

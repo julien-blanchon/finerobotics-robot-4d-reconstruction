@@ -7,8 +7,14 @@ Dimension type parameters mean the same thing in every file:
     D   model width                      NHead  heads        HD  head width
     H, W  image height / width           C  cameras          T  robot timesteps
     J   joints                           L  kinematic links  K  correspondences
-    M   tracks / pairs                   V  observations (track samples)
+    M   observations (track samples)     V  views (camera × timestep)
+    E   episodes                         G  groups of episodes
+    F   frames in a query pattern        NB  free bodies
+    NQ  qpos width (MuJoCo generalised coordinates)
     NState  recorded robot-state width   NWheel  wheels of a drive
+    NPair   image or motion pairs
+    In, Out, Hidden  layer input / output / hidden width
+    R, Cl   patch-grid rows / columns
 
 A fixed-size axis is named by an alias that spells its components, so the name shows the
 size: `Tensor[[N, *XYZ]]` is `Tensor[[N, 3]]`. Pyrefly accepts these only as unpacked

@@ -69,8 +69,11 @@ N  points / pixels           Q  queries                P  patch tokens per frame
 D  model width               NHead, HD heads, head width
 H, W image height/width      C  cameras                T  robot timesteps
 J  joints                    L  kinematic links        K  correspondences
-M  tracks / pairs            V  observations           NState recorded robot-state width
-NWheel wheels of a drive
+M  observations             V  views (camera × time)  E  episodes
+G  groups of episodes        F  frames in a query      NB free bodies
+NQ qpos width                NState robot-state width  NWheel wheels of a drive
+NPair image/motion pairs     In, Out, Hidden layer widths
+R, Cl patch-grid rows/columns
 ```
 
 **Named fixed-size axes.** A fixed axis is named by its components, so the name shows the size:

@@ -60,8 +60,8 @@ def window[S: IntVar, H: IntVar, W: IntVar, C: IntVar](
     return pixels, (x - left)[..., None, None], (y - top)[..., None, None]
 
 
-def blend[S: IntTuple, F: IntTuple](
-    grid: Tensor[[*S, int, int]], fx: Tensor[[*F, 1, 1]], fy: Tensor[[*F, 1, 1]]
+def blend[S: IntTuple, Ws: IntTuple](
+    grid: Tensor[[*S, int, int]], fx: Tensor[[*Ws, 1, 1]], fy: Tensor[[*Ws, 1, 1]]
 ) -> Tensor[[*S, int, int]]:
     """Bilinear blend of each 2×2 cell of an integer-pixel grid at `(fx, fy)` (broadcast)."""
 

@@ -40,8 +40,10 @@ def procrustes[Bs: IntTuple, N: IntVar](
     return se3.from_rotation_translation(rotation, translation).to(weight.dtype)
 
 
-def hand_eye[M: IntVar](
-    robot_motion: Tensor[[M, *Mat4x4]], camera_motion: Tensor[[M, *Mat4x4]], group: Tensor[[M]]
+def hand_eye[NPair: IntVar](
+    robot_motion: Tensor[[NPair, *Mat4x4]],
+    camera_motion: Tensor[[NPair, *Mat4x4]],
+    group: Tensor[[NPair]],
 ) -> tuple[Tensor[[*Mat4x4]], Tensor[[int]]]:
     """Solve `A_i X = X B_i(s_g)`: the mount `X` and one scale `s_g` per motion group.
 

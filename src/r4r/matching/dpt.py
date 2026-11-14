@@ -30,9 +30,9 @@ HIDDEN = 32
 OUTPUTS = 3  # warp x, warp y, overlap logit
 
 
-def resize[S: IntVar, C: IntVar](
-    x: Tensor[[S, C, int, int]], size: tuple[int, int]
-) -> Tensor[[S, C, int, int]]:
+def resize[S: IntVar, C: IntVar, Ho: IntVar, Wo: IntVar](
+    x: Tensor[[S, C, int, int]], size: tuple[Int[Ho], Int[Wo]]
+) -> Tensor[[S, C, Ho, Wo]]:
     return F.interpolate(x, size=size, mode="bilinear", align_corners=True)
 
 
@@ -58,12 +58,12 @@ class FusionBlock(nn.Module):
         self.resConfUnit1 = ResidualConvUnit() if has_skip else None
         self.resConfUnit2 = ResidualConvUnit()
 
-    def forward[S: IntVar](
+    def forward[S: IntVar, Ho: IntVar, Wo: IntVar](
         self,
         x: Tensor[[S, 256, int, int]],
         skip: Tensor[[S, 256, int, int]] | None,
-        size: tuple[int, int],
-    ) -> Tensor[[S, 256, int, int]]:
+        size: tuple[Int[Ho], Int[Wo]],
+    ) -> Tensor[[S, 256, Ho, Wo]]:
         if self.resConfUnit1 is not None and skip is not None:
             x = x + self.resConfUnit1(skip)
         return self.out_conv(resize(self.resConfUnit2(x), size))

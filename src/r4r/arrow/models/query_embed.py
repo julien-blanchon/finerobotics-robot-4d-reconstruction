@@ -34,8 +34,8 @@ def mlp[In: IntVar, D: IntVar](
     return nn.Sequential(nn.Linear(width_in, width), nn.GELU(), nn.Linear(width, width))
 
 
-class QueryEmbedding[D: IntVar](nn.Module):
-    def __init__(self, width: Int[D], crop: int) -> None:
+class QueryEmbedding[D: IntVar, Crop: IntVar](nn.Module):
+    def __init__(self, width: Int[D], crop: Int[Crop]) -> None:
         super().__init__()
         self.width = width
         self.crop = crop
@@ -74,6 +74,7 @@ class QueryEmbedding[D: IntVar](nn.Module):
     def fourier[B: IntVar, Q: IntVar](self, uv: Tensor[[B, Q, *UV]]) -> Tensor[[B, Q, int]]:
         """`[sin uω, cos uω, sin vω, cos vω]`, `ω_k = 100^(−k / (D/4))`, k < D/4 (uv in [−1, 1])."""
 
+        # The width is 4 · (D // 4), which pyrefly does not reduce to D (D is a multiple of 4)
         per_axis = self.width // 4
         omega = 1.0 / FOURIER_BASE ** (
             torch.arange(per_axis, dtype=torch.float32, device=uv.device) / per_axis
@@ -83,7 +84,7 @@ class QueryEmbedding[D: IntVar](nn.Module):
 
     def crops[B: IntVar, S: IntVar, H: IntVar, W: IntVar, Q: IntVar](
         self, images: Tensor[[B, S, *RGB, H, W]], frame: Tensor[[B, Q]], xy: Tensor[[B, Q, *UV]]
-    ) -> Tensor[[B, Q, int]]:
+    ) -> Tensor[[B, Q, 3 * Crop * Crop]]:
         """Raw-RGB `crop × crop` patch at the nearest pixel, replicate-padded, channel-major."""
 
         b, _, _, height, width = images.shape

@@ -51,6 +51,8 @@ def model_images[N: IntVar, H: IntVar, W: IntVar](
 ) -> Tensor[[N, *RGB, int, int]]:
     """uint8 frames → float RGB in [0, 1] at model size (antialiased bilinear)."""
 
+    # The model size rounds a float ratio of the native one (`Resize.for_size`): left `int`
+
     width, height = resize.model
     images = frames.float() / 255
     return F.interpolate(

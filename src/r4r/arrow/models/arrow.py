@@ -34,9 +34,9 @@ if TYPE_CHECKING:
 
 PRETRAINED = "ifradlin/arrow"
 DECODER_WIDTH: Final = 1280
-DECODER_DEPTH = 8
+DECODER_DEPTH: Final = 8
 DECODER_HEADS: Final = 16
-RGB_CROP = 9
+RGB_CROP: Final = 9
 OUTPUTS = ("points", "point_confidence", "uv", "visibility_logits", "normals", "displacement")
 
 
@@ -47,8 +47,8 @@ class Encoding[B: IntVar, S: IntVar, H: IntVar, W: IntVar, N: IntVar]:
 
     images: Tensor[[B, S, *RGB, H, W]]
     id_tokens: Tensor[[B, S, 3072]]
-    keys: Tensor[[int, B, 16, N, 80]]
-    values: Tensor[[int, B, 16, N, 80]]
+    keys: Tensor[[8, B, 16, N, 80]]
+    values: Tensor[[8, B, 16, N, 80]]
 
 
 @dataclass(frozen=True, slots=True)

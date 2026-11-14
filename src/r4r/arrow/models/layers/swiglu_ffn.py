@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 def swiglu_hidden(dim: int, mlp_ratio: int) -> int:
     """DINOv2's "fused" width: 2/3 of the MLP width, rounded up to a multiple of 8."""
 
+    # `int`, not `Int[...]`: the width truncates a float product, outside shape arithmetic
+
     return (int(dim * mlp_ratio * 2 / 3) + 7) // 8 * 8
 
 

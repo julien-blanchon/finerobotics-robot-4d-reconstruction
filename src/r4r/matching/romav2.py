@@ -113,9 +113,9 @@ class Matches[B: IntVar]:
     size_b: tuple[int, int]
 
 
-def resize[S: IntVar, H: IntVar, W: IntVar, C: IntVar](
-    x: Tensor[[S, H, W, C]], size: int
-) -> Tensor[[S, int, int, C]]:
+def resize[S: IntVar, H: IntVar, W: IntVar, C: IntVar, Side: IntVar](
+    x: Tensor[[S, H, W, C]], size: Int[Side]
+) -> Tensor[[S, Side, Side, C]]:
     """Channels-last bilinear resize to `size²` (`align_corners=False`)."""
 
     channels_first = F.interpolate(

@@ -35,9 +35,13 @@ WARP_STEP = 4.0  # displacement is predicted in units of a quarter pixel of the 
 CHOLESKY_EPS = 1e-6
 
 
-def window[S: IntVar, H: IntVar, W: IntVar, C: IntVar](
-    target: Tensor[[S, H, W, C]], warp: Tensor[[S, H, W, *UV]], radius: int
-) -> tuple[Tensor[[S, H, W, int, int, C]], Tensor[[S, H, W, 1, 1]], Tensor[[S, H, W, 1, 1]]]:
+def window[S: IntVar, H: IntVar, W: IntVar, C: IntVar, Radius: IntVar](
+    target: Tensor[[S, H, W, C]], warp: Tensor[[S, H, W, *UV]], radius: Int[Radius]
+) -> tuple[
+    Tensor[[S, H, W, 2 * Radius + 2, 2 * Radius + 2, C]],
+    Tensor[[S, H, W, 1, 1]],
+    Tensor[[S, H, W, 1, 1]],
+]:
     """Target pixels on the `(2r + 2)²` integer grid around each warp position, and its weights.
 
     Pixels outside the image are zero (grid_sample's zero padding). Bilinear sampling at the warp
@@ -82,12 +86,12 @@ def bilinear_sample[S: IntVar, H: IntVar, W: IntVar, C: IntVar](
     return blend(corners, fx[..., None, :, :], fy[..., None, :, :])[..., 0, 0]
 
 
-def local_correlation[S: IntVar, H: IntVar, W: IntVar, C: IntVar](
+def local_correlation[S: IntVar, H: IntVar, W: IntVar, C: IntVar, Radius: IntVar](
     source: Tensor[[S, H, W, C]],
     target: Tensor[[S, H, W, C]],
     warp: Tensor[[S, H, W, *UV]],
-    radius: int,
-) -> Tensor[[S, H, W, int]]:
+    radius: Int[Radius],
+) -> Tensor[[S, H, W, (2 * Radius + 1) * (2 * Radius + 1)]]:
     """Scaled dot products of each source pixel with the target around its warp, `[S, H, W, K]`:
     `c(x, δ) = ⟨f_a(x), f_b(w(x) + δ)⟩ / √C` for the `K = (2r + 1)²` integer offsets `δ`.
 

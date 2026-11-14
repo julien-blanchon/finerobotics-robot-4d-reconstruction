@@ -36,7 +36,7 @@ class Queries[B: IntVar, Q: IntVar]:
     def slice[Start: IntVar, Stop: IntVar](
         self, start: Int[Start], stop: Int[Stop]
     ) -> Queries[B, Stop - Start]:
-        """Queries `start:stop`, for `0 ≤ start ≤ stop ≤ count` (Python would clip a longer stop)."""
+        """Queries `start:stop`, for `0 ≤ start ≤ stop ≤ count` (a longer stop would clip)."""
 
         return Queries(
             self.xy[:, start:stop],
@@ -46,8 +46,12 @@ class Queries[B: IntVar, Q: IntVar]:
         )
 
 
-def pixel_grid(height: int, width: int, stride: int, device: torch.device) -> Tensor[[int, *UV]]:
+def pixel_grid[H: IntVar, W: IntVar](
+    height: Int[H], width: Int[W], stride: int, device: torch.device
+) -> Tensor[[int, *UV]]:
     """Integer pixel centres `(x, y)`, every `stride` pixels, row-major."""
+
+    # The length is ⌈H/stride⌉ · ⌈W/stride⌉: no ceiling division in pyrefly's shape arithmetic
 
     ys = torch.arange(0, height, stride, device=device, dtype=torch.float32)
     xs = torch.arange(0, width, stride, device=device, dtype=torch.float32)

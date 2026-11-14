@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="330" viewBox="0 0 900 330" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-label="the five stages of r4r rig">
+<title>the five stages of r4r rig</title>
+<rect x="0.5" y="0.5" width="899" height="329" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="20" y="30" font-size="13" fill="#0f172a" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">r4r rig &lt;dataset&gt; --episodes … --groups 2 [--write] [--save solution.pt]</text>
+<rect x="20" y="50" width="162" height="196" rx="10" fill="#fff7ed" stroke="#ea580c" stroke-width="1.6"/>
+<circle cx="42" cy="74" r="13" fill="#ea580c"/>
+<text x="42" y="78.5" font-size="13" fill="#ffffff" font-weight="700" text-anchor="middle">1</text>
+<text x="62" y="79" font-size="14" fill="#ea580c" font-weight="700">Mounts</text>
+<text x="32" y="108" font-size="12" fill="#475569">each moving camera</text>
+<text x="32" y="125" font-size="12" fill="#475569">from its own video:</text>
+<text x="32" y="142" font-size="12" fill="#475569">KLT tracks, search</text>
+<text x="32" y="159" font-size="12" fill="#475569">24 orientations ×</text>
+<text x="32" y="176" font-size="12" fill="#475569">focal factors, bundle;</text>
+<text x="32" y="193" font-size="12" fill="#475569">consensus over</text>
+<text x="32" y="210" font-size="12" fill="#475569">episodes</text>
+<text x="32" y="234" font-size="11" fill="#ea580c" font-weight="600" font-style="italic">skipped if known</text>
+<path d="M183 148 L194 148" fill="none" stroke="#94a3b8" stroke-width="1.8" stroke-linejoin="round"/>
+<polygon points="194,148 185.0,143.0 185.0,153.0" fill="#94a3b8"/>
+<rect x="195" y="50" width="162" height="196" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.6"/>
+<circle cx="217" cy="74" r="13" fill="#0d9488"/>
+<text x="217" y="78.5" font-size="13" fill="#ffffff" font-weight="700" text-anchor="middle">2</text>
+<text x="237" y="79" font-size="14" fill="#0d9488" font-weight="700">Tracks</text>
+<text x="207" y="108" font-size="12" fill="#475569">KLT tracks of every</text>
+<text x="207" y="125" font-size="12" fill="#475569">camera, merged</text>
+<text x="207" y="142" font-size="12" fill="#475569">through RoMa v2</text>
+<text x="207" y="159" font-size="12" fill="#475569">links at the same</text>
+<text x="207" y="176" font-size="12" fill="#475569">instants (every</text>
+<text x="207" y="193" font-size="12" fill="#475569">--every timesteps)</text>
+<text x="207" y="234" font-size="11" fill="#0d9488" font-weight="600" font-style="italic">per episode</text>
+<path d="M358 148 L369 148" fill="none" stroke="#94a3b8" stroke-width="1.8" stroke-linejoin="round"/>
+<polygon points="369,148 360.0,143.0 360.0,153.0" fill="#94a3b8"/>
+<rect x="370" y="50" width="162" height="196" rx="10" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.6"/>
+<circle cx="392" cy="74" r="13" fill="#0284c7"/>
+<text x="392" y="78.5" font-size="13" fill="#ffffff" font-weight="700" text-anchor="middle">3</text>
+<text x="412" y="79" font-size="14" fill="#0284c7" font-weight="700">Static starts</text>
+<text x="382" y="108" font-size="12" fill="#475569">each static camera:</text>
+<text x="382" y="125" font-size="12" fill="#475569">PnP on points the</text>
+<text x="382" y="142" font-size="12" fill="#475569">moving cameras</text>
+<text x="382" y="159" font-size="12" fill="#475569">triangulate, or the</text>
+<text x="382" y="176" font-size="12" fill="#475569">recorded pose;</text>
+<text x="382" y="193" font-size="12" fill="#475569">consensus over</text>
+<text x="382" y="210" font-size="12" fill="#475569">episodes</text>
+<text x="382" y="234" font-size="11" fill="#0284c7" font-weight="600" font-style="italic">start &gt; 10 m: rejected</text>
+<path d="M533 148 L544 148" fill="none" stroke="#94a3b8" stroke-width="1.8" stroke-linejoin="round"/>
+<polygon points="544,148 535.0,143.0 535.0,153.0" fill="#94a3b8"/>
+<rect x="545" y="50" width="162" height="196" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.6"/>
+<circle cx="567" cy="74" r="13" fill="#0d9488"/>
+<text x="567" y="78.5" font-size="13" fill="#ffffff" font-weight="700" text-anchor="middle">4</text>
+<text x="587" y="79" font-size="14" fill="#0d9488" font-weight="700">Bundle</text>
+<text x="557" y="108" font-size="12" fill="#475569">all episodes at once:</text>
+<text x="557" y="125" font-size="12" fill="#475569">free bodies (arm bases,</text>
+<text x="557" y="142" font-size="12" fill="#475569">mobile base) and static</text>
+<text x="557" y="159" font-size="12" fill="#475569">cameras free, mounts</text>
+<text x="557" y="176" font-size="12" fill="#475569">frozen; optional joint</text>
+<text x="557" y="193" font-size="12" fill="#475569">and time offsets</text>
+<text x="557" y="234" font-size="11" fill="#0d9488" font-weight="600" font-style="italic">Levenberg–Marquardt</text>
+<path d="M708 148 L719 148" fill="none" stroke="#94a3b8" stroke-width="1.8" stroke-linejoin="round"/>
+<polygon points="719,148 710.0,143.0 710.0,153.0" fill="#94a3b8"/>
+<rect x="720" y="50" width="162" height="196" rx="10" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+<circle cx="742" cy="74" r="13" fill="#16a34a"/>
+<text x="742" y="78.5" font-size="13" fill="#ffffff" font-weight="700" text-anchor="middle">5</text>
+<text x="762" y="79" font-size="14" fill="#16a34a" font-weight="700">Groups</text>
+<text x="732" y="108" font-size="12" fill="#475569">the same bundle on</text>
+<text x="732" y="125" font-size="12" fill="#475569">separate groups of</text>
+<text x="732" y="142" font-size="12" fill="#475569">episodes: their</text>
+<text x="732" y="159" font-size="12" fill="#475569">disagreement per free</text>
+<text x="732" y="176" font-size="12" fill="#475569">body is the</text>
+<text x="732" y="193" font-size="12" fill="#475569">uncertainty</text>
+<text x="732" y="234" font-size="11" fill="#16a34a" font-weight="600" font-style="italic">must agree to mm, 0.1°</text>
+<text x="20" y="278" font-size="12" fill="#475569">Why staged: a camera mount and a body above it on the same chain can trade off and still fit the pixels.</text>
+<text x="20" y="296" font-size="12" fill="#475569">A mount does not depend on any body upstream (a base error moves the camera and the static scene rigidly together),</text>
+<text x="20" y="314" font-size="12" fill="#475569">so it is solved first and frozen. The solver refuses a free mount together with a free body above it.</text>
+</svg>

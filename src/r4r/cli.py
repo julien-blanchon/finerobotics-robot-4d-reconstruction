@@ -565,7 +565,9 @@ class Overlay:
                     CameraMount.from_prior(c.name, c.prior, c.mount, c.moving)
                     for c in episode.cameras
                 )
-                model = compile_model(episode.robot, None, mounts, body_mounts(episode.priors))
+                model = compile_model(
+                    episode.robot, None, mounts, body_mounts(episode.priors), visual=True
+                )
             videos = {
                 c.name: c.frames.permute(0, 2, 3, 1).numpy()
                 for c in episode.cameras
@@ -650,7 +652,7 @@ class Preview:
             "camera_body": [robot.camera_body[i] for i in index],
             "intrinsics": torch.tensor(k, dtype=torch.float64),
         }
-        model = compile_model(episode.robot, None, mounts, bodies)
+        model = compile_model(episode.robot, None, mounts, bodies, visual=True)
         videos = {c.name: c.frames.permute(0, 2, 3, 1).numpy() for c in streams}
         label = f"{self.dataset}  episode {self.episode}  PRIORS ONLY (no solve)"
         still = self.output.suffix.lower() == ".png"

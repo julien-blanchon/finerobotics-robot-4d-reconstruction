@@ -34,7 +34,12 @@ the dataset, per episode (e.g. a static camera re-placed between episodes) or pe
 `bodies` are elements of the description whose offset from their parent is not exactly known
 (a second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the
 video resolution, a property of the lens: fixed across episodes unless `focal_range`
-(relative) says how far it may vary.
+(relative) says how far it may vary. `intrinsics` reads a camera's intrinsics from a column
+of the dataset itself, per episode (simulators that randomise the focal):
+`{"column": "publisher.<name>_intrinsics", "layout": "fx_fy_cx_cy" | "matrix", "size": [w, h],
+"resize": "stretch" | "height"}`: `size` is the resolution the values are given at (default:
+the video's), `resize` how they map to the video (`stretch`: each axis scaled; `height`: the
+same vertical field of view, centred).
 """
 
 from __future__ import annotations
@@ -52,6 +57,16 @@ PRIORS = Path(__file__).resolve().parents[3] / "priors"
 
 
 @dataclass(frozen=True, slots=True)
+class IntrinsicsColumn:
+    """Where a dataset records a camera's intrinsics (see the module doc)."""
+
+    column: str
+    layout: Literal["fx_fy_cx_cy", "matrix"] = "fx_fy_cx_cy"
+    size: tuple[int, int] | None = None  # width, height the values are given at
+    resize: Literal["stretch", "height"] = "stretch"
+
+
+@dataclass(frozen=True, slots=True)
 class CameraPrior:
     mount: Literal["static", "moving"] | None = None
     link: str | None = None
@@ -65,6 +80,8 @@ class CameraPrior:
     # How often the mount may change within its ranges: dataset, episode (e.g. a static camera
     # re-placed between episodes) or frame
     scope: Literal["dataset", "episode", "frame"] = "dataset"
+    # Intrinsics recorded in the dataset's own columns (per episode), if any
+    intrinsics: IntrinsicsColumn | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +174,7 @@ def load_priors(root: Path) -> DatasetPriors:
             focal=c.get("focal"),
             focal_range=c.get("focal_range"),
             scope=c.get("scope", "dataset"),
+            intrinsics=_intrinsics_column(c.get("intrinsics")),
         )
         for name, c in raw.get("cameras", {}).items()
     }
@@ -191,6 +209,17 @@ def load_priors(root: Path) -> DatasetPriors:
         cameras=cameras,
         description=raw.get("description"),
         notes=raw.get("notes", ""),
+    )
+
+
+def _intrinsics_column(raw: dict | None) -> IntrinsicsColumn | None:
+    if raw is None:
+        return None
+    return IntrinsicsColumn(
+        raw["column"],
+        raw.get("layout", "fx_fy_cx_cy"),
+        tuple(raw["size"]) if raw.get("size") else None,
+        raw.get("resize", "stretch"),
     )
 
 

@@ -212,11 +212,14 @@ def load_priors(root: Path) -> DatasetPriors:
 
 @dataclass(frozen=True, slots=True)
 class EpisodeRecord:
-    """Known per-episode values: the station (setup) and each camera's intrinsics
-    `(fx, fy, cx, cy)` at the video resolution."""
+    """Known per-episode values: the station (setup), each camera's intrinsics
+    `(fx, fy, cx, cy)` at the video resolution and, for static cameras, a recorded pose
+    `(x, y, z, qw, qx, qy, qz)` in the robot base frame (OpenCV axes; e.g. the dataset's own
+    per-episode calibration), the start of the rig's refinement."""
 
     station: str | None
     intrinsics: dict[str, tuple[float, float, float, float]]
+    poses: dict[str, tuple[float, ...]] = field(default_factory=dict)
 
 
 def episode_table_path(root: Path) -> Path:
@@ -228,9 +231,9 @@ def episode_table_path(root: Path) -> Path:
 def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
     """One episode's known values; None when the dataset has no table or no row for it.
 
-    The table has one row per (episode, camera): `episode, camera, fx, fy, cx, cy` and an
-    optional `station`. Intrinsics may be null (station known, focal not): such rows give
-    the station only.
+    The table has one row per (episode, camera): `episode, camera`, then `fx, fy, cx, cy`,
+    an optional `station` and optional pose columns `x, y, z, qw, qx, qy, qz`; null values
+    mean unknown (a row may carry only a pose, or only intrinsics).
     """
 
     path = episode_table_path(root)
@@ -243,12 +246,18 @@ def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
         return None
     rows = table.to_pylist()
     station = rows[0].get("station")
+    pose = ("x", "y", "z", "qw", "qx", "qy", "qz")
     return EpisodeRecord(
         None if station is None else str(station),
         {
             r["camera"]: (r["fx"], r["fy"], r["cx"], r["cy"])
             for r in rows
             if r.get("fx") is not None
+        },
+        {
+            r["camera"]: tuple(float(r[k]) for k in pose)
+            for r in rows
+            if all(r.get(k) is not None for k in pose)
         },
     )
 

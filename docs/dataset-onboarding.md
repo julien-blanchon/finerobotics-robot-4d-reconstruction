@@ -100,7 +100,17 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
     even the exact focal rescued only 2 of the 12 failing fits. Use the estimate as a
     plausibility check of the focal the fit returns, not as a replacement.
 - **Scope** of each pose: `dataset` (bolted, never moves), `episode` (re-placed between
-  episodes, e.g. DROID's exterior cameras), `frame` (rare).
+  episodes, e.g. DROID's exterior cameras), `frame` (rare). A static camera's pose given in
+  the priors is where `r4r rig` starts it (no PnP; the bundle refines it within the priors'
+  ranges). When a dataset records its own per-episode calibration (DROID's
+  `camera_extrinsics`), put it in the episodes table as pose columns `x, y, z, qw, qx, qy, qz`
+  (base frame, OpenCV axes; intrinsics columns null when unknown) ✅: `r4r preview` draws it
+  and `r4r rig` starts each episode from it instead of PnP. PnP on robot tracks alone can
+  land a camera far off and still fit (DROID: exteriors below the table at 0.86 px).
+  For a moving camera the same columns are its mount on its link in that episode (simulators
+  that randomise mounts per episode and record them, e.g. molmobot): give the camera
+  `"scope": "episode"` with a tight range, and `r4r rig` starts each episode's mount there.
+  Images alone do not pin a per-episode mount reliably (RB-Y1: a wrist 25° off at 0.7 px).
 - **Lens** ✅: `"lens": "pinhole"` (default) or `"fisheye"`, and its `distortion`
   coefficients, looked for like the focal (recorded calibration first):
   - pinhole: OpenCV radial `[k1, k2, k3]` (from `distCoeffs` `[k1, k2, p1, p2, k3]`: drop the

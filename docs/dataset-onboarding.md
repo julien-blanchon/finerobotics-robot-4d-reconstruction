@@ -75,9 +75,14 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
   pick encoder signs that way. Commanded turn rates can be a poor reference (HSR). `r4r rig`
   ✅ then uses the record throughout: moving-camera mounts are searched on each episode's
   longest span where the base is parked (≥ 20 timesteps), static cameras are placed with the
-  base moved, and the bundle's per-frame base starts from the record. Without any record ⬜
-  (visual odometry). If the base never moves within episodes, the fixed-base
-  pipeline applies episode by episode.
+  base moved, and the bundle's per-frame base starts from the record. The motion comes from
+  what the dataset records, not from vision. Look for it in this order, in the state, the
+  actions and the feature `names`: a recorded base/root pose or odometry; a measured base
+  velocity; wheel encoders; a commanded base velocity (check it against measured motion);
+  for legged robots, leg kinematics with the stance foot held (joint states, contacts, IMU
+  orientation; ⬜ `base_odometry` kind not yet written). First check whether the base moves
+  within episodes at all: if it never does, the fixed-base pipeline applies episode by
+  episode. A base that moves with nothing recorded is a dataset issue (`priors/ISSUES.md`).
 - Always keep **one anchor** (a fixed arm, a known camera): with everything free, the whole
   scene can shift with no change in the images.
 

@@ -77,7 +77,8 @@ class RigEpisode:
     # Mobile base: its pose at each timestep relative to the first, in its own frame (odometry)
     base_motion: Tensor[[int, 4, 4]] | None = None
     # Recorded start poses (base frame, OpenCV axes) of static cameras in this episode, e.g. a
-    # dataset's own per-episode calibration (per-episode table): used instead of PnP
+    # dataset's own per-episode calibration (per-episode table): used instead of PnP. For a
+    # moving camera: its mount on its link in this episode (e.g. a simulator randomising it)
     poses: dict[str, Tensor[[4, 4]]] = field(default_factory=dict)
 
 
@@ -163,6 +164,10 @@ def calibrate_rig(
     starts, intrinsics = _static_starts(
         robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount
     )
+    for i, e in enumerate(episodes):  # recorded per-episode mounts of moving cameras
+        for c, name in enumerate(names):
+            if not static[c] and name in e.poses:
+                starts[i, c] = e.poses[name].to(starts)
 
     # 4-5. Bundles: all episodes, then groups; moving mounts frozen, except those that change
     # between episodes (randomising simulators: episode scope), refined per episode in range

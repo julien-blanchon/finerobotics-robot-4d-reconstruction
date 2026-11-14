@@ -107,6 +107,10 @@ For every camera decide, from the sheet, `r4r links` ✅ and the robot descripti
   (base frame, OpenCV axes; intrinsics columns null when unknown) ✅: `r4r preview` draws it
   and `r4r rig` starts each episode from it instead of PnP. PnP on robot tracks alone can
   land a camera far off and still fit (DROID: exteriors below the table at 0.86 px).
+  For a moving camera the same columns are its mount on its link in that episode (simulators
+  that randomise mounts per episode and record them, e.g. molmobot): give the camera
+  `"scope": "episode"` with a tight range, and `r4r rig` starts each episode's mount there.
+  Images alone do not pin a per-episode mount reliably (RB-Y1: a wrist 25° off at 0.7 px).
 - **Lens** ✅: `"lens": "pinhole"` (default) or `"fisheye"`, and its `distortion`
   coefficients, looked for like the focal (recorded calibration first):
   - pinhole: OpenCV radial `[k1, k2, k3]` (from `distCoeffs` `[k1, k2, p1, p2, k3]`: drop the

@@ -33,6 +33,12 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - InternData-M1: upstream annotations, exact to 0.000 px;
   - DROID: ZED factory intrinsics and DROID's own per-episode extrinsics;
   - molmobot: per-frame extrinsics and render intrinsics.
+  - SynGrasp-1B: per-episode cameras, robot placement and objects in a JSON string column
+    (`publisher.episode.extra_info`) that `info.json` doesn't describe: read free-text columns.
+  - Recorded camera names can be swapped against the video streams (SynGrasp-1B, upstream):
+    project recorded 3D object poses and compare with the dataset's 2D boxes per stream.
+  - Isaac Sim camera orientations saved with its "world" axes are x forward, z up (not
+    USD's -z forward).
   - Upstream annotations can replace missing camera fields: InternData-M1 publishes the 2D
     projections of a few known 3D points per camera; solving the projection from six points
     gives exact intrinsics and poses.

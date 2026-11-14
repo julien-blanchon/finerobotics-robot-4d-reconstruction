@@ -10,6 +10,7 @@ agents, never part of the solve. Input: a solution saved by `r4r rig --save`.
 from __future__ import annotations
 
 import colorsys
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -152,11 +153,22 @@ def draw(
         )
         return pixels.numpy()
 
+    # A radial (pinhole) distortion polynomial folds back far outside the image: keep points
+    # within 1.5x the image corners' normalised radius (fisheyes: in front of the camera)
+    height = image.shape[0]
+    corner = np.hypot(width / 2 / intrinsics[0, 0], height / 2 / intrinsics[1, 1])
+    bound = math.inf if lens is None or lens[1] else 1.5 * corner
+
+    def visible(local: np.ndarray) -> np.ndarray:
+        z = np.maximum(local[:, 2], 1e-6)
+        radius = np.hypot(local[:, 0] / z, local[:, 1] / z)
+        return (local[:, 2] > 0.02) & (radius < bound)
+
     for body, vertices, faces in geoms:
         pose = camera_from_world @ world_from_body[body]
         local = vertices @ pose[:3, :3].T + pose[:3, 3]
         pixel = project(local)
-        ok = (local[:, 2] > 0.02)[faces].all(1)
+        ok = visible(local)[faces].all(1)
         polygons = np.round(pixel[faces[ok]] * 4).astype(np.int32)  # 2 bits of sub-pixel
         near = (np.abs(polygons[..., 0]) < 16 * width).all(1)
         if near.any():
@@ -167,9 +179,13 @@ def draw(
         if pose[2, 3] < 0.05:
             continue
         points = np.vstack([pose[:3, 3], pose[:3, 3] + AXIS_LENGTH * pose[:3, :3].T])
-        if (points[:, 2] <= 0).any():
+        if not visible(points).all():
             continue
         pixel = project(points)
+        # A lens model far outside its field of view (fisheye past 90°) can map to inf/NaN
+        # or beyond OpenCV's int range: skip the frame axes then
+        if not np.isfinite(pixel).all() or np.abs(pixel).max() > 16 * width:
+            continue
         origin = tuple(int(v) for v in pixel[0])
         for axis, colour in enumerate([(255, 40, 40), (40, 255, 40), (60, 120, 255)]):
             end = tuple(int(v) for v in pixel[1 + axis])

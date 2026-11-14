@@ -19,7 +19,7 @@ from einops import rearrange
 from torch import nn
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
 
 PATCH_SIZE = 16
@@ -89,8 +89,8 @@ class Scratch(nn.Module):
         )
 
 
-class DPTHead(nn.Module):
-    def __init__(self, dim: int) -> None:
+class DPTHead[D: IntVar](nn.Module):
+    def __init__(self, dim: Int[D]) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(dim)
         # Heterogeneous layers: typed as plain modules, applied with `level`
@@ -108,7 +108,7 @@ class DPTHead(nn.Module):
         self.scratch = Scratch()
 
     def forward[S: IntVar, H: IntVar, W: IntVar](
-        self, shallow: Tensor[[S, H, W, int]], deep: Tensor[[S, H, W, int]]
+        self, shallow: Tensor[[S, H, W, D]], deep: Tensor[[S, H, W, D]]
     ) -> Tensor[[S, H * 4, W * 4, 3]]:
         """Token maps (DINOv3 block 11; block 17 + matching) → `[S, 4h, 4w, 3]`."""
 

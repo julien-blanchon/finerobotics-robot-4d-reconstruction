@@ -10,7 +10,7 @@ https://github.com/Parskatt/RoMaV2 (MIT).
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn.functional as F
@@ -18,25 +18,31 @@ from einops import rearrange, repeat
 from torch import nn
 
 if TYPE_CHECKING:
-    from shape_extensions import IntTuple, IntVar
+    from shape_extensions import Int, IntTuple, IntVar
     from torch import Tensor
 
 MLP_RATIO = 4
 
 
-class RopeEmbedding(nn.Module):
+class RopeEmbedding[HD: IntVar](nn.Module):
     """sin/cos tables for an `h × w` patch grid, coordinates normalised to [−1, 1] per axis.
 
+    Patch `(i, j)` sits at `u = 2 (i + ½)/h − 1`, `v = 2 (j + ½)/w − 1`; its angles are
+    `2π (u, v) / period_k` for the `HD / 4` stored periods, repeated to the head width.
     The tables are computed in `dtype` (bf16 in the matcher, fp32 in DINOv3) from the stored
     bf16 periods: the pretrained weights expect exactly those rounded angles.
     """
 
-    def __init__(self, head_dim: int, dtype: torch.dtype) -> None:
+    def __init__(self, head_dim: Int[HD], dtype: torch.dtype) -> None:
         super().__init__()
         self.dtype = dtype
         self.register_buffer("periods", torch.empty(head_dim // 4, dtype=torch.bfloat16))
 
-    def forward(self, h: int, w: int) -> tuple[Tensor[[int, int]], Tensor[[int, int]]]:
+    def forward[H: IntVar, W: IntVar](
+        self, h: Int[H], w: Int[W]
+    ) -> tuple[Tensor[[H * W, int]], Tensor[[H * W, int]]]:
+        """`(sin, cos)`, `[h·w, HD]` (pyrefly cannot reduce `4 · (HD // 4)` to `HD`)."""
+
         periods: Tensor[[int]] = self.periods
         options = {"device": periods.device, "dtype": self.dtype}
         rows = torch.arange(0.5, h, **options) / h
@@ -53,7 +59,8 @@ class RopeEmbedding(nn.Module):
 def apply_rope[B: IntVar, NHead: IntVar, N: IntVar, HD: IntVar](
     x: Tensor[[B, NHead, N, HD]], sin: Tensor[[int, HD]], cos: Tensor[[int, HD]]
 ) -> Tensor[[B, NHead, N, HD]]:
-    """Rotate the patch tokens (the last `len(sin)`), in the tables' dtype; prefix tokens pass."""
+    """Rotate the patch tokens (the last `len(sin)`), in the tables' dtype; prefix tokens pass:
+    `x' = x · cos + (−x₂ ‖ x₁) · sin`, `x₁, x₂` the halves of each head."""
 
     dtype = x.dtype
     x = x.to(sin.dtype)
@@ -64,14 +71,14 @@ def apply_rope[B: IntVar, NHead: IntVar, N: IntVar, HD: IntVar](
     return torch.cat((x[..., :prefix, :], rotated), dim=-2).to(dtype)
 
 
-class Attention(nn.Module):
-    def __init__(self, dim: int, num_heads: int) -> None:
+class Attention[D: IntVar, NHead: IntVar](nn.Module):
+    def __init__(self, dim: Int[D], num_heads: Int[NHead]) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
 
-    def forward[B: IntVar, N: IntVar, D: IntVar](
+    def forward[B: IntVar, N: IntVar](
         self, x: Tensor[[B, N, D]], rope: tuple[Tensor[[int, int]], Tensor[[int, int]]] | None
     ) -> Tensor[[B, N, D]]:
         q, k, v = rearrange(
@@ -80,37 +87,42 @@ class Attention(nn.Module):
         if rope is not None:
             q, k = apply_rope(q, *rope), apply_rope(k, *rope)
         out = F.scaled_dot_product_attention(q, k, v)
-        return self.proj(rearrange(out, "b h n d -> b n (h d)"))
+        # Heads merge back to NHead · (D // NHead) = D, which pyrefly cannot simplify
+        return self.proj(cast("Tensor[[B, N, D]]", rearrange(out, "b h n d -> b n (h d)")))
 
 
-class LayerScale(nn.Module):
-    def __init__(self, dim: int) -> None:
+class LayerScale[D: IntVar](nn.Module):
+    """Learned per-channel scale `x · γ` on a residual branch."""
+
+    def __init__(self, dim: Int[D]) -> None:
         super().__init__()
         self.gamma = nn.Parameter(torch.ones(dim))
 
-    def forward[S: IntTuple](self, x: Tensor[[*S, int]]) -> Tensor[[*S, int]]:
+    def forward[Bs: IntTuple](self, x: Tensor[[*Bs, D]]) -> Tensor[[*Bs, D]]:
         return x * self.gamma
 
 
-class Mlp(nn.Module):
-    def __init__(self, dim: int, hidden: int) -> None:
+class Mlp[D: IntVar, Hidden: IntVar](nn.Module):
+    def __init__(self, dim: Int[D], hidden: Int[Hidden]) -> None:
         super().__init__()
         self.fc1 = nn.Linear(dim, hidden)
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden, dim)
 
-    def forward[S: IntTuple](self, x: Tensor[[*S, int]]) -> Tensor[[*S, int]]:
+    def forward[Bs: IntTuple](self, x: Tensor[[*Bs, D]]) -> Tensor[[*Bs, D]]:
         return self.fc2(self.act(self.fc1(x)))
 
 
-class Block(nn.Module):
+class Block[D: IntVar, NHead: IntVar](nn.Module):
     """Pre-norm block; LayerScale in DINOv3 only (the matcher was trained without).
 
     Compiled: fusing norms, RoPE and residuals halves the time. Fused ops keep fp32
     intermediates where eager rounds to bf16, so outputs differ from eager at bf16 noise level.
     """
 
-    def __init__(self, dim: int, num_heads: int, *, eps: float, layer_scale: bool) -> None:
+    def __init__(
+        self, dim: Int[D], num_heads: Int[NHead], *, eps: float, layer_scale: bool
+    ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, eps=eps)
         self.attn = Attention(dim, num_heads)
@@ -120,7 +132,7 @@ class Block(nn.Module):
         self.ls2 = LayerScale(dim) if layer_scale else nn.Identity()
 
     @torch.compile(fullgraph=True, dynamic=True)  # type: ignore[pyrefly:missing-attribute]  # not in the shape stubs
-    def forward[B: IntVar, N: IntVar, D: IntVar](
+    def forward[B: IntVar, N: IntVar](
         self, x: Tensor[[B, N, D]], rope: tuple[Tensor[[int, int]], Tensor[[int, int]]] | None
     ) -> Tensor[[B, N, D]]:
         x = x + self.ls1(self.attn(self.norm1(x), rope))

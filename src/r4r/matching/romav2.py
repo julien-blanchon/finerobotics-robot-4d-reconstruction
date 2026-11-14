@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Self, overload
 
 import torch
 import torch.nn.functional as F
@@ -30,8 +30,10 @@ from .matcher import Matcher
 from .refiner import ConvRefiner
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
+
+    from r4r.types import RGB, UV
 
 CHECKPOINT_URL = "https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt"
 COARSE_SIZE = 800
@@ -40,6 +42,10 @@ ANCHOR_SIZE = 512  # displacement embeddings are scaled by image size / 512
 STRIDES = (4, 2, 1)  # refiner order, coarse to fine
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+# Refiner features at strides 1, 2, 4 of one working size (channels-last)
+type Pyramid[S: IntVar] = tuple[
+    Tensor[[S, int, int, 64]], Tensor[[S, int, int, 128]], Tensor[[S, int, int, 256]]
+]
 # Compiled regions specialise on batch size 1 and on 32- vs 64-bit indexing: up to ~12 graphs
 # per region, above dynamo's default limit of 8 (fullgraph=True makes that a hard error)
 RECOMPILE_LIMIT = 32
@@ -71,7 +77,11 @@ class Encoding[S: IntVar]:
     )
     size: tuple[int, int]  # input (H, W), for pixel coordinates
 
-    def __getitem__(self, index: Tensor[[int]] | slice) -> Encoding:
+    @overload
+    def __getitem__[N: IntVar](self, index: Tensor[[N]]) -> Encoding[N]: ...
+    @overload
+    def __getitem__(self, index: slice) -> Encoding[int]: ...
+    def __getitem__(self, index: Tensor[[int]] | slice) -> Encoding[int]:
         """Select frames, e.g. `encoding[pairs[:, 0]]`."""
 
         return Encoding(
@@ -93,8 +103,8 @@ class Matches[B: IntVar]:
     probability; `precision` the 2×2 inverse covariance of the warp in working-grid pixels⁻².
     """
 
-    warp_ab: Tensor[[B, 1280, 1280, 2]]
-    warp_ba: Tensor[[B, 1280, 1280, 2]]
+    warp_ab: Tensor[[B, 1280, 1280, *UV]]
+    warp_ba: Tensor[[B, 1280, 1280, *UV]]
     certainty_ab: Tensor[[B, 1280, 1280]]
     certainty_ba: Tensor[[B, 1280, 1280]]
     precision_ab: Tensor[[B, 1280, 1280, 2, 2]]
@@ -103,9 +113,11 @@ class Matches[B: IntVar]:
     size_b: tuple[int, int]
 
 
-def resize[S: IntVar, H: IntVar, W: IntVar](
-    x: Tensor[[S, H, W, int]], size: int
-) -> Tensor[[S, int, int, int]]:
+def resize[S: IntVar, H: IntVar, W: IntVar, C: IntVar](
+    x: Tensor[[S, H, W, C]], size: int
+) -> Tensor[[S, int, int, C]]:
+    """Channels-last bilinear resize to `size²` (`align_corners=False`)."""
+
     channels_first = F.interpolate(
         rearrange(x, "s h w c -> s c h w"), size=(size, size), mode="bilinear", align_corners=False
     )
@@ -138,13 +150,15 @@ class RoMaV2(nn.Module):
 
     @torch.inference_mode()
     @torch._dynamo.config.patch(recompile_limit=RECOMPILE_LIMIT)
-    def encode[S: IntVar, H: IntVar, W: IntVar](self, images: Tensor[[S, 3, H, W]]) -> Encoding[S]:
+    def encode[S: IntVar, H: IntVar, W: IntVar](
+        self, images: Tensor[[S, *RGB, H, W]]
+    ) -> Encoding[S]:
         """RGB in [0, 1], any size; squashed (bicubic, antialiased) to the working sizes."""
 
         mean = images.new_tensor(IMAGENET_MEAN)[:, None, None]
         std = images.new_tensor(IMAGENET_STD)[:, None, None]
 
-        def normalised(size: int) -> Tensor:
+        def normalised[R: IntVar](size: Int[R]) -> Tensor[[S, *RGB, R, R]]:
             resized = F.interpolate(images, size=(size, size), mode="bicubic", antialias=True)
             return (resized - mean) / std
 
@@ -162,10 +176,13 @@ class RoMaV2(nn.Module):
         """Match frame `a[i]` with `b[i]` for every `i`."""
 
         out = self.matcher(a.descriptors, b.descriptors)
-        warp: Tensor[[int, int, int, 2]] = out[..., :2]
+        # Both directions on the batch (a→b, b→a); the grid grows with each stage
+        warp: Tensor[[2 * B, int, int, *UV]] = out[..., :2]
         # Precision slots start at zero; the refiners accumulate into them
-        confidence: Tensor[[int, int, int, 4]] = F.pad(out[..., 2:], (0, 3))
-        stages = [(COARSE_SIZE, a.coarse_fine, b.coarse_fine)]
+        confidence: Tensor[[2 * B, int, int, 4]] = F.pad(out[..., 2:], (0, 3))
+        stages: list[tuple[int, Pyramid[B], Pyramid[B]]] = [
+            (COARSE_SIZE, a.coarse_fine, b.coarse_fine)
+        ]
         if a.fine is not None and b.fine is not None:
             stages.append((FINE_SIZE, a.fine, b.fine))
         for size, features_a, features_b in stages:

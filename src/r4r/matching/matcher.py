@@ -25,8 +25,10 @@ from .dpt import DPTHead
 from .layers import Block, RopeEmbedding
 
 if TYPE_CHECKING:
-    from shape_extensions import IntVar
+    from shape_extensions import Int, IntVar
     from torch import Tensor
+
+    from r4r.types import UV
 
 WIDTH = 768
 DEPTH = 12
@@ -35,8 +37,11 @@ NORM_EPS = 1e-6
 EMBED_WIDTH = 1024  # matcher output and Fourier position embedding width
 
 
-def normalized_grid(h: int, w: int, device: torch.device) -> Tensor[[int, int, 2]]:
-    """Pixel centres in grid_sample's `align_corners=False` coordinates, `(x, y)` last."""
+def normalized_grid[H: IntVar, W: IntVar](
+    h: Int[H], w: Int[W], device: torch.device
+) -> Tensor[[H, W, *UV]]:
+    """Pixel centres in grid_sample's `align_corners=False` coordinates, `(x, y)` last:
+    `x = 2 (j + ½) / w − 1` for column `j` (and `y` for row `i`), in (−1, 1)."""
 
     rows = (torch.arange(h, device=device) + 0.5) * (2 / h) - 1
     columns = (torch.arange(w, device=device) + 0.5) * (2 / w) - 1
@@ -83,7 +88,12 @@ class Matcher(nn.Module):
     def forward[B: IntVar, H: IntVar, W: IntVar](
         self, a: Tensor[[B, H, W, 2048]], b: Tensor[[B, H, W, 2048]]
     ) -> Tensor[[2 * B, H * 4, W * 4, 3]]:
-        """DINOv3 features of both frames → `[warp | overlap logit]`, a→b then b→a on the batch."""
+        """DINOv3 features of both frames → `[warp | overlap logit]`, a→b then b→a on the batch.
+
+        Soft nearest neighbour: `m(x) = Σ_y softmax_y(⟨f̂_a(x), f̂_b(y)⟩ / τ) · φ(y)`, `f̂` the
+        unit-normalised joint features, `φ(y) = (sin Ωy, cos Ωy)` the Fourier embedding of the
+        target grid; the DPT head reads the warp off `m`.
+        """
 
         _, h, w, _ = a.shape
         with torch.autocast(a.device.type, dtype=torch.bfloat16):

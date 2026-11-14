@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.types import RGB
+
 # (channels, convolutions) per stride 1, 2, 4
 STAGES: tuple[tuple[int, int], ...] = ((64, 2), (128, 2), (256, 4))
 
@@ -41,7 +43,7 @@ class FineFeatures(nn.Module):
 
     @torch.compile(fullgraph=True, dynamic=True)  # type: ignore[pyrefly:missing-attribute]  # not in the shape stubs
     def forward[S: IntVar, H: IntVar, W: IntVar](
-        self, images: Tensor[[S, 3, H, W]]
+        self, images: Tensor[[S, *RGB, H, W]]
     ) -> tuple[
         Tensor[[S, H, W, 64]], Tensor[[S, H // 2, W // 2, 128]], Tensor[[S, H // 4, W // 4, 256]]
     ]:

@@ -29,7 +29,7 @@ import pyarrow.parquet as pq
 import torch
 from einops import rearrange, repeat
 
-from r4r.output import LAYOUT_KEY, EpisodeOutput, Layout
+from r4r.output import LAYOUT_KEY, CameraInfo, EpisodeOutput, Layout
 from r4r.rago.stages import moved_kinematics
 
 if TYPE_CHECKING:
@@ -220,6 +220,7 @@ def dataset_layout(
     )
     return Layout(
         cameras=cameras,
+        ignored=ignored_cameras(root),
         effectors=effectors(robot, priors),
         joints=names,
         mobile=priors.base == "mobile" or moving_base(robot) is not None,
@@ -230,6 +231,25 @@ def dataset_layout(
             "time_offset": 0.0 if fitted is None else fitted.time_offset,
         },
     )
+
+
+def ignored_cameras(root: Path) -> tuple[CameraInfo, ...]:
+    """The dataset's video cameras (not depth maps) that the priors ignore, with what their
+    feature info states (`camera.mount`, `camera.role`; lens from the priors)."""
+
+    from r4r.data.lerobot import _root
+    from r4r.data.priors import CameraPrior
+
+    opened = _root(root)
+    out = []
+    for key in opened.tables.video_keys:
+        info = opened.tables.features[key].get("info", {}) or {}
+        name = key.removeprefix("observation.images.")
+        prior = opened.priors.cameras.get(name, CameraPrior())
+        if prior.ignore and not info.get("is_depth_map", False):
+            mount = str(info.get("camera.mount") or "unknown")
+            out.append(CameraInfo(name, prior.lens, mount, str(info.get("camera.role") or "")))
+    return tuple(out)
 
 
 def episode_output[T: IntVar](

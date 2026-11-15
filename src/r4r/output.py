@@ -82,6 +82,9 @@ class Layout:
     mapping: tuple[dict[str, object], ...] = field(default=())
     # The lag correction: `state_shift` (frames, whole) and the fitted `time_offset` (frames)
     lag: dict[str, float] = field(default_factory=dict)
+    # Cameras the priors ignore (worn by a person, not placeable): their columns are written,
+    # NaN in every frame, so every camera of the dataset is present (`camera.calibrated` false)
+    ignored: tuple[CameraInfo, ...] = ()
 
     def features(self) -> dict[str, dict[str, object]]:
         """LeRobot feature entries (`dtype`, `shape`, `names`, `info`) of the r4r columns."""
@@ -90,7 +93,7 @@ class Layout:
             return {"dtype": "float32", "shape": shape, "names": names, "info": info or {}}
 
         out = {}
-        for c in self.cameras:
+        for c in (*self.cameras, *self.ignored):
             prefix = f"observation.camera.{c.name}"
             out[f"{prefix}.pose"] = entry([7], list(POSE_NAMES), {"frame": "episode"})
             out[f"{prefix}.intrinsics"] = entry([4], list(INTRINSICS_NAMES))
@@ -137,8 +140,9 @@ class Layout:
                 "camera.mount": c.mount,
                 "camera.role": c.role,
                 "camera.depth_key": None,
+                "camera.calibrated": c not in self.ignored,
             }
-            for c in self.cameras
+            for c in (*self.cameras, *self.ignored)
         }
 
     def to_json(self) -> str:
@@ -238,6 +242,12 @@ def frame_table(layout: Layout, out: EpisodeOutput) -> pa.Table:
         columns[f"{prefix}.pose"] = pose(world_from_camera)
         columns[f"{prefix}.intrinsics"] = _vectors(fx_fy_cx_cy.expand(steps, 4))
         columns[f"{prefix}.distortion"] = _vectors(distortion.expand(steps, 4))
+    unknown = torch.full((steps, 4), math.nan, dtype=torch.float64)
+    for camera in layout.ignored:
+        prefix = f"observation.camera.{camera.name}"
+        columns[f"{prefix}.pose"] = _vectors(torch.full((steps, 7), math.nan))
+        columns[f"{prefix}.intrinsics"] = _vectors(unknown)
+        columns[f"{prefix}.distortion"] = _vectors(unknown)
     for e in layout.effectors:
         prefix = f"observation.ee.{e.arm}"
         columns[f"{prefix}.pose"] = pose(ee_pose(e, world))

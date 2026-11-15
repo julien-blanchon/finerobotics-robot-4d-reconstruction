@@ -170,9 +170,12 @@ class Cost:
     # One `r4r rig` on a sample of a setup (GPU seconds: 10-18 min measured)
     calibration_gpu: float = 900.0
     # A station whose only new value is one static camera, fitted from a neighbour station
-    # (`rago.station`): CPU seconds (bursts, PnP, LM), GPU seconds (RoMa links)
+    # (`r4r station`): CPU seconds (bursts, PnP, LM), GPU seconds (RoMa links and transferred
+    # points; 20-60 s measured). Share of such stations that pass the fit check; the rest
+    # still need a rig (openneodata arx5: 0 of 5 validation stations passed, 2026-11-15)
     station_cpu: float = 60.0
-    station_gpu: float = 20.0
+    station_gpu: float = 40.0
+    station_pass: float = 0.0
 
 
 COST = Cost()
@@ -249,7 +252,8 @@ def dataset_plan(
             cpu += count * cost.light_solve
         elif check:
             cpu += count * cost.flagged * cost.light_solve
-    gpu += len(stations) * cost.calibration_gpu + len(neighbours) * cost.station_gpu
+    failing = len(neighbours) * (1 - cost.station_pass)
+    gpu += (len(stations) + failing) * cost.calibration_gpu + len(neighbours) * cost.station_gpu
     cpu += len(neighbours) * cost.station_cpu
     hours = tables.info.get("total_frames", 0) / tables.fps / 3600 * len(selection)
     return DatasetPlan(

@@ -93,6 +93,26 @@ One row per episode and camera, read by the loader ✅:
 | `station` | the setup; `r4r rig` refuses episodes from several stations |
 | `x, y, z, qw, qx, qy, qz` | static camera: its pose in the base frame (OpenCV axes), where `r4r rig` starts it instead of PnP; moving camera: its mount on its link in that episode |
 
+### Cameras the scene cannot pin: robot keypoints
+
+Static-only rigs, fixed head cameras, a wrist that sees the other arm: click a few robot points
+in a few frames and pass them to `r4r rig --picks picks.json` ✅. A point is a body's name (its
+origin) or a named point of the priors or the picks file:
+
+```json
+{"points": {"tip": {"body": "panda_hand", "offset": [0, 0, 0.1034]}},
+ "picks": [{"episode": 0, "camera": "front", "frame": 42,
+            "pixels": {"tip": [120.5, 88.0], "panda_link4": [101.0, 60.5]}}]}
+```
+
+- `frame` is the video's own frame index (a multiple of `--stride`); 5 frames × 4–6 visible
+  points per camera and episode are enough for a start (8 at least).
+- Clicks are PnP starts and bundle residuals; each is also followed by KLT (a chain).
+- A camera's `robot_points` in the priors (`["panda_link4", "tip"]`, named in the top-level
+  `robot_points`) seeds chains where its start projects them: a refinement of a close start
+  (by-eye or recorded), not a search.
+- Overlay afterwards, as always.
+
 PnP on robot tracks alone can land a camera far off and still fit (DROID: exteriors below the
 table at 0.86 px). Images alone do not pin a per-episode mount (RB-Y1: a wrist 25° off at 0.7 px).
 A moving camera with per-episode pose columns gets `"scope": "episode"` and a tight range.

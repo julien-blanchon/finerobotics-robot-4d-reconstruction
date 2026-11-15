@@ -178,7 +178,7 @@ def picked[T: IntVar](
 
     parts = []
     for pick in picks:
-        if pick.camera not in names:
+        if pick.camera not in names or not pick.pixels:
             continue
         if pick.frame % stride:
             raise ValueError(

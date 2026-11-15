@@ -22,7 +22,7 @@ leave out is a parameter of the robot description, with a **value** (best known 
 | joint-encoder and sub-frame time offsets | dataset | ✅ `kinematics` in the priors, refined in every `r4r rig` bundle |
 | focal length | dataset (episode for randomising sims) | ✅ prior + fit; ✅ `r4r focal` draft (optional) |
 | moving-camera mount (link, pose) | dataset (episode when recorded per episode) | ✅ search + bundle + episode consensus |
-| static-camera pose | dataset or episode | ✅ PnP on moving-camera points, or a recorded pose, + bundle |
+| static-camera pose | dataset or episode | ✅ PnP on moving-camera points or robot keypoints, or a recorded pose, + bundle |
 | arm-base placement (bimanual) | dataset or episode | ✅ free bodies, written back to the priors |
 | robot base pose | frame | ✅ free body per frame, started from recorded odometry (`base_odometry`); ⬜ legged odometry for humanoids |
 | lens distortion | dataset | ✅ prior + bundle refinement; ⬜ AnyCalib initialiser |
@@ -59,9 +59,23 @@ solver refuses a free mount together with a free body above it; `r4r rig` solves
 |---|---|---|---|
 | 1 mounts | each moving camera's own video | its mount (and focal, distortion), frozen | KLT, batched search, bundle, consensus |
 | 2 tracks | every camera, per episode | multi-camera tracks | KLT + RoMa v2 links every `--every` timesteps |
-| 3 static starts | points triangulated by the moving cameras | each static camera's start, per episode | PnP or recorded pose; consensus; > 10 m rejected |
+| 3 static starts | points triangulated by the moving cameras; picked robot points | each static camera's start, per episode | PnP or recorded pose; consensus; > 10 m rejected |
 | 4 bundle | all episodes | free bodies, static cameras, offsets | kinematic bundle (LM) |
 | 5 groups | separate groups of episodes | disagreement per free body | the same bundle per group |
+
+Robot keypoints (`rago/keypoints.py`) place cameras the scene cannot: a static camera with no
+moving camera to triangulate for it, a head camera that never moves relative to the base, a
+wrist that sees the other arm but not its own gripper.
+
+| kind | from | 3D point | used in |
+|---|---|---|---|
+| known point | a pick: a pixel clicked on a named robot point (`--picks`) | FK of the point | PnP start (stage 1 for a moving camera, in its link's frame; stage 3); a residual in the bundles |
+| chain | a pick or a seed (where the current pose projects a robot point, priors `robot_points`) followed ±10 timesteps by KLT | unknown, rigid with the point's body | a track on that body in the bundles (triangulated by variable projection) |
+
+KLT follows a surface patch, not the named point (a joint origin lies inside its housing): read
+as the named point, a followed pixel is 2–4 px off (median, SynGrasp 256²) and spoils PnP. A
+seed alone says nothing about the pose; its chain refines a start within its basin. A moving
+mount with keypoints stays free in the bundles within its priors' ranges.
 
 On a mobile base, stage 1 uses each episode's longest span where the record says the base is
 parked (≥ 20 timesteps), stage 3 places static cameras with the base moved, and the bundle

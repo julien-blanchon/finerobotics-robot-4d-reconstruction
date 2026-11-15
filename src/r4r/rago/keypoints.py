@@ -11,18 +11,22 @@ it at pixel `u_t`, the camera's pose is tied to the robot with no triangulation:
 that scene tracks cannot pin: a static camera that only sees the robot, a head camera that
 never moves relative to the base, a wrist camera that sees the other arm.
 
-Where the pixels come from:
-- picks: pixels clicked in a few frames (`r4r.data.priors.read_picks`);
-- seeds: where a camera's current pose projects the points, every `every` timesteps (a
-  refinement within the basin of that pose, not a search).
-Both are followed `span` timesteps forwards and backwards by KLT (forward–backward checked).
-A followed pixel drifts off the point, by 1–10 px over 10–40 frames on a moving link (SynGrasp,
-256²), so it weighs `followed_weight` of a pick.
+Known points come from picks: pixels clicked in a few frames (`r4r.data.priors.read_picks`).
 
-Start: PnP-RANSAC (`initialize.locate_camera`) on the pooled 3D–2D pairs, the points expressed
-in the frame of the body the camera rides on (`carried`): the world for a static camera; its
-link for a moving one, where the mount is constant over time. The bundle then adds the
-residuals above to its tracks'.
+Chains: each pick, and each seed (where a camera's current pose projects a robot point, every
+`every` timesteps), is followed `span` timesteps forwards and backwards by KLT
+(forward–backward checked). KLT follows the image patch, a surface point rigid with the body
+but not the named point: a joint origin lies inside its housing, a tip between the fingers.
+Read as the named point, a followed pixel is off by 2–4 px median, up to 15 px (SynGrasp,
+256²), and spoils the start. So a chain is a track whose body is known and whose point is not:
+the bundle triangulates it in that body's frame (variable projection, as for its own moving
+tracks) and the body's motion constrains the camera. A seed alone says nothing about the pose
+(its pixel is where the current pose puts it); its chain does, when the seed lands on its body:
+seeds refine a start within its basin.
+
+Start: PnP-RANSAC (`initialize.locate_camera`) on the known points, expressed in the frame of
+the body the camera rides on (`carried`): the world for a static camera; its link for a moving
+one, where the mount is constant over time.
 
 Ref: Lucas & Kanade 1981 (KLT); Lepetit et al., EPnP, IJCV 2009 (start).
 """
@@ -52,8 +56,8 @@ if TYPE_CHECKING:
     from .rig import Rig
     from .robot import Robot
 
-# A camera needs this many keypoint observations for a PnP start
-MIN_KEYPOINTS = 12
+# A camera needs this many known-point observations for a PnP start
+MIN_KEYPOINTS = 8
 # Seeds this close to the image border (pixels) are not followed
 BORDER = 4
 
@@ -64,7 +68,7 @@ class KeypointConfig:
     span: int = 10
     # Seeds: every this many timesteps
     every: int = 5
-    # Weight of a followed (or seeded) pixel, a pick weighing 1
+    # Weight of a chain observation, a pick weighing 1
     followed_weight: float = 0.3
     # KLT window (pixels), pyramid levels, forward–backward agreement (pixels)
     window: int = 15
@@ -74,9 +78,10 @@ class KeypointConfig:
 
 @dataclass(frozen=True, slots=True)
 class Keypoints[M: IntVar]:
-    """`M` observations of known robot points: camera `camera[m]` (index in the rig's names)
-    at timestep `time[m]` sees the point `point[m]` (m, in the frame of body `body[m]`) at
-    `pixel[m]`, with `weight[m]` (a pick 1, a followed pixel less)."""
+    """`M` observations of robot points: camera `camera[m]` (index in the rig's names) at
+    timestep `time[m]` sees, at `pixel[m]` with `weight[m]`, a point rigid with body `body[m]`:
+    the known point `point[m]` (m, body frame) where `chain[m]` is −1 (a pick), else an unknown
+    point shared by the observations of chain `chain[m]` (a pick or seed followed by KLT)."""
 
     camera: Tensor[[M]]
     time: Tensor[[M]]
@@ -84,6 +89,7 @@ class Keypoints[M: IntVar]:
     point: Tensor[[M, *XYZ]]
     pixel: Tensor[[M, *UV]]
     weight: Tensor[[M]]
+    chain: Tensor[[M]]
 
     def where(self, keep: Tensor[[M]]) -> Keypoints[int]:
         return Keypoints(
@@ -93,13 +99,25 @@ class Keypoints[M: IntVar]:
             self.point[keep],
             self.pixel[keep],
             self.weight[keep],
+            self.chain[keep],
         )
+
+    def known(self) -> Keypoints[int]:
+        """The observations of known points (picks)."""
+
+        return self.where(self.chain < 0)
 
     def shifted(self, steps: int) -> Keypoints[M]:
         """The same observations `steps` timesteps later (episodes pooled one after another)."""
 
         return Keypoints(
-            self.camera, self.time + steps, self.body, self.point, self.pixel, self.weight
+            self.camera,
+            self.time + steps,
+            self.body,
+            self.point,
+            self.pixel,
+            self.weight,
+            self.chain,
         )
 
     def to(self, like: Tensor) -> Keypoints[M]:  # `like`: read for device and dtype
@@ -111,17 +129,28 @@ class Keypoints[M: IntVar]:
             self.point.to(like),
             self.pixel.to(like),
             self.weight.to(like),
+            self.chain.to(device),
         )
 
 
 def join(parts: Sequence[Keypoints[int] | None]) -> Keypoints[int] | None:
-    """All observations of `parts` (None when there are none)."""
+    """All observations of `parts`, their chains numbered apart (None when there are none)."""
 
     kept = [p for p in parts if p is not None and len(p.time)]
     if not kept:
         return None
+    chains, offset = [], 0
+    for part in kept:
+        chains.append(torch.where(part.chain >= 0, part.chain + offset, -1))
+        offset += int(part.chain.max().clamp_min(-1)) + 1
     return Keypoints(
-        *(torch.cat([getattr(p, f) for p in kept]) for f in Keypoints.__dataclass_fields__)
+        torch.cat([p.camera for p in kept]),
+        torch.cat([p.time for p in kept]),
+        torch.cat([p.body for p in kept]),
+        torch.cat([p.point for p in kept]),
+        torch.cat([p.pixel for p in kept]),
+        torch.cat([p.weight for p in kept]),
+        torch.cat(chains),
     )
 
 
@@ -131,7 +160,7 @@ def world_points[M: IntVar](
     """`X = W_b(q_t) p` of each observation (metres, world frame)."""
 
     pose = world_from_body[keypoints.time, keypoints.body]
-    return se3.transform_points(pose, keypoints.point[:, None])[:, 0]
+    return se3.transform_points(pose, keypoints.point[:, None].to(pose))[:, 0]
 
 
 def picked[T: IntVar](
@@ -143,8 +172,9 @@ def picked[T: IntVar](
     stride: int,
     config: KeypointConfig,
 ) -> Keypoints[int] | None:
-    """One episode's picks (frames at the video's own rate, decoded every `stride`-th), each
-    followed through its camera's video. `points`: named points; a body's name is its origin."""
+    """One episode's picks (frames at the video's own rate, decoded every `stride`-th) as known
+    points, each also the start of a chain through its camera's video. `points`: named points;
+    a body's name is its origin."""
 
     parts = []
     for pick in picks:
@@ -165,9 +195,8 @@ def picked[T: IntVar](
         video = videos[pick.camera]
         time = torch.full((len(body),), pick.frame // stride)
         pixel = torch.tensor(list(pick.pixels.values()), dtype=torch.float64)
-        parts.append(
-            _observed(names.index(pick.camera), time, body, offset, pixel, video, config, 1.0)
-        )
+        index = names.index(pick.camera)
+        parts.append(_observed(index, time, body, offset, pixel, video, config, known=True))
     return join(parts)
 
 
@@ -181,8 +210,8 @@ def seeded[T: IntVar](
     camera_index: int,
     config: KeypointConfig,
 ) -> Keypoints[int] | None:
-    """`points` (body, offset) where the camera's pose projects them every `every` timesteps,
-    inside the image and in front of it, followed through the video."""
+    """Chains from `points` (body, offset) where the camera's pose projects them every `every`
+    timesteps, inside the image and in front of it."""
 
     steps = len(world_from_body)
     times = torch.arange(0, steps, config.every)
@@ -206,14 +235,7 @@ def seeded[T: IntVar](
         return None
     offsets = [points[i % len(points)][1] for i in keep.nonzero()[:, 0].tolist()]
     return _observed(
-        camera_index,
-        time[keep],
-        body[keep].tolist(),
-        offsets,
-        pixel[keep],
-        video,
-        config,
-        config.followed_weight,
+        camera_index, time[keep], body[keep].tolist(), offsets, pixel[keep], video, config
     )
 
 
@@ -225,27 +247,38 @@ def _observed[T: IntVar](
     pixel: Tensor[[int, *UV]],
     video: Tensor[[T, *RGB, int, int]],
     config: KeypointConfig,
-    weight: float,
+    known: bool = False,
 ) -> Keypoints[int]:
-    """Observations at the seeds (weight `weight`) and along their KLT follow-up."""
+    """Chains from seeds `(time, pixel)` on `body`: each seed and its KLT follow-up (weight
+    `followed_weight`), and, when `known`, the seeds as the known points `offset` (weight 1)."""
 
     seed, followed_time, followed_pixel = follow(video, time, pixel, config)
     body_t = torch.tensor(body)
     offset_t = torch.tensor(offset, dtype=torch.float64)
-    weights = torch.cat(
-        (
-            torch.full((len(time),), weight, dtype=torch.float64),
-            torch.full((len(seed),), config.followed_weight, dtype=torch.float64),
-        )
-    )
-    return Keypoints(
-        torch.full((len(weights),), camera_index),
+    rows = torch.cat((torch.arange(len(time)), seed))  # each seed, then its followers
+    chains = Keypoints(
+        torch.full((len(rows),), camera_index),
         torch.cat((time, followed_time)),
-        torch.cat((body_t, body_t[seed])),
-        torch.cat((offset_t, offset_t[seed])),
+        body_t[rows],
+        offset_t[rows],
         torch.cat((pixel.double(), followed_pixel)),
-        weights,
+        torch.full((len(rows),), config.followed_weight, dtype=torch.float64),
+        rows,
     )
+    if not known:
+        return chains
+    picks = Keypoints(
+        torch.full((len(time),), camera_index),
+        time,
+        body_t,
+        offset_t,
+        pixel.double(),
+        torch.ones(len(time), dtype=torch.float64),
+        torch.full((len(time),), -1),
+    )
+    both = join([picks, chains])
+    assert both is not None
+    return both
 
 
 def follow[T: IntVar, N: IntVar](
@@ -312,7 +345,7 @@ def follow[T: IntVar, N: IntVar](
 def carried[M: IntVar](
     world_from_body: Tensor[[int, int, *Mat4x4]], keypoints: Keypoints[M], carrier: int
 ) -> Tensor[[M, *XYZ]]:
-    """Each observation's point in the frame of body `carrier` at its time,
+    """Each observation's known point in the frame of body `carrier` at its time,
     `W_carrier(q_t)⁻¹ W_b(q_t) p`: where a camera rigid on `carrier` sees a fixed point set, so
     PnP on these gives `carrier_from_camera` (the world body: a static camera's pose)."""
 
@@ -328,9 +361,9 @@ def residuals[K: IntVar](
     world_from_body: Tensor[[int, int, *Mat4x4]],
     min_depth: float,
 ) -> tuple[Tensor[[K, *UV]], Tensor[[K]]]:
-    """Per observation: `r` of the module doc (projected − observed, per pixel unit) and
-    whether the point is more than `min_depth` (m) in front of the camera. `view_intrinsics`:
-    each observation's K."""
+    """Per known-point observation: `r` of the module doc (projected − observed, per pixel
+    unit) and whether the point is more than `min_depth` (m) in front of the camera.
+    `view_intrinsics`: each observation's K."""
 
     world = world_points(world_from_body, keypoints)
     world_from_camera = rig.camera_poses(keypoints.camera, keypoints.time, world_from_body)

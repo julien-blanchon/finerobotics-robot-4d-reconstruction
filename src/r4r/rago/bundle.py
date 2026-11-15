@@ -13,9 +13,11 @@ with `P_m` the view's pose (`world_from_view`, in the track's body frame), `π_K
 projection, `p_m` the observed pixel, `u` the camera's pixel unit (its initial focal: `r` is
 in normalised image units), `δ` = `cauchy` and `V` the number of views.
 
-Known robot points seen in the images (`keypoints.Keypoints`: picks, followed pixels) add
-residuals of the same form, `r_k = (π_K(P_k⁻¹ W_b(q_t) p_k) − u_k) / u_cam`, with the point
-known instead of triangulated, weighted `keypoint_weight` each (times their own weight).
+Robot keypoints (`keypoints.Keypoints`) come in two kinds. Known points (picks) add residuals
+of the same form, `r_k = (π_K(P_k⁻¹ W_b(q_t) p_k) − u_k) / u_cam`, the point known instead of
+triangulated. Chains (picks and seeds followed by KLT) are tracks rigid with a known body:
+appended to the tracks with that body fixed, their point triangulated like any moving track's.
+Both weigh `keypoint_weight` times their own weight.
 
 A static track lives in the world frame. A moving track (a point on the robot, or on a grasped
 object) is rigid with some link: expressed in that link's frame its point is constant, so the
@@ -194,13 +196,21 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
     track_moving = torch.zeros(obs.count, dtype=torch.bool, device=qpos.device)
     track_moving[obs.track[t.moving]] = True
     candidates = moving_bodies(rig) if config.attach_links else []
+    tracked, seen, chain_body = obs, None, track.new_zeros(0)
+    if keypoints is not None:
+        keypoints = keypoints.to(qpos)
+        known = keypoints.known()
+        seen = _Seen.of(t, known, config) if len(known.time) else None
+        obs, chain_body = _with_chains(t, obs, keypoints.where(keypoints.chain >= 0), config)
 
     def assign() -> Tensor[[int]]:
         with torch.no_grad():
-            return attach(rig, t, obs, track_moving, candidates, config.cauchy, config.outlier_cost)
+            found = attach(
+                rig, t, tracked, track_moving, candidates, config.cauchy, config.outlier_cost
+            )
+            return torch.cat((found, chain_body))
 
     track_body = assign()
-    seen = None if keypoints is None else _Seen.of(t, keypoints.to(qpos), config)
     if config.optimizer == "lm" and supports(rig):
         history = _levenberg_marquardt(rig, t, obs, assign, track_body, config, seen)
         return _result(rig, t, obs, names, config, assign, history, seen)
@@ -233,6 +243,47 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
     return _result(rig, t, obs, names, config, assign, torch.stack(history), seen)
 
 
+def _views(tracks: Tracks[int, int, int]) -> Tensor[[int, int]]:
+    """View index of each (camera, timestep), −1 where none."""
+
+    views = torch.full(
+        (int(tracks.view_camera.max()) + 1, int(tracks.view_time.max()) + 1),
+        -1,
+        dtype=torch.long,
+        device=tracks.view_time.device,
+    )
+    views[tracks.view_camera, tracks.view_time] = torch.arange(
+        len(tracks.view_time), device=views.device
+    )
+    return views
+
+
+def _with_chains(
+    tracks: Tracks[int, int, int],
+    obs: Observations[int],
+    chains: Keypoints[int],
+    config: BundleConfig,
+) -> tuple[Observations[int], Tensor[[int]]]:
+    """`obs` with the keypoint chains appended as tracks (ids after the tracks'), and each
+    chain's body."""
+
+    if not len(chains.time):
+        return obs, obs.track.new_zeros(0)
+    view = _views(tracks)[chains.camera, chains.time]
+    assert bool((view >= 0).all()), "every robot keypoint must be seen in a view"
+    ids, chain = torch.unique(chains.chain, return_inverse=True)
+    body = torch.zeros(len(ids), dtype=torch.long, device=view.device)
+    body[chain] = chains.body
+    extended = Observations(
+        torch.cat((obs.view, view)),
+        torch.cat((obs.pixel, chains.pixel)),
+        torch.cat((obs.weight, chains.weight * config.keypoint_weight)),
+        torch.cat((obs.track, obs.count + chain)),
+        obs.count + len(ids),
+    )
+    return extended, body
+
+
 @dataclass(frozen=True, slots=True)
 class _Seen[K: IntVar]:
     """Robot keypoints ready for the bundle: each observation's view and weight."""
@@ -245,16 +296,7 @@ class _Seen[K: IntVar]:
     def of(
         tracks: Tracks[int, int, int], keypoints: Keypoints[K], config: BundleConfig
     ) -> _Seen[K]:
-        views = torch.full(
-            (int(tracks.view_camera.max()) + 1, int(tracks.view_time.max()) + 1),
-            -1,
-            dtype=torch.long,
-            device=tracks.view_time.device,
-        )
-        views[tracks.view_camera, tracks.view_time] = torch.arange(
-            len(tracks.view_time), device=views.device
-        )
-        view = views[keypoints.camera, keypoints.time]
+        view = _views(tracks)[keypoints.camera, keypoints.time]
         assert bool((view >= 0).all()), "every robot keypoint must be seen in a view"
         return _Seen(keypoints, view, keypoints.weight * config.keypoint_weight)
 

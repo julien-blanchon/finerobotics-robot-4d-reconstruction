@@ -12,13 +12,13 @@
 5. The same bundle per group of episodes: their agreement is the check on dataset-scope
    unknowns (residuals alone do not reveal a poorly determined one).
 
-Robot keypoints (`RigEpisode.keypoints`: known robot points seen in the images, see
-`keypoints.py`) start the cameras the stages above cannot: a static camera with no moving
-camera to triangulate for it (PnP on the keypoints, with the triangulated points when there
-are some), a moving camera from its keypoints pooled over episodes in its link's frame
-(instead of the search). Cameras with `RigConfig.seeds` then look for their robot points where
-their start projects them (`seed_rounds` of seeding and a new PnP start). In the bundles the
-keypoints are residuals next to the tracks, and a moving mount with keypoints stays free within
+Robot keypoints (`RigEpisode.keypoints`, see `keypoints.py`) start the cameras the stages
+above cannot: their known points (picks) place a static camera with no moving camera to
+triangulate for it (PnP, with the triangulated points when there are some), and a moving
+camera from its picks pooled over episodes in its link's frame (instead of the search). After
+stage 3, cameras with `RigConfig.seeds` look for their robot points where their start projects
+them (chains, for the bundles only). In the bundles known points are residuals next to the
+tracks, chains are tracks on a known body, and a moving mount with keypoints stays free within
 its priors' ranges (unless a free body above it would trade off with it).
 
 Intrinsics recorded per episode (`RigEpisode.intrinsics`) that differ between episodes
@@ -136,7 +136,6 @@ class RigConfig:
     kinematic: KinematicFreedom | None = None
     # Robot points each camera looks for where its start projects them, and how
     seeds: dict[str, tuple[RobotPoint, ...]] = field(default_factory=dict)
-    seed_rounds: int = 2
     keypoints: KeypointConfig = field(default_factory=KeypointConfig)
 
 
@@ -225,11 +224,8 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
         robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount
     )
     starts = _recorded_mounts(robot, episodes, names, starts)
-    for _ in range(config.seed_rounds if config.seeds else 0):
+    if config.seeds:
         episodes = _seeded_episodes(robot, episodes, names, starts, intrinsics, lens, config)
-        starts, intrinsics = _static_starts(
-            robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount, starts
-        )
 
     # 4-5. Bundles: all episodes, then groups. Known focals stay fixed; those found in stage 3
     # are refined
@@ -290,18 +286,14 @@ def _seeded_episodes(
     lens: Lens[int] | None,
     config: RigConfig,
 ) -> list[RigEpisode[int, int]]:
-    """`episodes` with their seeded keypoints renewed: each seeded camera's robot points where
-    its start (`starts [E, C]`: static pose, or mount) projects them, followed by KLT. Picks
-    (keypoints of weight 1) are kept."""
+    """`episodes` with chains seeded where each seeded camera's start (`starts [E, C]`: static
+    pose, or mount) projects its robot points, added to their keypoints."""
 
     scaling = episode_scaling(episodes, names)
     out = []
     for i, e in enumerate(episodes):
         world = moved_kinematics(robot, e)
-        kept = e.keypoints
-        if kept is not None:
-            kept = kept.where(kept.weight >= 1)
-        parts = [kept]
+        parts = [e.keypoints]
         for name, points in config.seeds.items():
             c = names.index(name)
             body = robot.camera_body[robot.camera(name)]
@@ -484,7 +476,8 @@ def _keypoint_mount(
     for e in episodes:
         if e.keypoints is None:
             continue
-        mine = e.keypoints.where(e.keypoints.camera == camera)
+        mine = e.keypoints.known()
+        mine = mine.where(mine.camera == camera)
         points.append(carried(moved_kinematics(robot, e), mine, body))
         pixels.append(mine.pixel)
     if not points or sum(len(p) for p in points) < MIN_KEYPOINTS:
@@ -579,31 +572,28 @@ def _static_starts[C: IntVar](
     intrinsics: Tensor[[C, *Mat3x3]],
     known_focal: tuple[bool, ...],
     known_mount: tuple[bool, ...] | None = None,
-    previous: Tensor[[int, C, *Mat4x4]] | None = None,
 ) -> tuple[Tensor[[int, C, *Mat4x4]], Tensor[[C, *Mat3x3]]]:
     """Stage 3: each free static camera's pose per episode (and focal, from the first episode
     where it is found, when unknown) by PnP on points the moving cameras triangulate and on the
-    episode's robot keypoints. Episodes where PnP fails keep the description's pose (or
-    `previous [E, C]`, an earlier start). A pose recorded for the episode
-    (`RigEpisode.poses`) is used whatever the priors say; otherwise cameras the priors fix
-    keep theirs, and cameras whose pose the priors give (`known_mount`) start from it: the
-    bundle refines them within the priors' ranges (PnP on robot-attached tracks can land a
-    known camera 10 cm / 6 deg off and the bundle then keeps it there). A dataset-scope
-    camera starts every episode from the consensus of its episodes' PnP poses (`_consensus`):
-    one episode with few links can land metres away."""
+    episode's known robot points. Episodes where PnP fails keep the description's pose. A pose
+    recorded for the episode (`RigEpisode.poses`) is used whatever the priors say; otherwise
+    cameras the priors fix keep theirs, and cameras whose pose the priors give (`known_mount`)
+    start from it: the bundle refines them within the priors' ranges (PnP on robot-attached
+    tracks can land a known camera 10 cm / 6 deg off and the bundle then keeps it there); their
+    known robot points may still move them by PnP within the gate. A dataset-scope camera
+    starts every episode from the consensus of its episodes' PnP poses (`_consensus`): one
+    episode with few links can land metres away."""
 
     device = mounts.device
     index = [robot.camera(n) for n in names]
     body = torch.tensor([robot.camera_body[i] for i in index], device=device)
     static = body == 0
-    starts = (
-        mounts[None].repeat(len(episodes), 1, 1, 1) if previous is None else previous.clone()
-    )  # [E, C, 4, 4]
+    starts = mounts[None].repeat(len(episodes), 1, 1, 1)  # [E, C, 4, 4]
     support = torch.zeros(len(episodes), len(names), device=device)  # PnP inliers
     focal = intrinsics[:, 0, 0].clone()
     found = [False] * len(names)
-    known = known_mount or (False,) * len(names)
-    free = [n in robot.free_cameras and not k for n, k in zip(names, known, strict=True)]
+    known_pose = known_mount or (False,) * len(names)
+    ranged = [n in robot.free_cameras for n in names]
     for i, (e, tracks) in enumerate(zip(episodes, merged, strict=True)):
         world = moved_kinematics(robot, e)
         cam = tracks.view_camera
@@ -617,10 +607,10 @@ def _static_starts[C: IntVar](
                 starts[i, c] = recorded.to(starts)
                 support[i, c] = 1.0
                 continue
-            if not free[c]:
+            if not ranged[c]:
                 continue
             seen = (observed == c) & (points.count[tracks.track] >= MIN_OBSERVATIONS)
-            if int(seen.sum()) < MIN_POINTS:
+            if known_pose[c] or int(seen.sum()) < MIN_POINTS:
                 seen = torch.zeros_like(seen)
             pairs = _pairs(tracks, points, seen, world, e.keypoints, c)
             if pairs is None:
@@ -642,7 +632,9 @@ def _static_starts[C: IntVar](
                 support[i, c] = start.inliers
                 focal[c], found[c] = start.focal / scale, True
     for c, name in enumerate(names):
-        if bool(static[c]) and free[c] and robot.free_cameras[name].scope == "dataset":
+        # A known pose moved by no keypoint PnP keeps its (recorded or prior) starts
+        moved = not known_pose[c] or found[c]
+        if bool(static[c]) and ranged[c] and moved and robot.free_cameras[name].scope == "dataset":
             starts[:, c] = _consensus(starts[:, c], support[:, c]).clone()
     intrinsics = intrinsics.clone()
     intrinsics[:, :2, :2] *= (focal / intrinsics[:, 0, 0])[:, None, None]
@@ -662,7 +654,8 @@ def _pairs[M: IntVar](
     than `MIN_POINTS` of the first and `MIN_KEYPOINTS` of the second."""
 
     xyz, uv = [points.point[tracks.track[seen]]], [tracks.pixel[seen]]
-    mine = None if keypoints is None else keypoints.where(keypoints.camera == camera)
+    mine = None if keypoints is None else keypoints.known()
+    mine = None if mine is None else mine.where(mine.camera == camera)
     if mine is not None and len(mine.time) >= MIN_KEYPOINTS:
         xyz.append(carried(world, mine, 0).to(xyz[0]))
         uv.append(mine.pixel.to(uv[0]))

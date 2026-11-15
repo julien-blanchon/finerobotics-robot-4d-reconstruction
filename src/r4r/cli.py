@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
     from r4r.data.episode import CameraStream, Episode
-    from r4r.data.priors import CameraPrior, DatasetPriors
+    from r4r.data.priors import CameraPrior, DatasetPriors, RobotPoint
     from r4r.rago.calibrate import FitConfig
     from r4r.rago.lens import Lens
     from r4r.rago.rig import KinematicFreedom
@@ -302,12 +302,21 @@ class _RigInputs:
     lens: Lens | None
 
 
-def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: float) -> _RigInputs:
-    """Load episodes of one station and build what `calibrate_rig` needs from the priors."""
+def _prepare_rig(
+    dataset: str,
+    numbers: tuple[int, ...],
+    stride: int,
+    focal: float,
+    picks: Path | None = None,
+) -> _RigInputs:
+    """Load episodes of one station and build what `calibrate_rig` needs from the priors (and
+    robot keypoints from a `picks` file, if given)."""
 
     import torch
 
     from r4r.data.lerobot import load_episode
+    from r4r.data.priors import read_picks
+    from r4r.rago.keypoints import KeypointConfig, picked
     from r4r.rago.lens import lens_from_priors
     from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
     from r4r.rago.stages import RigEpisode
@@ -334,6 +343,22 @@ def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: flo
             continue
         k.append(pinhole_guess(c.prior.focal or focal * width, c.prior.aspect, width, height))
     intrinsics = torch.tensor(k, dtype=torch.float64, device=device)
+    points, clicks = loaded[0].priors.robot_points, ()
+    if picks is not None:
+        named, clicks = read_picks(picks)
+        points = {**points, **named}
+    keypoints = [
+        picked(
+            [p for p in clicks if p.episode == number],
+            points,
+            robot,
+            names,
+            {c.name: c.frames for c in e.cameras},
+            stride,
+            KeypointConfig(),
+        )
+        for number, e in zip(numbers, loaded, strict=True)
+    ]
     episodes = [
         RigEpisode(
             qpos_from_state(robot, e.state.to(device), e.joints),
@@ -345,8 +370,9 @@ def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: flo
                 for c in e.cameras
                 if c.name in names and c.intrinsics is not None
             },
+            None if found is None else found.to(intrinsics),
         )
-        for e in loaded
+        for e, found in zip(loaded, keypoints, strict=True)
     ]
     return _RigInputs(
         root=root,
@@ -387,6 +413,9 @@ class Rig:
     # Save the whole solution (per-timestep camera and body poses, intrinsics) to this file,
     # e.g. for `research/overlay_video.py`
     save: Path | None = None
+    # Robot points clicked in a few frames (`r4r.data.priors.read_picks`): they start and pin
+    # cameras the scene cannot (a static-only rig, a head camera, a wrist seeing the other arm)
+    picks: Path | None = None
 
     def run(self) -> None:
         from dataclasses import replace
@@ -396,7 +425,7 @@ class Rig:
         from r4r.matching import RoMaV2
         from r4r.rago.stages import RigConfig, calibrate_rig, spread
 
-        rig = _prepare_rig(self.dataset, self.episodes, self.stride, self.focal)
+        rig = _prepare_rig(self.dataset, self.episodes, self.stride, self.focal, self.picks)
         loaded, streams, names, robot = rig.loaded, rig.streams, rig.names, rig.robot
         model = RoMaV2.from_checkpoint(device=rig.device)
         config = replace(
@@ -404,6 +433,7 @@ class Rig:
             link_every=self.every,
             groups=self.groups,
             kinematic=kinematic_freedom(loaded[0].priors, robot, self.stride),
+            seeds=seed_points(loaded[0].priors, streams, robot),
         )
         fit = calibrate_rig(
             robot,
@@ -541,6 +571,29 @@ def distortion_values(
     }
 
 
+def seed_points(
+    priors: DatasetPriors,
+    streams: tuple[CameraStream[int, int, int], ...],
+    robot: Robot[int, int, int],
+) -> dict[str, tuple[RobotPoint, ...]]:
+    """Per camera with `robot_points` in its priors: those points (named in the priors'
+    `robot_points`, or a body's name for its origin)."""
+
+    from r4r.data.priors import RobotPoint
+
+    seeds = {}
+    for stream in streams:
+        points = []
+        for name in stream.prior.robot_points:
+            point = priors.robot_points.get(name)
+            if point is None and name not in robot.body_names:
+                raise ValueError(f"{stream.name}: robot point {name!r} is neither named nor a body")
+            points.append(point or RobotPoint(name))
+        if points:
+            seeds[stream.name] = tuple(points)
+    return seeds
+
+
 def kinematic_freedom(
     priors: DatasetPriors, robot: Robot[int, int, int], stride: int
 ) -> KinematicFreedom | None:
@@ -608,6 +661,8 @@ def _print_rig(
     from r4r.geometry import se3
 
     print(f"median {fit.median_error:.2f} px, inliers {fit.inlier_fraction:.0%}")
+    if not math.isnan(fit.keypoint_error):
+        print(f"robot keypoints: median {fit.keypoint_error:.2f} px")
     for c, agree in enumerate(fit.mount_agreement):
         if agree is not None:
             print(f"{streams[c].name}: mount search, {agree[0]}/{agree[1]} episodes agree")

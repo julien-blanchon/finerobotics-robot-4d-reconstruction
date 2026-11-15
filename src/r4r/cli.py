@@ -628,7 +628,10 @@ def _print_rig(
 
     from r4r.geometry import se3
 
-    print(f"median {fit.median_error:.2f} px, inliers {fit.inlier_fraction:.0%}")
+    if math.isnan(fit.median_error):
+        print("no track constrains the rig (a static-only rig is placed by robot keypoints)")
+    else:
+        print(f"median {fit.median_error:.2f} px, inliers {fit.inlier_fraction:.0%}")
     if not math.isnan(fit.keypoint_error):
         print(f"robot keypoints: median {fit.keypoint_error:.2f} px")
     for c, agree in enumerate(fit.mount_agreement):

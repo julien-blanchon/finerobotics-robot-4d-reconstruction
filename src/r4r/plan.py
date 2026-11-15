@@ -312,8 +312,14 @@ def _from_neighbour(reasons: Sequence[str], moving: Collection[str]) -> bool:
 
     static = {r.split(":")[0] for r in reasons if "placement" not in r} - set(moving)
     allowed = all(
-        r.endswith(("focal unknown", "pose not calibrated", "pose only a start (no ranges)"))
-        or r.endswith("placement not calibrated")
+        r.endswith(
+            (
+                "focal unknown",
+                "pose not calibrated",
+                "pose only a start (no ranges)",
+                "placement not calibrated",
+            )
+        )
         for r in reasons
     )
     return allowed and len(static) == 1

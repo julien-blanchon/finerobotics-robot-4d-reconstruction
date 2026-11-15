@@ -71,6 +71,14 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   offsets. That separates the right model (0.000°) from a wrong one (1.7–5°) in seconds; then
   solve the base and tool offsets. For joint sign errors, try all 64 sign patterns. Most
   "AgileX ALOHA" data is really Piper arms; some "AgileX" data is ARX X5.
+- **The table gives each arm's "up" from the joint states alone:** take the fingertip (FK of the
+  flange plus the gripper length) at every gripper-closing moment over the dataset; on a tabletop
+  dataset they lie on one plane (robomind2 dual-ur5: 25k grasps per arm, 6–7 mm median off it,
+  the gripper pointing straight down at 0.95). Search the direction where the heights have the
+  smallest spread: its normal is the true up in that arm's base frame, the level is the base height
+  above the table. It showed the dual-ur5 bases tilted 45°, not hung upside down as they looked,
+  and gave both arms the same table height (0.749 / 0.751 m). Clicked joint origins on the same
+  rig gave nothing usable (PnP 7–30 px, focals at the scan bounds).
 - **Arm-type and side labels are unreliable:** per-episode joint ranges reveal the arm type and
   mixed datasets (Piper joint 3 always negative, ARX positive). For left/right, use an episode
   where one arm moves and a static view (camera facing the robot: image right is robot left).

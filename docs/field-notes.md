@@ -200,8 +200,8 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **Hand-picked joint positions** in 2–3 frames give a static camera's pose by PnP, but only when
   the picks leave the arm's plane. `r4r rig --picks` does it in the solver (PnP start, bundle
   residuals); on SynGrasp-1B's recorded cameras, clicks simulated with 2 px noise placed a lone
-  static camera to ~1–2 cm when 6+ points were visible (numbers in the robot-keypoints commit).
-  A camera that sees fewer than 6 picked points gets no start: pick more frames.
+  static camera to 1.7 cm / 1.1° median with 8+ picks (30 of 31 within 5 cm), but 10–13 cm with
+  6–7 (table in `docs/dataset-onboarding.md`). Fewer than 6 picked points give no start.
 - **A static-only rig cannot be refined from its own tracks.** Attached to links, the tracks of
   a lone static camera pulled good starts away (SynGrasp 6–11 cm → 17–32 cm; Tien Kung 20 cm
   behind its by-eye pose, its own torso then drawn over the table). `r4r rig` no longer

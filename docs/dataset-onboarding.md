@@ -110,9 +110,17 @@ origin) or a named point of the priors or the picks file:
 - Click where the point is, not where a surface is: a joint origin is on its axis (the centre
   of the joint housing), a tip between the fingers. The description's gripper must be the real
   one for gripper points.
-- Enough: 5 frames × 3–4 visible points per camera and episode (PnP needs 6; spread them over
-  the arm and over time, off the arm's plane). Validation against recorded cameras
-  (SynGrasp-1B, 256², 2 px click noise): see `docs/field-notes.md`.
+- Enough: 8 or more picks per camera and episode, over 4–5 frames, spread over the arm and off
+  its plane. Against recorded cameras (clicks simulated with 2 px noise, one static camera per
+  episode solved alone):
+
+  | dataset | camera-episodes | picks | error median (p90, max) | no start |
+  |---|---|---|---|---|
+  | SynGrasp-1B, 256² | 31 | 8–20 | 1.7 cm / 1.1° (3.6 cm / 2.5°, 5.0 cm) | 1 |
+  | SynGrasp-1B, 256² | 9 | 2–7 | 6–7 picks: 10–13 cm; fewer: none | 2 |
+  | maniskill-sim, 256², f 128 | 9 | 25 | 1.4 cm / 1.4° (2.6 cm / 1.7°) | 0 |
+
+  With 4 px click noise maniskill gave 4.1 cm / 4.2°: click carefully on wide views.
 - Clicks are PnP starts and bundle residuals. Overlay afterwards, as always.
 
 PnP on robot tracks alone can land a camera far off and still fit (DROID: exteriors below the

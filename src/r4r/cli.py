@@ -532,7 +532,10 @@ def _write_rig(
     """Store a rig's fitted focals, lenses, static poses, unknown mounts and dataset-scope body
     corrections in the priors, noting the `episodes` and agreement `groups` they come from."""
 
+    import torch
+
     from r4r.data.priors import write_body, write_camera
+    from r4r.geometry import se3
 
     robot, streams = rig.robot, rig.streams
     station = station_of(rig.loaded)
@@ -578,8 +581,17 @@ def _write_rig(
                 "orientation_range_deg": prior.orientation_range_deg,
             }
         )
+        # The rig started from the priors' correction (its kinematics apply it): the bundle's
+        # correction is on top of it, so the whole correction is their composition
+        correction = fit.body_corrections[b].cpu()
+        if prior.position is not None and prior.orientation is not None:
+            start = se3.from_rotation_translation(
+                se3.quaternion_to_matrix(torch.tensor(prior.orientation, dtype=correction.dtype)),
+                torch.tensor(prior.position, dtype=correction.dtype),
+            )
+            correction = start @ correction
         body = {
-            **pose_fields(fit.body_corrections[b].cpu()),
+            **pose_fields(correction),
             **ranges,
             "fitted": {"episodes": list(episodes), "groups": groups},
         }

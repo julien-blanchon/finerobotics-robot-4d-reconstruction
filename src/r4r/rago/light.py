@@ -435,11 +435,13 @@ def light_solve[C: IntVar, T: IntVar](
     start_at: Tensor[[C, T, *Mat4x4]],
     bodies_at: Tensor[[int, T, *Mat4x4]] | None,
     config: LightConfig,
+    focal_std: Tensor[[C]] | None = None,
 ) -> tuple[Rig[T, int, C], FitCheck]:
     """Levenberg–Marquardt on `robot`'s free cameras and bodies (`held_robot`) over the burst
-    tracks; returns the solved rig (its rows carry the solution, `extended`) and its error."""
+    tracks, and on the focals with a nonzero `focal_std` (log-normal prior; default: all
+    held); returns the solved rig (its rows carry the solution, `extended`) and its error."""
 
-    rig = _rig(robot, qpos, tracks, names, start_at, bodies_at)
+    rig = _rig(robot, qpos, tracks, names, start_at, bodies_at, focal_std)
     obs = _observations(tracks, qpos)
     assign = _assigner(rig, tracks, obs, config)
     state = {"body": assign()[obs.track]}
@@ -511,8 +513,10 @@ def _rig[C: IntVar, T: IntVar](
     names: tuple[str, ...],
     start_at: Tensor[[C, T, *Mat4x4]],
     bodies_at: Tensor[[int, T, *Mat4x4]] | None,
+    focal_std: Tensor[[C]] | None = None,
 ) -> Rig[T, int, C]:
-    """A rig over the burst timesteps: focals and lenses held, cameras at `start_at`."""
+    """A rig over the burst timesteps: lenses held, focals held unless `focal_std`, cameras at
+    `start_at`."""
 
     lens = tracks.lens
     if lens is not None:
@@ -523,7 +527,7 @@ def _rig[C: IntVar, T: IntVar](
         names,
         start_at[:, 0],
         tracks.intrinsics.to(qpos),
-        0.0,
+        0.0 if focal_std is None else focal_std.to(qpos),
         start_at=start_at,
         bodies_at=bodies_at,
         lens=lens,

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
     from r4r.data.episode import CameraStream, Episode
-    from r4r.data.priors import CameraPrior, DatasetPriors
+    from r4r.data.priors import CameraPrior, DatasetPriors, JsonObject
     from r4r.matching import RoMaV2
     from r4r.rago.calibrate import FitConfig
     from r4r.rago.lens import Lens
@@ -1343,6 +1343,133 @@ class Stations:
             print(f"wrote {path}")
 
 
+@dataclass(frozen=True, slots=True)
+class Station:
+    """Calibrate one static camera per station from its neighbour station
+    (`r4r.rago.station`): for each station of the episodes table (`r4r stations --write`)
+    whose camera has no pose and focal yet, in episode order, the previous calibrated station's
+    values are the start and everything else is held; starts from PnP and from transferred
+    robot points follow if the fit check fails. RoMa links and transfer run on a GPU when
+    there is one (~20 GPU s per station), the rest on the CPU. `--write` stores the station's
+    camera (and the neighbour's other values) under `stations.<name>`; failed checks are
+    flagged in the station's `fitted` record for reading its overlay."""
+
+    dataset: tyro.conf.Positional[str]
+    camera: tyro.conf.Positional[str]
+    # Only these stations (default: every uncalibrated one with at least 10 episodes)
+    stations: tuple[str, ...] = ()
+    # Episodes per station used (spread over it)
+    samples: int = 3
+    # Stop after this many stations (0: all)
+    limit: int = 0
+    write: bool = False
+
+    def run(self) -> None:
+        import copy
+
+        import pyarrow.parquet as pq
+        import torch
+
+        from r4r.data.lerobot import _root
+        from r4r.data.priors import episode_table_path
+        from r4r.plan import MIN_SETUP
+        from r4r.rago.station import StationConfig, calibrate_station, samples, station_data
+
+        root = dataset_root(self.dataset)
+        priors = _root(root).priors
+        table = pq.read_table(episode_table_path(root), columns=["episode", "station"])
+        runs: dict[str, list[int]] = {}
+        for episode, name in zip(
+            table["episode"].to_pylist(), table["station"].to_pylist(), strict=True
+        ):
+            if name is not None and episode not in runs.setdefault(name, []):
+                runs[name].append(episode)
+        order = sorted(runs, key=lambda n: min(runs[n]))
+        done = [n for n in order if _placed(priors.stations.get(n, {}), self.camera)]
+        if not done:
+            raise SystemExit(f"no station has {self.camera} calibrated: rig one first")
+        todo = [n for n in (self.stations or order) if n not in done and len(runs[n]) >= MIN_SETUP][
+            : self.limit or None
+        ]
+        matcher = _matcher("cuda") if torch.cuda.is_available() else None
+        config = StationConfig()
+        for name in todo:
+            before = [n for n in done if min(runs[n]) < min(runs[name])]
+            neighbour = before[-1] if before else done[0]
+            block = copy.deepcopy(priors.stations[neighbour])
+            values = block["cameras"][self.camera]
+            values |= {
+                "scope": "dataset",
+                "position_range": config.position_range,
+                "orientation_range_deg": config.orientation_range_deg,
+            }
+            priors.stations[name] = block
+            numbers = tuple(samples(sorted(runs[name]), self.samples))
+            rig = _prepare_rig(self.dataset, numbers, 1, 0.7, (), "cpu")
+            static = [rig.robot.camera_body[rig.robot.camera(n)] == 0 for n in rig.names]
+            data = station_data(
+                root,
+                numbers,
+                rig.episodes,
+                rig.names,
+                static,
+                self.camera,
+                rig.intrinsics,
+                rig.lens,
+                1,
+                config,
+                matcher,
+            )
+            fit = calibrate_station(
+                data, rig.robot, rig.names, rig.intrinsics, rig.lens, self.camera, config
+            )
+            print(
+                f"{name} ({len(runs[name])} episodes) from {neighbour}: start {fit.start}, "
+                f"focal {fit.focal:.0f} px, check {fit.check.median_px:.2f} px"
+                + (" FLAGGED: read its overlay" if fit.flagged else "")
+            )
+            values |= {
+                **pose_fields(fit.pose.cpu()),
+                "focal": round(fit.focal, 2),
+                "focal_range": 0.0,
+                "position_range": 0.02,
+                "orientation_range_deg": 2.0,
+                "fitted": {
+                    "episodes": list(numbers),
+                    "from": f"r4r station from {neighbour} ({fit.start})",
+                    "check_px": round(fit.check.median_px, 3),
+                    "flagged": fit.flagged,
+                },
+            }
+            if self.write:
+                _write_station(root, name, block)
+            if not fit.flagged:
+                done.append(name)
+                done.sort(key=lambda n: min(runs[n]))
+
+
+def _placed(block: JsonObject, camera: str) -> bool:
+    """Whether a station block gives `camera` a pose and a focal (and was not flagged)."""
+
+    values = block.get("cameras", {}).get(camera, {})
+    return (
+        values.get("position") is not None
+        and values.get("focal") is not None
+        and not values.get("fitted", {}).get("flagged")
+    )
+
+
+def _write_station(root: Path, name: str, block: JsonObject) -> None:
+    """Store a whole station block (cameras, bodies) under `stations.<name>`."""
+
+    from r4r.data.priors import write_body, write_camera
+
+    for camera, values in block.get("cameras", {}).items():
+        print(f"wrote {write_camera(root, camera, values, name)} station {name}: {camera}")
+    for body, values in block.get("bodies", {}).items():
+        print(f"wrote {write_body(root, body, values, name)} station {name}: {body}")
+
+
 @functools.cache
 def _matcher(device: str) -> RoMaV2:
     """RoMa v2, loaded once per process and device."""
@@ -1365,6 +1492,7 @@ type Command = (
     | Annotated[Focal, tyro.conf.subcommand("focal")]
     | Annotated[Reconstruct, tyro.conf.subcommand("reconstruct")]
     | Annotated[Stations, tyro.conf.subcommand("stations")]
+    | Annotated[Station, tyro.conf.subcommand("station")]
 )
 
 

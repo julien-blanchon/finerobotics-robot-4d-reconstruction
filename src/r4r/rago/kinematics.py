@@ -83,3 +83,31 @@ def apply_couplings[T: IntVar, Q: IntVar](
     for target, source, offset, gain in robot.coupling:
         qpos[:, target] = offset + gain * qpos[:, source]
     return qpos
+
+
+def corrected_qpos[T: IntVar, Q: IntVar](
+    robot: Robot[int, int, int],
+    qpos: Tensor[[T, Q]],
+    offsets: dict[str, float],
+    time_offset: float,
+) -> Tensor[[T, Q]]:
+    """Joint positions with fitted kinematic corrections: `q'_t = q(t + δt) + δq`.
+
+    `q(t + δt)` interpolates linearly between timesteps (clamped to the episode), `δt` in
+    timesteps; `offsets` are per joint name `δq` (rad for hinges, m for slides), as the bundle
+    refines them (`rig.Rig.joint_kinematics`).
+    """
+
+    if time_offset:
+        at = (torch.arange(len(qpos), dtype=qpos.dtype, device=qpos.device) + time_offset).clamp(
+            0, len(qpos) - 1
+        )
+        below = at.floor().long()
+        above = (below + 1).clamp(max=len(qpos) - 1)
+        fraction = (at - below.to(at))[:, None]
+        qpos = qpos[below] * (1 - fraction) + qpos[above] * fraction
+    if offsets:
+        qpos = qpos.clone()
+        for name, value in offsets.items():
+            qpos[:, robot.joint_qpos[robot.joint_names.index(name)]] += value
+    return qpos

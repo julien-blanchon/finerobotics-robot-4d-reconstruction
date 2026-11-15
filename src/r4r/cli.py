@@ -353,6 +353,7 @@ def _prepare_rig(
     from r4r.data.lerobot import load_episode
     from r4r.data.priors import read_picks
     from r4r.rago.keypoints import picked
+    from r4r.rago.kinematics import corrected_qpos
     from r4r.rago.lens import lens_from_priors
     from r4r.rago.robot import CameraMount, body_mounts, qpos_from_state
     from r4r.rago.stages import RigEpisode
@@ -387,9 +388,13 @@ def _prepare_rig(
         picked([p for p in clicks if p.episode == number], points, robot, names, stride)
         for number in numbers
     ]
+    fitted = loaded[0].priors.kinematics
+    offsets, delay = ({}, 0.0) if fitted is None else (fitted.offsets, fitted.time_offset / stride)
     episodes = [
         RigEpisode(
-            qpos_from_state(robot, e.state.to(device), e.joints),
+            corrected_qpos(
+                robot, qpos_from_state(robot, e.state.to(device), e.joints), offsets, delay
+            ),
             {c.name: c.frames for c in e.cameras if c.name in names},
             None if e.base_motion is None else e.base_motion.to(device),
             {c.name: c.pose.to(device) for c in e.cameras if c.pose is not None},
@@ -512,6 +517,8 @@ class Rig:
             print(f"saved {self.save}")
         if self.write:
             _write_rig(fit, rig, free, disagreement, self.episodes, self.groups)
+            if config.kinematic is not None:
+                _write_kinematics(fit, rig, self.stride, self.episodes)
 
 
 def _write_rig(
@@ -578,6 +585,32 @@ def _write_rig(
         }
         print(f"wrote {write_body(rig.root, name, body, station)}")
     _write_odometry(fit, rig, episodes)
+
+
+def _write_kinematics(fit: RigFit, rig: _RigInputs, stride: int, episodes: tuple[int, ...]) -> None:
+    """Store the bundle's joint and time offsets in the priors (`kinematics.offsets`,
+    `time_offset`), on top of those already applied to the episodes' joint positions."""
+
+    import json
+
+    from r4r.data.priors import priors_path
+
+    spec = rig.loaded[0].priors.kinematics
+    assert spec is not None
+    offsets = dict(spec.offsets)
+    for j, name in enumerate(rig.robot.joint_names):
+        value = float(fit.joint_offset[j])
+        if value:
+            offsets[name] = round(offsets.get(name, 0.0) + value, 6)
+    path = priors_path(rig.root)
+    raw = json.loads(path.read_text())
+    raw["kinematics"] |= {
+        "offsets": offsets,
+        "time_offset": round(spec.time_offset + fit.time_offset * stride, 4),
+        "fitted": {"episodes": list(episodes)},
+    }
+    path.write_text(json.dumps(raw, indent=2) + "\n")
+    print(f"wrote {path}")
 
 
 def _write_odometry(fit: RigFit, rig: _RigInputs, episodes: tuple[int, ...]) -> None:
@@ -1129,11 +1162,12 @@ class Reconstruct:
     `r4r.rago.light`) or full (something never calibrated: the whole rig per episode).
 
     Writes `<out>/<family>/<dataset>/shard-<k>.parquet`, one per `--shard-size` episodes of the
-    selection: per frame and camera, `episode, frame, camera`, `world_from_camera` (robot base
-    frame, OpenCV axes, 16 values, row-major) and `fx, fy, cx, cy`; per episode (schema
-    metadata `r4r.episodes`, JSON) its route, fit check and errors, or the error that stopped
-    it. Shards already written are skipped. `--plan` only counts the routes and estimates the
-    cost (`r4r.plan`)."""
+    selection: one row per frame in the columns of docs/output-spec.md (`r4r.output`: camera
+    poses, intrinsics and distortion, end effectors, base, aligned state, in the episode
+    frame); per episode (schema metadata `r4r.episodes`, JSON) its route, fit check and errors,
+    or the error that stopped it; the dataset's layout (`r4r.layout`: feature info). Shards
+    already written are skipped. `r4r merge` turns them into a LeRobot dataset. `--plan` only
+    counts the routes and estimates the cost (`r4r.plan`)."""
 
     dataset: tyro.conf.Positional[str]
     out: tyro.conf.Positional[Path] = Path("reconstruction")
@@ -1150,6 +1184,11 @@ class Reconstruct:
     check: Literal["auto", "on", "off"] = "auto"
     # Count each route and estimate CPU / GPU hours, without reconstructing
     plan: bool = False
+    # Episodes whose setup leaves a camera uncalibrated: `solve` the whole rig (full path), or
+    # write that camera as NaN (`nan`) and the rest by their own route (an episode whose robot is
+    # not calibrated, a body or the odometry, then fails with the reason: no full solve)
+    uncalibrated: Literal["solve", "nan"] = "solve"
+    # Every `stride`-th frame (1 for `r4r merge`: every video frame)
     stride: int = 1
     # RoMa links between cameras every this many (strided) timesteps (full path)
     every: int = 10
@@ -1180,11 +1219,11 @@ class Reconstruct:
                 print(f"shard {k}: done, skipped ({path})")
                 continue
             start = time.perf_counter()
-            tables, summary = [], []
+            tables, summary, layout = [], [], None
             for number in selection[k * size : (k + 1) * size]:
                 began = time.perf_counter()
                 try:
-                    table, record = self._episode(number)
+                    table, record, layout = self._episode(number)
                 except Exception as error:  # one bad episode must not stop the others
                     record: dict[str, object] = {
                         "episode": number,
@@ -1195,7 +1234,7 @@ class Reconstruct:
                     tables.append(table)
                 record["seconds"] = round(time.perf_counter() - began, 3)
                 summary.append(record)
-            write_shard(path, tables, summary)
+            write_shard(path, tables, summary, layout)
             routes = Counter(str(r.get("route", "failed")) for r in summary)
             flagged = sum(bool(r.get("flagged")) for r in summary)
             print(
@@ -1203,52 +1242,123 @@ class Reconstruct:
                 f"{path} ({time.perf_counter() - start:.1f} s)"
             )
 
-    def _episode(self, number: int) -> tuple[pa.Table, dict[str, object]]:
-        """One episode's pose table and summary, by its route (class doc)."""
+    def _episode(self, number: int) -> tuple[pa.Table, dict[str, object], str]:
+        """One episode's frame table, summary and the dataset's layout (JSON), by its route
+        (class doc)."""
+
+        import torch
 
         from r4r.data.lerobot import simulated
         from r4r.plan import episode_unknowns
         from r4r.rago.light import LightConfig
-        from r4r.reconstruction import held_poses, keyframe_episode, pose_table
+        from r4r.rago.stages import moved_kinematics
+        from r4r.reconstruction import held_poses, keyframe_episode, uncalibrated_cameras
 
         rig = _prepare_rig(self.dataset, (number,), self.stride, self.focal, (), "cpu")
         episode = rig.episodes[0]
+        priors = rig.loaded[0].priors
+        moving = {s.name for s in rig.streams if s.moving}
         unknowns = episode_unknowns(
-            rig.loaded[0].priors,
-            rig.names,
-            {s.name for s in rig.streams if s.moving},
-            set(episode.poses),
-            set(episode.intrinsics),
+            priors, rig.names, moving, set(episode.poses), set(episode.intrinsics)
         )
         summary: dict[str, object] = {"episode": number, "route": unknowns.route}
-        if self.solve or unknowns.route == "full":
+        lacking = uncalibrated_cameras(unknowns, rig.names)
+        if self.solve or (unknowns.route == "full" and self.uncalibrated == "solve"):
             return self._solved(number, summary | {"missing": list(unknowns.missing)})
+        if lacking is None:  # `nan`: a body or the odometry is not calibrated, not a camera
+            reasons = "; ".join((*unknowns.setup, *unknowns.missing))
+            raise ValueError(f"not calibrated (no camera alone): {reasons}")
+        # Cameras not calibrated for this episode are written as NaN; the others take the
+        # route their own unknowns allow
+        lacking = lacking or ()
+        index = [c for c, n in enumerate(rig.names) if n not in lacking]
+        names = tuple(rig.names[c] for c in index)
+        if lacking:
+            unknowns = episode_unknowns(
+                priors, names, moving, set(episode.poses), set(episode.intrinsics)
+            )
+            summary |= {"route": unknowns.route, "uncalibrated": list(lacking)}
         check = self.check == "on" or (self.check == "auto" and simulated(rig.root) is False)
         checked = unknowns.recorded if check else ()
+        poses = held_poses(rig.robot, episode, rig.names)
+        world = moved_kinematics(rig.robot, episode)
         if unknowns.free or checked:
-            poses, found = keyframe_episode(
+            found_poses, world, found = keyframe_episode(
                 rig.root,
                 number,
                 rig.robot,
                 episode,
-                rig.names,
-                rig.intrinsics,
-                rig.lens,
+                names,
+                rig.intrinsics[index],
+                None if rig.lens is None else rig.lens.select(torch.tensor(index)),
                 self.stride,
                 unknowns.free,
                 checked,
                 LightConfig(),
             )
+            poses[index] = found_poses
             summary |= found
             if found.get("flagged"):
                 summary["route"] = "light"
-        else:
-            poses = held_poses(rig.robot, episode, rig.names)
-        return pose_table(number, self.stride, rig.names, poses, rig.intrinsics), summary
+        light = set(unknowns.free) | (set(checked) if summary.get("flagged") else set())
+        if light - set(names):  # a body solved (a re-placed robot base): every camera with it
+            light |= set(names)
+        summary["cameras"] = {
+            n: "not calibrated"
+            if n in lacking
+            else "light solve"
+            if n in light
+            else "recorded"
+            if n in episode.poses
+            else "held calibration"
+            for n in rig.names
+        }
+        missing = tuple(c for c, n in enumerate(rig.names) if n in lacking)
+        return self._written(
+            rig, number, episode.qpos, poses, world, rig.intrinsics, rig.lens, summary, missing
+        )
+
+    def _written(
+        self,
+        rig: _RigInputs,
+        number: int,
+        qpos: Tensor[[int, int]],
+        poses: Tensor[[int, int, *Mat4x4]],
+        world: Tensor[[int, int, *Mat4x4]],
+        intrinsics: Tensor[[int, *Mat3x3]],
+        lens: Lens | None,
+        summary: dict[str, object],
+        uncalibrated: tuple[int, ...] = (),
+    ) -> tuple[pa.Table, dict[str, object], str]:
+        """The episode's frame table in the spec's columns (`r4r.output`); `uncalibrated`
+        cameras (indices) are written as NaN."""
+
+        from dataclasses import replace
+
+        from r4r.output import frame_table
+        from r4r.reconstruction import dataset_layout, episode_output
+
+        loaded = rig.loaded[0]
+        layout = dataset_layout(rig.root, rig.robot, loaded.priors, rig.streams, loaded.joints)
+        values = episode_output(
+            rig.root,
+            number,
+            layout,
+            rig.robot,
+            loaded.joints,
+            qpos,
+            self.stride,
+            poses,
+            world,
+            intrinsics,
+            lens,
+        )
+        values = replace(values, uncalibrated=uncalibrated)
+        return frame_table(layout, values), summary, layout.to_json()
 
     def _solved(
         self, number: int, summary: dict[str, object]
-    ) -> tuple[pa.Table, dict[str, object]]:
+    ) -> tuple[pa.Table, dict[str, object], str]:
         """The full path: the whole rig on this episode (free values within their ranges)."""
 
         import time
@@ -1256,8 +1366,8 @@ class Reconstruct:
 
         import torch
 
+        from r4r.rago.kinematics import corrected_qpos
         from r4r.rago.stages import RigConfig, calibrate_rig
-        from r4r.reconstruction import pose_table
 
         start = time.perf_counter()
         rig = _prepare_rig(self.dataset, (number,), self.stride, self.focal)
@@ -1285,17 +1395,29 @@ class Reconstruct:
         mounts = fit.mounts_at.detach().cpu().double()
         bodies = [rig.robot.camera_body[rig.robot.camera(n)] for n in rig.names]
         poses = torch.stack([world[:, b] @ mounts[c] for c, b in enumerate(bodies)])
-        # One episode: its own intrinsics
-        table = pose_table(number, self.stride, rig.names, poses, fit.episode_intrinsics[0])
+        # The joint state as the bundle saw it: its joint and time offsets on top
+        offsets = {
+            name: float(v)
+            for name, v in zip(rig.robot.joint_names, fit.joint_offset.tolist(), strict=True)
+            if v
+        }
+        robot = rig.robot.to("cpu")
+        qpos = corrected_qpos(robot, rig.episodes[0].qpos.cpu(), offsets, fit.time_offset)
         print(
             f"episode {number}: median {fit.median_error:.2f} px, inliers "
             f"{fit.inlier_fraction:.0%} ({time.perf_counter() - start:.0f} s)"
         )
-        return table, summary | {
+        summary |= {
             "route": "full",
             "median_px": round(fit.median_error, 4),
             "inliers": round(fit.inlier_fraction, 4),
+            "cameras": dict.fromkeys(rig.names, "full solve"),
         }
+        cpu = replace(rig, robot=robot)
+        # One episode: its own intrinsics
+        return self._written(
+            cpu, number, qpos, poses, world, fit.episode_intrinsics[0], fit.lens, summary
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1470,6 +1592,27 @@ def _write_station(root: Path, name: str, block: JsonObject) -> None:
         print(f"wrote {write_body(root, body, values, name)} station {name}: {body}")
 
 
+@dataclass(frozen=True, slots=True)
+class Merge:
+    """A LeRobot v3 dataset from `r4r reconstruct` shards (`r4r.merge`, docs/output-spec.md):
+    by default a twin `<dest>/<dataset>--r4r` (index and r4r columns, `meta/episodes` linking
+    back with `source/episode_index`, videos linked from the main root); `--full` a merged
+    copy `<dest>/<dataset>` (the main rows with r4r's columns). Writes `meta/r4r.json`."""
+
+    dataset: tyro.conf.Positional[str]
+    reconstruction: tyro.conf.Positional[Path]
+    dest: tyro.conf.Positional[Path]
+    full: bool = False
+    # Frames per data file (a row group per episode)
+    rows_per_file: int = 2_000_000
+
+    def run(self) -> None:
+        from r4r.merge import MergeConfig, merge
+
+        config = MergeConfig(full=self.full, rows_per_file=self.rows_per_file)
+        print(f"wrote {merge(dataset_root(self.dataset), self.reconstruction, self.dest, config)}")
+
+
 @functools.cache
 def _matcher(device: str) -> RoMaV2:
     """RoMa v2, loaded once per process and device."""
@@ -1493,6 +1636,7 @@ type Command = (
     | Annotated[Reconstruct, tyro.conf.subcommand("reconstruct")]
     | Annotated[Stations, tyro.conf.subcommand("stations")]
     | Annotated[Station, tyro.conf.subcommand("station")]
+    | Annotated[Merge, tyro.conf.subcommand("merge")]
 )
 
 

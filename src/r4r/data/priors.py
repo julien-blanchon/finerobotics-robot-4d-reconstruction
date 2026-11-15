@@ -76,7 +76,21 @@ table pose takes precedence. `ignore` leaves a camera out (one that rides on no 
 e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
 absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...],
 "time_offset_frames": 1.0}`, encoder offsets of hinges / slides (only `joints`, if given) and a
-video/joint time offset on top of `state_shift`.
+video/joint time offset on top of `state_shift`; `offsets` (joint name → rad or m) and
+`time_offset` (frames) are the values `r4r rig --write` fitted, applied to the joint positions of
+every command (`r4r.rago.kinematics.corrected_qpos`).
+
+`ee` defines each arm's end effector (`r4r.effectors`, docs/output-spec.md): `{"right":
+{"preset": "franka_hand", "body": "panda_hand", "position": [0, 0, 0.1034], "orientation": [1,
+0, 0, 0], "pads": [{"body": "leftfinger$"}, {"body": "rightfinger$"}], "closed": 0.0,
+"fingertips": {"thumb": {"body": "R_thumb_distal", "offset": [0.02, 0.01, -0.01]}},
+"actuation": {"feature": "observation.suction", "index": 0}}}`: a `preset` gives defaults for a
+common gripper or hand, every other field overrides it. `type` is `parallel`, `multi_finger`,
+`dexterous`, `suction`, `tool` or `none`; `position`, `orientation` (w, x, y, z) place the `ee`
+frame in `body`'s frame; `pads` (parallel grippers: the opening is their distance along the
+frame's y, minus `closed`) and `fingertips` name points by a regular expression over the bodies
+below `body`. `action` is `joint_absolute` when the dataset's action is an absolute joint target
+in the state's columns, when its feature info does not say so.
 
 `robot_points` names points on the robot (`{"tip": {"body": "panda_hand", "offset": [0, 0,
 0.105]}}`, metres in the body's frame) for picks, pixels clicked on them (`read_picks`, `r4r rig
@@ -255,6 +269,36 @@ class KinematicsPrior:
     joint_offset_mm: float = 0.0  # slide encoder offsets
     joints: tuple[str, ...] | None = None  # only these joints (None: all)
     time_offset_frames: float = 0.0  # frames at the dataset's rate
+    # Values fitted by `r4r rig --write`, applied to every episode's joint positions: per-joint
+    # offsets (rad for hinges, m for slides) and the time offset (frames at the dataset's rate)
+    offsets: dict[str, float] = field(default_factory=dict)
+    time_offset: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class ActuationColumn:
+    """Where a suction cup's or a tool's actuation is recorded: `feature`, column `index`."""
+
+    feature: str
+    index: int = 0
+
+
+type EffectorType = Literal["parallel", "multi_finger", "dexterous", "suction", "tool", "none"]
+
+
+@dataclass(frozen=True, slots=True)
+class EffectorPrior:
+    """One arm's end effector (see the module doc); None fields come from the `preset`."""
+
+    preset: str | None = None
+    type: EffectorType | None = None
+    body: str | None = None
+    position: tuple[float, float, float] | None = None
+    orientation: tuple[float, float, float, float] | None = None  # w, x, y, z
+    pads: tuple[RobotPoint, RobotPoint] | None = None
+    closed: float | None = None
+    fingertips: dict[str, RobotPoint] | None = None
+    actuation: ActuationColumn | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +326,10 @@ class DatasetPriors:
     # The camera on a known link that ties cameras recorded in a world frame (pose `layout`
     # world_*) to the robot's base, per episode (`r4r.data.recorded`)
     world_anchor: str | None = None
+    # End effectors per arm name (absent: detected from the presets, `r4r.effectors`)
+    ee: dict[str, EffectorPrior] = field(default_factory=dict)
+    # `joint_absolute`: the action is an absolute joint target in the state's columns
+    action: Literal["joint_absolute"] | None = None
     # The raw dataset-level `cameras` and `bodies` (for merging station overrides)
     raw: JsonObject = field(default_factory=dict, repr=False, compare=False)
     notes: str = ""
@@ -368,6 +416,8 @@ def load_priors(root: Path) -> DatasetPriors:
         robot_points=_robot_points(raw.get("robot_points", {}), str(path)),
         stations=raw.get("stations", {}),
         world_anchor=raw.get("world_anchor"),
+        ee=_effectors(raw.get("ee", {}), str(path)),
+        action=raw.get("action"),
         raw={"cameras": raw.get("cameras", {}), "bodies": raw.get("bodies", {})},
         notes=raw.get("notes", ""),
     )
@@ -410,14 +460,51 @@ def _checked(raw: JsonObject, allowed: frozenset[str], where: str) -> JsonObject
 def _kinematics(raw: JsonObject | None, where: str) -> KinematicsPrior | None:
     if not raw:
         return None
-    _checked(raw, _keys(KinematicsPrior), f"{where}: kinematics")
+    _checked(raw, _keys(KinematicsPrior) | {"fitted"}, f"{where}: kinematics")
     joints = raw.get("joints")
     return KinematicsPrior(
         float(raw.get("joint_offset_deg", 0.0)),
         float(raw.get("joint_offset_mm", 0.0)),
         None if joints is None else tuple(joints),
         float(raw.get("time_offset_frames", 0.0)),
+        {str(k): float(v) for k, v in raw.get("offsets", {}).items()},
+        float(raw.get("time_offset", 0.0)),
     )
+
+
+def _point(raw: JsonObject, where: str) -> RobotPoint:
+    _checked(raw, _keys(RobotPoint), where)
+    return RobotPoint(raw["body"], tuple(raw.get("offset", (0.0, 0.0, 0.0))))
+
+
+def _effectors(raw: Mapping[str, JsonObject], where: str) -> dict[str, EffectorPrior]:
+    out = {}
+    for arm, e in raw.items():
+        at = f"{where}: ee.{arm}"
+        _checked(e, _keys(EffectorPrior), at)
+        pads = e.get("pads")
+        if pads is not None and len(pads) != 2:
+            raise ValueError(f"{at}.pads: two points (one per jaw)")
+        tips = e.get("fingertips")
+        actuation = e.get("actuation")
+        if actuation is not None:
+            _checked(actuation, _keys(ActuationColumn), f"{at}.actuation")
+        out[arm] = EffectorPrior(
+            preset=e.get("preset"),
+            type=e.get("type"),
+            body=e.get("body"),
+            position=tuple(e["position"]) if e.get("position") is not None else None,
+            orientation=tuple(e["orientation"]) if e.get("orientation") is not None else None,
+            pads=None if pads is None else (_point(pads[0], at), _point(pads[1], at)),
+            closed=None if e.get("closed") is None else float(e["closed"]),
+            fingertips=None
+            if tips is None
+            else {n: _point(p, f"{at}.fingertips.{n}") for n, p in tips.items()},
+            actuation=None
+            if actuation is None
+            else ActuationColumn(actuation["feature"], int(actuation.get("index", 0))),
+        )
+    return out
 
 
 def _gain(raw: JsonObject | None, where: str) -> OdometryGain | None:

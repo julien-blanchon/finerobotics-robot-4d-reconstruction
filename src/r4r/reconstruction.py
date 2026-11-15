@@ -10,7 +10,8 @@ calibrated record). Then
 with `W_b` the forward kinematics of the camera's body `b` (moved by the recorded base motion,
 if any; the world body for a static camera): no video is decoded and nothing is tracked.
 
-Episodes are written in shards, `shard-<k>.parquet` holding the `k`-th run of `size`
+Each episode is written in the spec's columns (`r4r.output`, docs/output-spec.md): one row per
+frame. Episodes are written in shards, `shard-<k>.parquet` holding the `k`-th run of `size`
 consecutive episodes of the selection: one file per shard keeps the file count (inodes) small,
 an existing shard is done (a run resumes where it stopped), and shard `k` belongs to worker
 `k mod n` of `n` (e.g. a Slurm array task).
@@ -23,12 +24,12 @@ import math
 import os
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from einops import rearrange, repeat
 
+from r4r.output import LAYOUT_KEY, EpisodeOutput, Layout
 from r4r.rago.stages import moved_kinematics
 
 if TYPE_CHECKING:
@@ -38,6 +39,9 @@ if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
+    from r4r.data.episode import CameraStream, JointMap
+    from r4r.data.priors import DatasetPriors
+    from r4r.plan import Unknowns
     from r4r.rago.lens import Lens
     from r4r.rago.light import LightConfig
     from r4r.rago.robot import Robot
@@ -97,12 +101,13 @@ def keyframe_episode[C: IntVar, T: IntVar](
     free: tuple[str, ...],
     checked: tuple[str, ...],
     config: LightConfig,
-) -> tuple[Tensor[[C, T, *Mat4x4]], dict[str, object]]:
+) -> tuple[Tensor[[C, T, *Mat4x4]], Tensor[[T, int, *Mat4x4]], dict[str, object]]:
     """An episode from a few bursts of frames (`rago.light`): with `checked` cameras (episode
     scope, held at their record), the fit check first (epipolar distance of the verified
     matches under the held poses), which frees them when it flags the episode; then the light
     solve of what is `free` (nothing: the held poses). Returns every camera's
-    `world_from_camera` and the summary entries (check and solve errors, pixels)."""
+    `world_from_camera`, every body's `world_from_body` and the summary entries (check and
+    solve errors, pixels)."""
 
     from r4r.data.lerobot import keyframes
     from r4r.rago import light
@@ -129,7 +134,7 @@ def keyframe_episode[C: IntVar, T: IntVar](
             summary["flagged"] = True
             free = (*free, *checked)
     if not free:
-        return held, summary
+        return held, moved_kinematics(robot, episode), summary
     alone = any(n in free and not s for n, s in zip(names, static.tolist(), strict=True))
     tracks = light.burst_tracks(videos, sizes, intrinsics, lens, links, config)
     tracks = light.informative(tracks, static, alone, config)
@@ -141,7 +146,7 @@ def keyframe_episode[C: IntVar, T: IntVar](
     bodies = light.motion_at(solving, base, _at(motion, steps))
     rig, fit = light.light_solve(solving, episode.qpos[steps], tracks, names, at, bodies, config)
     summary |= {"free": list(free), "light_px": _rounded(fit.median_px)}
-    poses = light.extended(
+    poses, world = light.extended(
         rig,
         solving,
         episode.qpos,
@@ -150,7 +155,7 @@ def keyframe_episode[C: IntVar, T: IntVar](
     )
     if checked:
         summary["check_after_px"] = _rounded(checked_at(poses).median_px)
-    return poses, summary
+    return poses, world, summary
 
 
 def _rounded(value: float) -> float | None:
@@ -170,45 +175,18 @@ def moving_base(robot: Robot[int, int, int]) -> str | None:
     return robot.body_names[min(frame)] if frame else None
 
 
-def pose_table[C: IntVar, T: IntVar](
-    episode: int,
-    stride: int,
-    names: tuple[str, ...],
-    world_from_camera: Tensor[[C, T, *Mat4x4]],
-    intrinsics: Tensor[[C, *Mat3x3]],
-) -> pa.Table:
-    """One row per camera and frame (camera-major): `episode, frame, camera`,
-    `world_from_camera` (16 values, row-major) and `fx, fy, cx, cy`."""
+def write_shard(
+    path: Path, tables: list[pa.Table], episodes: list[dict[str, object]], layout: str | None
+) -> None:
+    """Write a shard's frame tables as one file, atomically (a partial file is never left as
+    done), with the per-episode summary `episodes` and the dataset's `layout` (JSON,
+    `r4r.output.Layout.to_json`) in its metadata."""
 
-    cameras, steps = world_from_camera.shape[:2]
-    rows = cameras * steps
-    poses = rearrange(world_from_camera.detach().cpu().double(), "c t i j -> (c t i j)")
-    k = intrinsics.detach().cpu().double()
-    offsets = pa.array(np.arange(0, 16 * rows + 1, 16, dtype=np.int32))
-
-    def per_row(values: Tensor[[C]]) -> np.ndarray:
-        return repeat(values, "c -> (c t)", t=steps).numpy()
-
-    return pa.table(
-        {
-            "episode": pa.array(np.full(rows, episode, dtype=np.int64)),
-            "frame": pa.array(np.tile(np.arange(steps, dtype=np.int64) * stride, cameras)),
-            "camera": pa.array(np.repeat(np.array(names, dtype=object), steps), pa.string()),
-            "world_from_camera": pa.ListArray.from_arrays(offsets, pa.array(poses.numpy())),
-            "fx": per_row(k[:, 0, 0]),
-            "fy": per_row(k[:, 1, 1]),
-            "cx": per_row(k[:, 0, 2]),
-            "cy": per_row(k[:, 1, 2]),
-        }
-    )
-
-
-def write_shard(path: Path, tables: list[pa.Table], episodes: list[dict[str, object]]) -> None:
-    """Write a shard's pose tables as one file, atomically (a partial file is never left as
-    done), with the per-episode summary `episodes` in its metadata."""
-
-    table = pa.concat_tables(tables) if tables else _empty()
+    empty = pa.table({"episode_index": pa.array([], pa.int64())})
+    table = pa.concat_tables(tables) if tables else empty
     metadata = {EPISODES_KEY: json.dumps(episodes).encode()}
+    if layout is not None:
+        metadata[LAYOUT_KEY] = layout.encode()
     partial = path.with_name(f".{path.name}.{os.getpid()}.partial")
     pq.write_table(table.replace_schema_metadata(metadata), partial)
     partial.rename(path)
@@ -221,7 +199,106 @@ def read_summary(path: Path) -> list[dict[str, object]]:
     return json.loads(metadata.get(EPISODES_KEY, b"[]"))
 
 
-def _empty() -> pa.Table:
-    """A pose table without rows (a shard whose episodes all failed)."""
+def dataset_layout(
+    root: Path,
+    robot: Robot[int, int, int],
+    priors: DatasetPriors,
+    streams: Sequence[CameraStream[int, int, int]],
+    joints: tuple[JointMap, ...],
+) -> Layout:
+    """The columns every episode of the dataset gets (`r4r.output.Layout`)."""
 
-    return pose_table(0, 1, (), torch.zeros(0, 0, 4, 4), torch.zeros(0, 3, 3))
+    from r4r.data.lerobot import joint_action
+    from r4r.effectors import effectors
+    from r4r.output import CameraInfo, aligned_joints, state_mapping
+
+    names = aligned_joints(robot.joint_names, joints)
+    fitted = priors.kinematics
+    cameras = tuple(
+        CameraInfo(s.name, s.prior.lens, "moving" if s.moving else "static", s.role)
+        for s in streams
+    )
+    return Layout(
+        cameras=cameras,
+        effectors=effectors(robot, priors),
+        joints=names,
+        mobile=priors.base == "mobile" or moving_base(robot) is not None,
+        action=joint_action(root),
+        mapping=state_mapping(names, joints, {} if fitted is None else fitted.offsets),
+        lag={
+            "state_shift": float(priors.state_shift),
+            "time_offset": 0.0 if fitted is None else fitted.time_offset,
+        },
+    )
+
+
+def episode_output[T: IntVar](
+    root: Path,
+    number: int,
+    layout: Layout,
+    robot: Robot[int, int, int],
+    joints: tuple[JointMap, ...],
+    qpos: Tensor[[T, int]],
+    stride: int,
+    world_from_camera: Tensor[[int, T, *Mat4x4]],
+    world_from_body: Tensor[[T, int, *Mat4x4]],
+    intrinsics: Tensor[[int, *Mat3x3]],
+    lens: Lens[int] | None,
+) -> EpisodeOutput:
+    """An episode's values for `frame_table`: the solution (camera and body poses), the
+    corrected joint positions `qpos` (`state_aligned`), the action through the same joint map
+    (no lag correction) and the end effectors' recorded actuation."""
+
+    from r4r.data.lerobot import episode_columns
+    from r4r.output import select_joints
+    from r4r.rago.robot import qpos_from_state
+
+    def aligned(values: Tensor[[T, int]]) -> Tensor[[T, int]]:
+        return select_joints(values, robot.joint_names, robot.joint_qpos, layout.joints)
+
+    wanted = [e.actuation.feature for e in layout.effectors if e.actuation is not None]
+    wanted += ["action"] if layout.action else []
+    recorded = episode_columns(root, number, wanted, stride) if wanted else {}
+    action = None
+    if layout.action:
+        action = aligned(qpos_from_state(robot, recorded["action"].to(qpos), joints))
+    steps = len(qpos)
+    frames = torch.arange(steps) * stride
+    count = len(intrinsics)
+    return EpisodeOutput(
+        episode=number,
+        frames=frames,
+        timestamps=frames.double() / episode_fps(root),
+        world_from_camera=world_from_camera.detach().cpu(),
+        intrinsics=intrinsics.detach().cpu(),
+        distortion=torch.zeros(count, 4, dtype=torch.float64)
+        if lens is None
+        else lens.distortion.detach().cpu().double(),
+        world_from_body=world_from_body.detach().cpu(),
+        base=None if moving_base(robot) is None else robot.body(str(moving_base(robot))),
+        state=aligned(qpos).detach().cpu(),
+        action=None if action is None else action.detach().cpu(),
+        actuation={
+            e.arm: recorded[e.actuation.feature][:, e.actuation.index]
+            for e in layout.effectors
+            if e.actuation is not None
+        },
+    )
+
+
+def episode_fps(root: Path) -> float:
+    """The dataset's frame rate (frames per second)."""
+
+    from r4r.data.lerobot import frame_rate
+
+    return frame_rate(root)
+
+
+def uncalibrated_cameras(unknowns: Unknowns, names: tuple[str, ...]) -> tuple[str, ...] | None:
+    """The cameras whose own unknowns (setup not calibrated, no start) send an episode to the
+    full path; None when an unknown of something else does (a body, the odometry)."""
+
+    named = {reason.partition(": ")[0] for reason in (*unknowns.setup, *unknowns.missing)}
+    if not named <= set(names):
+        return None
+    return tuple(n for n in names if n in named)

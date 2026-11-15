@@ -1,8 +1,11 @@
 # r4r: robot 4D reconstruction
 
 r4r calibrates robot datasets in the LeRobot format (robot description + joint states +
-videos). For every frame it outputs **camera poses and intrinsics in the robot base frame, in
-metres**, plus corrected kinematics and timing. Dense depth and 3D tracks come later.
+videos). For every frame it outputs **camera poses, intrinsics and distortion in the robot
+base frame, in metres**, end-effector poses, gripper openings and fingertips, the base pose and
+the joint state in the description's convention, with corrected kinematics and timing
+([output spec](docs/output-spec.md)), merged into a LeRobot dataset. Dense depth and 3D tracks
+come later.
 
 <table>
 <tr>
@@ -74,7 +77,8 @@ Python 3.13. A dataset is named by its root: an absolute path, or a path relativ
 | `overlay` | the robot drawn with a saved solution over every camera | PNG / MP4 |
 | `export` | the description (MJCF) with every known camera placed and each range | XML |
 | `focal` | a focal-length draft from ARROW (gen2 adapter) when nothing is recorded; GPU | text |
-| `reconstruct` | every episode with frozen priors: poses and intrinsics per frame (no solve, no video when the priors hold every camera) | sharded parquet |
+| `reconstruct` | every episode with frozen priors: the [output spec](docs/output-spec.md)'s columns per frame (no solve, no video when the priors hold every camera) | sharded parquet |
+| `merge` | reconstruct shards into a LeRobot v3 dataset: a `--r4r` twin next to the main one, or `--full` a merged copy | LeRobot root |
 
 ```bash
 r4r inspect droid/datasets/droid --episode 0
@@ -88,13 +92,19 @@ r4r reconstruct droid/datasets/droid out/ --episodes 0 1 2
 r4r reconstruct syngrasp-1b/datasets/syngrasp-1b out/ --shard 3/64  # all episodes, worker 3 of 64
 r4r reconstruct droid/datasets/droid --plan  # routes and CPU / GPU hours, nothing run
 r4r stations openneodata/datasets/arx5 third_view --write  # setups from thumbnails (CPU)
+r4r merge   syngrasp-1b/datasets/syngrasp-1b out/ dest/  # dest/syngrasp-1b--r4r (LeRobot v3)
 ```
 
 `reconstruct` writes `out/<family>/<dataset>/shard-<k>.parquet`, one file per `--shard-size`
-episodes (default 1000) of the selection (`--episodes`, default all): one row per frame and
-camera with `episode, frame, camera`, `world_from_camera` (4×4 row-major, robot base frame, OpenCV
-axes) and `fx, fy, cx, cy`. The schema metadata `r4r.episodes` (JSON) says per episode its
-route, fit check and errors, or the error that stopped it.
+episodes (default 1000) of the selection (`--episodes`, default all): one row per frame with
+the columns of [`docs/output-spec.md`](docs/output-spec.md) (camera poses, intrinsics,
+distortion; end-effector pose, gripper, aperture, fingertips; base pose; aligned joint state;
+all in the episode frame). The schema metadata `r4r.episodes` (JSON) says per episode its
+route, fit check, each camera's source and errors, or the error that stopped it; `r4r.layout`
+holds the feature info. `r4r merge` writes them as a LeRobot v3 dataset with `meta/r4r.json`
+(quality and provenance). Measured on a login node: fast route 13 ms per SynGrasp episode
+(1,000 episodes in 13 s), 0.32 s per sim-panda episode sampled across 460k (one data file
+each); light route 41-57 s per episode under load; merge ~12 s per 1,000 SynGrasp episodes.
 
 Each episode takes the cheapest route its unknowns allow (`r4r.plan`): values of dataset or
 station scope are held once `r4r rig --write` wrote them (or recorded); only episode-scope ones
@@ -178,7 +188,7 @@ patterns with images). Field notes: [`docs/field-notes.md`](docs/field-notes.md)
 |---|---|
 | `src/r4r/` | `geometry/` (SE(3), lens models), `data/` (LeRobot loader, priors), `rago/` (tracks, search, bundle, stages), `arrow/` (ARROW reimplementation), `matching/` (RoMa v2), `viz/` (overlay, sheet), `cli.py` |
 | `priors/` | one JSON per dataset, corrected descriptions, onboarding records per embodiment, `ISSUES.md` for dataset maintainers |
-| `docs/` | [architecture](docs/architecture.md) · [onboarding](docs/dataset-onboarding.md) · [field notes](docs/field-notes.md) · [related work](docs/related-work.md) |
+| `docs/` | [output spec](docs/output-spec.md) · [architecture](docs/architecture.md) · [onboarding](docs/dataset-onboarding.md) · [field notes](docs/field-notes.md) · [related work](docs/related-work.md) |
 | `tests/` | mirrors `src/r4r/`: SE(3), lenses, kinematics, bundle and stages on synthetic data, parity with reference releases |
 | `experiments/` | measured studies (focal sources, ARROW pose, Kosmo-GFM) with their results |
 

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from r4r.rago.rig import KinematicFreedom
     from r4r.rago.robot import BodyMount, CameraMount, Robot
     from r4r.rago.stages import RigEpisode, RigFit
+    from r4r.rago.transfer import Reference
     from r4r.types import Mat3x3, Mat4x4
     from r4r.viz.overlay import SavedSolution, Solution
 
@@ -720,6 +721,141 @@ def _print_rig(
 
 
 @dataclass(frozen=True, slots=True)
+class Picks:
+    """Robot keypoints of a static camera transferred from calibrated frames by RoMa v2: a picks
+    file for `r4r rig --picks`, without clicks (`r4r.rago.transfer`).
+
+    References are episodes where the camera's pose is known: recorded for the episode
+    (per-episode table, pose column) or held by the priors.
+    """
+
+    dataset: tyro.conf.Positional[str]
+    output: tyro.conf.Positional[Path]
+    camera: str
+    # Episodes to place the camera in (targets)
+    episodes: tuple[int, ...]
+    # Calibrated episodes to transfer from (of `reference_dataset`, default this dataset)
+    references: tuple[int, ...]
+    reference_dataset: str | None = None
+    # Bodies whose surface is sampled (default: all but the world); leave out parts whose
+    # geometry is not the real robot's (a different gripper)
+    bodies: tuple[str, ...] = ()
+    # Target frames per episode, spread over its joint configurations
+    frames: int = 16
+    # Surface points per reference frame
+    points: int = 96
+    # Decoding strides of the target and reference videos
+    stride: int = 1
+    reference_stride: int = 3
+    certainty: float = 0.1
+    # Forward-backward tolerance (reference pixels)
+    cycle: float = 3.0
+    # Reference crop margin around its points (fraction; inf: whole frames)
+    margin: float = 0.5
+
+    def run(self) -> None:
+        import json
+
+        import torch
+
+        from r4r.data.lerobot import load_episode
+        from r4r.rago.robot import body_mounts, compile_model, qpos_from_state
+        from r4r.rago.transfer import TransferConfig, as_picks, spread_frames, transfer
+
+        config = TransferConfig(
+            certainty=self.certainty,
+            cycle=self.cycle,
+            margin=self.margin,
+            frames=self.frames,
+            points=self.points,
+        )
+        source = dataset_root(self.reference_dataset or self.dataset)
+        first = load_episode(source, self.references[0], decode=())
+        mounts = body_mounts(first.priors)
+        robot = _robot(first.robot, (), mounts).to("cpu", torch.float64)
+        model = compile_model(first.robot, None, (), mounts, visual=True)
+        bodies = {robot.body(b) for b in self.bodies} or set(range(1, len(robot.body_names)))
+        reference = _transfer_reference(
+            source, self.references, self.camera, self.reference_stride, robot
+        )
+        matcher = _matcher("cuda" if torch.cuda.is_available() else "cpu")
+        root = dataset_root(self.dataset)
+        points, picks = {}, []
+        for number in self.episodes:
+            episode = load_episode(root, number, stride=self.stride, decode=(self.camera,))
+            stream = next(c for c in episode.cameras if c.name == self.camera)
+            qpos = qpos_from_state(robot, episode.state, episode.joints)
+            chosen = spread_frames(qpos, config.frames)
+            moved = transfer(
+                matcher,
+                model,
+                robot,
+                reference,
+                stream.frames[chosen],
+                qpos[chosen],
+                bodies,
+                config,
+            )
+            named, found = as_picks(
+                moved, robot.body_names, number, self.camera, (chosen * self.stride).tolist()
+            )
+            points |= named
+            picks += found
+            print(f"episode {number}: {len(named)} points in {len(found)} of {len(chosen)} frames")
+        raw = {
+            "points": {n: {"body": p.body, "offset": list(p.offset)} for n, p in points.items()},
+            "picks": [
+                {"episode": p.episode, "camera": p.camera, "frame": p.frame, "pixels": p.pixels}
+                for p in picks
+            ],
+        }
+        self.output.write_text(json.dumps(raw))
+        print(f"wrote {self.output} ({len(points)} points in {len(picks)} frames)")
+
+
+def _transfer_reference(
+    root: Path, numbers: tuple[int, ...], name: str, stride: int, robot: Robot[int, int, int]
+) -> Reference[int, int]:
+    """Frames of camera `name` in calibrated episodes: its pose recorded for the episode, else
+    the priors'; its intrinsics recorded, else from the priors' focal."""
+
+    import torch
+
+    from r4r.data.lerobot import load_episode
+    from r4r.geometry import se3
+    from r4r.rago.robot import qpos_from_state
+    from r4r.rago.transfer import Reference
+
+    frames, qpos, poses, intrinsics = [], [], [], []
+    for number in numbers:
+        episode = load_episode(root, number, stride=stride, decode=(name,))
+        stream = next(c for c in episode.cameras if c.name == name)
+        prior = stream.prior
+        if stream.moving or prior.distortion:
+            raise SystemExit(f"{name}: references are static ideal-pinhole cameras")
+        pose = stream.pose
+        if pose is None and prior.position is not None and prior.orientation is not None:
+            rotation = se3.quaternion_to_matrix(
+                torch.tensor(prior.orientation, dtype=torch.float64)
+            )
+            pose = se3.from_rotation_translation(rotation, torch.tensor(prior.position).double())
+        if pose is None or (stream.intrinsics is None and prior.focal is None):
+            raise SystemExit(f"{name} in episode {number}: no known pose or focal to transfer from")
+        height, width = stream.size
+        k = stream.intrinsics
+        if k is None:
+            k = torch.tensor(
+                pinhole_guess(prior.focal or 0.0, prior.aspect, width, height), dtype=torch.float64
+            )
+        steps = len(stream.frames)
+        frames.append(stream.frames)
+        qpos.append(qpos_from_state(robot, episode.state, episode.joints))
+        poses.append(pose.double().expand(steps, 4, 4))
+        intrinsics.append(k.double().expand(steps, 3, 3))
+    return Reference(torch.cat(frames), torch.cat(qpos), torch.cat(poses), torch.cat(intrinsics))
+
+
+@dataclass(frozen=True, slots=True)
 class Sheet:
     """Contact sheet: camera frames next to the robot skeleton (top, side, front views)."""
 
@@ -1194,6 +1330,7 @@ type Command = (
     | Annotated[Links, tyro.conf.subcommand("links")]
     | Annotated[Fit, tyro.conf.subcommand("fit")]
     | Annotated[Rig, tyro.conf.subcommand("rig")]
+    | Annotated[Picks, tyro.conf.subcommand("picks")]
     | Annotated[Sheet, tyro.conf.subcommand("sheet")]
     | Annotated[Export, tyro.conf.subcommand("export")]
     | Annotated[Overlay, tyro.conf.subcommand("overlay")]

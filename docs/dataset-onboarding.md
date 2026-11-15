@@ -125,6 +125,59 @@ origin) or a named point of the priors or the picks file:
   With 4 px click noise maniskill gave 4.1 cm / 4.2°: click carefully on wide views.
 - Clicks are PnP starts and bundle residuals. Overlay afterwards, as always.
 
+#### Picks without clicks: `r4r picks` (keypoint transfer)
+
+Many sessions of one robot, each with its static camera re-placed (openneodata: hundreds):
+calibrate one session, then carry robot points from it to the others with RoMa v2 ✅
+(`r4r.rago.transfer`). In a calibrated reference frame the description is ray-cast through a
+grid of pixels: each pixel that lands on the robot shows a known surface point (body, offset).
+Each target frame is matched with the reference frame of nearest joint configuration; the warp
+at the pixel is where the target sees that point, kept where RoMa is certain (overlap > 0.1) and
+the warp comes back within 3 px (forward-backward check). The output is a picks file.
+
+```bash
+r4r picks openneodata/datasets/flexiv-rizon4 picks.json --camera third_view \
+  --episodes 19160 19161 19162 --references 18600 18800 19000 \
+  --bodies base_link link1 link2 link3 link4 link5 link6 link7 flange --stride 2
+r4r rig openneodata/datasets/flexiv-rizon4 --episodes 19160 19161 19162 --stride 2 \
+  --picks picks.json --save s.pt
+r4r overlay s.pt check.png
+```
+
+- References: episodes where the camera's pose is known (episodes table, pose column, or the
+  priors' pose); `--reference-dataset` takes them from another root of the same robot. Many
+  reference episodes (joint configurations) matter more than anything else (table below).
+- Bodies: those whose geometry is the real robot's. Leave out a description's gripper when the
+  real one differs (openneodata).
+- For the target sessions the camera must be free in the priors (no pose, or ranges wide
+  enough): `r4r rig` gates a PnP start by the priors' ranges.
+- Surface points, not named ones: a joint origin lies inside its housing, so the warp carries
+  the surface in front of it, which projects on the origin only from the reference's viewpoint.
+- Cost: ~2 s of matching per camera-episode (16 frames, GH200), 40–90 s per 3-episode session
+  with decoding and model loading; the solve is CPU.
+
+Against SynGrasp-1B's recorded cameras (256², 25 episodes × 2 static cameras, each solved alone
+from its transferred picks; references: the same camera in 40 other episodes, its pose
+randomised per episode by up to 25 cm / 14°; frames 16 per target unless said):
+
+| variant | camera error median | < 2 cm | < 5 cm | > 20 cm | pick error median |
+|---|---|---|---|---|---|
+| named points (body origins) | 23 cm / 21° | – | 2/50 | 27 | 12.5 px |
+| surface points, 48 per frame, crop | 5.9 cm / 4.1° | 6 | 18/50 | 11 | 6.7 px |
+| surface, whole reference frame | 6.9 cm / 5.0° | 8 | 17/50 | 11 | 6.8 px |
+| surface, references of both cameras | 7.0 cm / 5.4° | 3 | 20/50 | 12 | 6.1 px |
+| **surface, 96 per frame (default)** | **5.6 cm / 4.2°** | 10 | 22/50 | 9 | 6.6 px |
+| same, 8 target frames | 6.3 cm / 5.5° | 8 | 21/50 | 11 | 6.7 px |
+| same, 4 target frames | 7.9 cm / 5.7° | 4 | 19/50 | 15 | 6.6 px |
+| surface, 4 reference episodes | 123 cm | 1 | 5/50 | 31 | 9.6 px |
+
+Clicks simulated with 2 px noise gave 1.7 cm on the same data: transferred picks are 3× less
+accurate and fail (> 20 cm) on about a fifth of camera-episodes. Use them as a start; read the
+overlay of every session. On openneodata (real, 512×384, 5 sessions per arm, one station of
+references for flexiv, two for ur5e) the drawn arm sat on the real one in 7 of 10 sessions,
+the wrist a few cm off in 2, and 1 showed only the gripper (not checkable); picks reproject at
+3.8–12.9 px median (onboarding records `flexiv__rizon4`, `ur__ur5e`).
+
 PnP on robot tracks alone can land a camera far off and still fit (DROID: exteriors below the
 table at 0.86 px). Images alone do not pin a per-episode mount (RB-Y1: a wrist 25° off at 0.7 px).
 A moving camera with per-episode pose columns gets `"scope": "episode"` and a tight range.

@@ -468,9 +468,10 @@ def extended[C: IntVar, T: IntVar](
     qpos: Tensor[[T, int]],
     start_at: Tensor[[C, T, *Mat4x4]],
     bodies_at: Tensor[[int, T, *Mat4x4]] | None,
-) -> Tensor[[C, T, *Mat4x4]]:
-    """Every camera's `world_from_camera` at every timestep of the episode (`qpos`), with the
-    burst solution's dataset- and episode-scope rows (frame-scope bodies follow `bodies_at`)."""
+) -> tuple[Tensor[[C, T, *Mat4x4]], Tensor[[T, int, *Mat4x4]]]:
+    """Every camera's `world_from_camera` and every body's `world_from_body` at every timestep
+    of the episode (`qpos`), with the burst solution's dataset- and episode-scope rows
+    (frame-scope bodies follow `bodies_at`)."""
 
     names = solved.names
     rig = Rig(
@@ -501,7 +502,8 @@ def extended[C: IntVar, T: IntVar](
             if robot.body_parent[root] == 0 and freedom.scope != "frame":
                 change = world[0, root] @ se3.inverse(rig.kinematics[0, root])
                 poses = se3.inverse(change) @ poses
-    return rearrange(poses, "(c t) i j -> c t i j", c=len(names))
+                world = se3.inverse(change) @ world
+    return rearrange(poses, "(c t) i j -> c t i j", c=len(names)), world
 
 
 def _rig[C: IntVar, T: IntVar](

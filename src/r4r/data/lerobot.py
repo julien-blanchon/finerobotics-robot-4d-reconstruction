@@ -500,3 +500,45 @@ def _joints(robot: JsonObject, replaced: frozenset[str] = frozenset()) -> tuple[
             source, target = (tuple(gripper[k]) if gripper[k] else None for k in ("from", "to"))
             joints.append(JointMap(gripper["urdf_joint"], gripper["index"], 1.0, source, target))
     return tuple(joints)
+
+
+def episode_columns(
+    root: Path, episode: int, features: Sequence[str], stride: int = 1
+) -> dict[str, Tensor[[int, int]]]:
+    """Every `stride`-th row of numeric `features` of `episode`, as float64 [T, n] (no shift)."""
+
+    rows = _root(root).tables.rows(episode, list(features))
+    out = {}
+    for name in features:
+        column = rows[name]
+        assert torch.is_tensor(column), f"{name}: not numeric"
+        out[name] = _columns({name: column}, name)[::stride]
+    return out
+
+
+def joint_action(root: Path) -> bool:
+    """Whether the dataset's `action` is an absolute joint target in the state's columns: the
+    priors say so (`action: joint_absolute`), or its feature info does (`vector.space: joint`,
+    `vector.reference: absolute`) with the state's names and shape."""
+
+    opened = _root(root)
+    if opened.priors.action == "joint_absolute":
+        return True
+    features = opened.tables.features
+    state = opened.priors.state_feature or opened.robot["state"]["feature"]
+    action = features.get("action")
+    if action is None or not isinstance(state, str) or state not in features:
+        return False
+    info = action.get("info", {})
+    return (
+        info.get("vector.space") == "joint"
+        and info.get("vector.reference") == "absolute"
+        and action.get("names") == features[state].get("names")
+        and action.get("shape") == features[state].get("shape")
+    )
+
+
+def frame_rate(root: Path) -> float:
+    """The dataset root's frame rate (`meta/info.json`, frames per second)."""
+
+    return _root(root).tables.fps

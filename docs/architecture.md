@@ -122,7 +122,7 @@ Every camera is radially symmetric (`r4r.geometry.camera`): a ray at `s` from th
 |---|---|---|---|
 | 1 preparation (once per dataset) | priors good enough to run unattended | the agent: `inspect`, `sheet`, `links`, `preview`, `fit --shifts`, focal from records ([onboarding](dataset-onboarding.md)) | ✅ |
 | 2 setup calibration (once per setup) | dataset-scope values, ranges of episode-scope ones | `r4r rig` on 5–20 episodes; consensus; groups; `--write` | ✅ (⬜ window selection, held-out report) |
-| 3 per-episode processing | poses for every frame of every episode | `r4r reconstruct`: dataset-scope known (pose = FK × mount, no images needed); episode/frame-scope unknowns fitted within their ranges | ✅ command; ⬜ batched over episodes |
+| 3 per-episode processing | poses for every frame of every episode | `r4r reconstruct`: nothing free (cameras recorded or held, focals known): pose = FK × mount, no video read; else episode/frame-scope unknowns fitted within their ranges. Sharded output (`--shard-size`), resumable, `--shard i/n` per process | ✅ |
 | 4 dense reconstruction | depth for every pixel, 3D tracks, fused point cloud | ARROW per encoding, aligned to our cameras (one scale and pose per encoding) | ⬜ |
 
 - Stage 4 compute, measured on one episode: ~15–20 GPU-minutes at depth stride 2

@@ -6,6 +6,7 @@ Datasets are named by their delivery root, absolute or relative to `DELIVERY`
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -13,14 +14,16 @@ from typing import TYPE_CHECKING, Annotated
 import tyro
 
 if TYPE_CHECKING:
+    import pyarrow as pa
     from torch import Tensor
 
     from r4r.data.episode import CameraStream, Episode
     from r4r.data.priors import CameraPrior, DatasetPriors
+    from r4r.matching import RoMaV2
     from r4r.rago.calibrate import FitConfig
     from r4r.rago.lens import Lens
     from r4r.rago.rig import KinematicFreedom
-    from r4r.rago.robot import Robot
+    from r4r.rago.robot import BodyMount, CameraMount, Robot
     from r4r.rago.stages import RigEpisode, RigFit
     from r4r.types import Mat3x3, Mat4x4
     from r4r.viz.overlay import SavedSolution, Solution
@@ -302,24 +305,34 @@ class _RigInputs:
     lens: Lens | None
 
 
-def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: float) -> _RigInputs:
-    """Load episodes of one station and build what `calibrate_rig` needs from the priors."""
+def _prepare_rig(
+    dataset: str,
+    numbers: tuple[int, ...],
+    stride: int,
+    focal: float,
+    decode: tuple[str, ...] | None = None,
+    device: str | None = None,
+) -> _RigInputs:
+    """Load episodes of one station and build what `calibrate_rig` needs from the priors.
+
+    `decode`: the cameras whose frames are read (None: all); `device`: default CUDA if any.
+    """
 
     import torch
 
     from r4r.data.lerobot import load_episode
     from r4r.rago.lens import lens_from_priors
-    from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
+    from r4r.rago.robot import CameraMount, body_mounts, qpos_from_state
     from r4r.rago.stages import RigEpisode
 
     root = dataset_root(dataset)
-    loaded = [load_episode(root, e, stride=stride) for e in numbers]
+    loaded = [load_episode(root, e, stride=stride, decode=decode) for e in numbers]
     streams = loaded[0].cameras
     names = tuple(c.name for c in streams)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
     bodies = body_mounts(loaded[0].priors)
-    robot = load_robot(loaded[0].robot, cameras=mounts, bodies=bodies).to(device, torch.float64)
+    robot = _robot(loaded[0].robot, mounts, bodies).to(device, torch.float64)
     stations = {e.station for e in loaded}
     if len(stations) > 1:
         raise SystemExit(
@@ -328,7 +341,7 @@ def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: flo
         )
     k = []
     for c in streams:
-        height, width = c.frames.shape[-2:]
+        height, width = c.size
         if c.intrinsics is not None:  # known for this episode (per-episode table)
             k.append(c.intrinsics.tolist())
             continue
@@ -361,6 +374,17 @@ def _prepare_rig(dataset: str, numbers: tuple[int, ...], stride: int, focal: flo
         known_mount=tuple(m.body_from_camera is not None for m in mounts),
         lens=lens_from_priors([c.prior for c in streams], intrinsics),
     )
+
+
+@functools.cache
+def _robot(
+    path: Path, mounts: tuple[CameraMount, ...], bodies: tuple[BodyMount, ...]
+) -> Robot[int, int, int]:
+    """A description compiled once per process for each set of camera and body mounts."""
+
+    from r4r.rago.robot import load_robot
+
+    return load_robot(path, cameras=mounts, bodies=bodies)
 
 
 @dataclass(frozen=True, slots=True)
@@ -886,15 +910,28 @@ class Focal:
 
 @dataclass(frozen=True, slots=True)
 class Reconstruct:
-    """Every episode with the dataset's frozen priors (after `r4r rig --write`): per episode,
-    only what is free per episode or frame is solved (re-placed static cameras, a moving base,
-    unknown focals), no agreement groups. Writes `<out>/<family>/<dataset>/episode_<n>.parquet`:
-    per frame and camera, `world_from_camera` (robot base frame, OpenCV axes, 16 values,
-    row-major), fx, fy, cx, cy, and the episode's median reprojection error and inlier share."""
+    """Every episode with the dataset's frozen priors (after `r4r rig --write`). An episode whose
+    priors leave nothing free (cameras recorded or held, focals known; `r4r.reconstruction`)
+    is written from the priors and forward kinematics alone, without reading its video; the
+    others are solved for what is free per episode or frame (re-placed static cameras, a
+    moving base, unknown focals), without agreement groups.
+
+    Writes `<out>/<family>/<dataset>/shard-<k>.parquet`, one per `--shard-size` episodes of the
+    selection: per frame and camera, `episode, frame, camera`, `world_from_camera` (robot base
+    frame, OpenCV axes, 16 values, row-major) and `fx, fy, cx, cy`; per episode (schema
+    metadata `r4r.episodes`, JSON) whether it was solved, its median reprojection error and
+    inlier share, or the error that stopped it. Shards already written are skipped."""
 
     dataset: tyro.conf.Positional[str]
     out: tyro.conf.Positional[Path]
-    episodes: tuple[int, ...] = (0,)
+    # Episodes to process (default: every episode of the dataset)
+    episodes: tuple[int, ...] = ()
+    # Episodes per output file
+    shard_size: int = 1000
+    # This worker's part, `i/n`: the shards k with k mod n = i (e.g. a Slurm array task)
+    shard: str = "0/1"
+    # Solve every episode, also those the priors fully determine
+    solve: bool = False
     stride: int = 1
     # RoMa links between cameras every this many (strided) timesteps
     every: int = 10
@@ -902,78 +939,112 @@ class Reconstruct:
 
     def run(self) -> None:
         import time
+
+        from r4r.data.lerobot import episode_count
+        from r4r.reconstruction import shard_path, shards, write_shard
+
+        root = dataset_root(self.dataset)
+        selection = list(self.episodes) or list(range(episode_count(root)))
+        worker, workers = (int(v) for v in self.shard.split("/"))
+        if not 0 <= worker < workers:
+            raise SystemExit(f"--shard {self.shard}: expected i/n with 0 <= i < n")
+        target = self.out / root.parent.parent.name / root.name
+        target.mkdir(parents=True, exist_ok=True)
+        size = self.shard_size
+        for k in shards(selection, size, worker, workers):
+            path = shard_path(target, k)
+            if path.exists():
+                print(f"shard {k}: done, skipped ({path})")
+                continue
+            start = time.perf_counter()
+            tables, summary = [], []
+            for number in selection[k * size : (k + 1) * size]:
+                try:
+                    table, record = self._episode(number)
+                except Exception as error:  # one bad episode must not stop the others
+                    record = {"episode": number, "error": f"{type(error).__name__}: {error}"}
+                    print(f"episode {number}: failed: {record['error']}")
+                else:
+                    tables.append(table)
+                summary.append(record)
+            write_shard(path, tables, summary)
+            solved = sum(bool(r.get("solved")) for r in summary)
+            failed = sum("error" in r for r in summary)
+            print(
+                f"shard {k}: {len(summary)} episodes ({solved} solved, {failed} failed) -> "
+                f"{path} ({time.perf_counter() - start:.1f} s)"
+            )
+
+    def _episode(self, number: int) -> tuple[pa.Table, dict[str, object]]:
+        """One episode's pose table and summary: from the priors when they hold everything
+        (no video read), else solved."""
+
+        import time
         from dataclasses import replace
 
-        from r4r.matching import RoMaV2
+        import torch
+
         from r4r.rago.stages import RigConfig, calibrate_rig
+        from r4r.reconstruction import held_poses, pose_table
 
-        model = None
-        family = dataset_root(self.dataset).parent.parent.name
-        target = self.out / family / dataset_root(self.dataset).name
-        target.mkdir(parents=True, exist_ok=True)
-        for number in self.episodes:
-            start = time.perf_counter()
-            rig = _prepare_rig(self.dataset, (number,), self.stride, self.focal)
-            unknown = [
-                n
-                for n, s, k in zip(rig.names, rig.streams, rig.known_mount, strict=True)
-                if s.moving and not k
-            ]
-            if unknown:
-                print(f"warning: mounts of {unknown} are not in the priors: searched per episode")
-            if model is None:
-                model = RoMaV2.from_checkpoint(device=rig.device)
-            config = replace(
-                RigConfig(),
-                link_every=self.every,
-                groups=0,
-                kinematic=kinematic_freedom(rig.loaded[0].priors, rig.robot, self.stride),
+        rig = _prepare_rig(self.dataset, (number,), self.stride, self.focal, (), "cpu")
+        kinematic = kinematic_freedom(rig.loaded[0].priors, rig.robot, self.stride)
+        held = None
+        if not self.solve:
+            held = held_poses(
+                rig.robot, rig.episodes[0], rig.names, rig.known_focal, rig.known_mount, kinematic
             )
-            fit = calibrate_rig(
-                rig.robot,
-                rig.episodes,
-                rig.names,
-                rig.intrinsics,
-                rig.known_focal,
-                rig.known_mount,
-                model,
-                config,
-                rig.lens,
-            )
-            path = target / f"episode_{number:06d}.parquet"
-            _write_poses(path, number, self.stride, rig, fit)
-            print(
-                f"episode {number}: median {fit.median_error:.2f} px, inliers "
-                f"{fit.inlier_fraction:.0%} -> {path} ({time.perf_counter() - start:.0f} s)"
-            )
+        if held is not None:
+            table = pose_table(number, self.stride, rig.names, held, rig.intrinsics)
+            return table, {"episode": number, "solved": False}
+
+        start = time.perf_counter()
+        rig = _prepare_rig(self.dataset, (number,), self.stride, self.focal)
+        unknown = [
+            n
+            for n, s, k in zip(rig.names, rig.streams, rig.known_mount, strict=True)
+            if s.moving and not k
+        ]
+        if unknown:
+            print(f"warning: mounts of {unknown} are not in the priors: searched per episode")
+        config = replace(RigConfig(), link_every=self.every, groups=0, kinematic=kinematic)
+        fit = calibrate_rig(
+            rig.robot,
+            rig.episodes,
+            rig.names,
+            rig.intrinsics,
+            rig.known_focal,
+            rig.known_mount,
+            _matcher(rig.device),
+            config,
+            rig.lens,
+        )
+        world = fit.world_from_body.detach().cpu().double()
+        mounts = fit.mounts_at.detach().cpu().double()
+        bodies = [rig.robot.camera_body[rig.robot.camera(n)] for n in rig.names]
+        poses = torch.stack([world[:, b] @ mounts[c] for c, b in enumerate(bodies)])
+        # One episode: its own intrinsics
+        table = pose_table(number, self.stride, rig.names, poses, fit.episode_intrinsics[0])
+        print(
+            f"episode {number}: median {fit.median_error:.2f} px, inliers "
+            f"{fit.inlier_fraction:.0%} ({time.perf_counter() - start:.0f} s)"
+        )
+        summary: dict[str, object] = {
+            "episode": number,
+            "solved": True,
+            "median_px": round(fit.median_error, 4),
+            "inliers": round(fit.inlier_fraction, 4),
+        }
+        return table, summary
 
 
-def _write_poses(path: Path, number: int, stride: int, rig: _RigInputs, fit: RigFit) -> None:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+@functools.cache
+def _matcher(device: str) -> RoMaV2:
+    """RoMa v2, loaded once per process and device."""
 
-    world = fit.world_from_body.detach().cpu().double()
-    mounts = fit.mounts_at.detach().cpu().double()
-    k = fit.episode_intrinsics[0].detach().cpu().double()  # one episode: its own intrinsics
-    rows: dict[str, list[object]] = {
-        k_: [] for k_ in ("episode", "frame", "camera", "world_from_camera", "fx", "fy", "cx", "cy")
-    }
-    for c, name in enumerate(rig.names):
-        body = rig.robot.camera_body[rig.robot.camera(name)]
-        poses = world[:, body] @ mounts[c]
-        for t in range(len(poses)):
-            rows["episode"].append(number)
-            rows["frame"].append(t * stride)
-            rows["camera"].append(name)
-            rows["world_from_camera"].append(poses[t].flatten().tolist())
-            rows["fx"].append(float(k[c, 0, 0]))
-            rows["fy"].append(float(k[c, 1, 1]))
-            rows["cx"].append(float(k[c, 0, 2]))
-            rows["cy"].append(float(k[c, 1, 2]))
-    table = pa.table(rows).replace_schema_metadata(
-        {"median_px": f"{fit.median_error:.4f}", "inliers": f"{fit.inlier_fraction:.4f}"}
-    )
-    pq.write_table(table, path)
+    from r4r.matching import RoMaV2
+
+    return RoMaV2.from_checkpoint(device=device)
 
 
 type Command = (

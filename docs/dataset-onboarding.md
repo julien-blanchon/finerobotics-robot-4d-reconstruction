@@ -40,7 +40,7 @@ Only then calibrate: the solver refines good priors; it does not rescue bad ones
 | 6 | whole rig | `r4r rig <dataset> --episodes … --groups 2 --save sol.pt` | groups agree (mm, 0.1° for dataset scope) |
 | 7 | **overlay** | `r4r overlay sol.pt check.png`, `… episode.mp4 --episode 0` | robot on the real one, every camera, several episodes |
 | 8 | write | `r4r rig … --write`, `r4r export <dataset> robot.xml` | priors and record committed; metadata bugs in `priors/ISSUES.md` |
-| 9 | every episode | `r4r reconstruct <dataset> out/ --episodes …` | per-episode parquet, residuals per episode |
+| 9 | every episode | `r4r reconstruct <dataset> out/ [--shard i/n]` | one parquet per shard of episodes, residuals per episode in its metadata |
 
 ## Checklist
 

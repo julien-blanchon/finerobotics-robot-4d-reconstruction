@@ -33,14 +33,20 @@ if TYPE_CHECKING:
 
 def world_from_camera(values: Tensor[[int, int]], source: PoseColumn) -> Tensor[[int, *Mat4x4]]:
     """Per-frame `world_from_camera` (OpenCV axes) from a recorded column of flattened 3×4 or
-    4×4 matrices (`world_to_camera` or `world_from_camera` layout); NaN where a row is not a
-    finite rigid transform (some records end with zero or infinite rows)."""
+    4×4 matrices, or of x, y, z, qw, qx, qy, qz rows (`world_to_camera` or `world_from_camera`
+    layout); NaN where a row is not a finite rigid transform (some records end with zero or
+    infinite rows)."""
 
     values = values.double()
-    rows = values.shape[1] // 4
-    matrix = torch.zeros(len(values), 4, 4, dtype=torch.float64)
-    matrix[:, :rows] = values.reshape(len(values), rows, 4)
-    matrix[:, 3, 3] = 1.0
+    if values.shape[1] == 7:
+        q = values[:, 3:]
+        rotation = se3.quaternion_to_matrix(q / q.norm(dim=1, keepdim=True))
+        matrix = se3.from_rotation_translation(rotation, values[:, :3])
+    else:
+        rows = values.shape[1] // 4
+        matrix = torch.zeros(len(values), 4, 4, dtype=torch.float64)
+        matrix[:, :rows] = values.reshape(len(values), rows, 4)
+        matrix[:, 3, 3] = 1.0
     rotation = matrix[:, :3, :3].nan_to_num(0.0, 0.0, 0.0)
     eye = torch.eye(3, dtype=torch.float64)
     valid = matrix.flatten(1).isfinite().all(1) & (

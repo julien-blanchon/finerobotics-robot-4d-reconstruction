@@ -59,7 +59,8 @@ equals `value`) to an object with `position` (x, y, z) and `orientation` (w, x, 
 robot base frame (moving camera: on its link); `axes` are the recorded camera axes (`opencv`,
 or `forward_left_up`: x forward, y left, z up, Isaac Sim's "world" camera axes). With
 `"layout": "world_to_camera"` (or `world_from_camera`) the column holds a flattened 3×4 / 4×4
-matrix per frame in the simulator's world frame instead, and the top-level `world_anchor` names
+matrix (or x, y, z, qw, qx, qy, qz) per frame in the simulator's world frame instead, and the
+top-level `world_anchor` names
 a camera with a `link` and such a column: per episode, hand-eye between that link's forward
 kinematics and the anchor's recorded motion gives the base in the world, and every such camera
 is placed in the base frame (on its link, moving) at the episode's middle frame

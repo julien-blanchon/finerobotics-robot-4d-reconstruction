@@ -77,7 +77,6 @@ NPair image/motion pairs     In, Out, Hidden layer widths
 R, Cl patch-grid rows/columns
 Ho, Wo output height/width   Side square resize side   Radius correlation radius
 Depth decoder blocks         Crop query RGB crop side  Start, Stop slice bounds
-NRef reference frames per target (keypoint transfer)
 ```
 
 **Named fixed-size axes.** A fixed axis is named by its components, so the name shows the size:

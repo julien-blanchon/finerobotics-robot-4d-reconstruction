@@ -1,63 +1,65 @@
 """Robot keypoints transferred from calibrated frames by dense matching: picks without clicks.
 
-In a reference frame whose camera is known (a calibrated station), every robot point's pixel
-is known, `u = π_K(P⁻¹ W_b(q) p)`. RoMa v2 matches the reference with a target frame of an
-uncalibrated camera of the same robot; the warp at `u` is the point's pixel in the target:
+In a reference frame whose camera is known (a calibrated station), the robot's visible surface
+is known: the ray through pixel `u` first meets the description's geometry at a point `p` rigid
+with body `b` (MuJoCo ray cast at the frame's joints). RoMa v2 matches the reference with a
+target frame of an uncalibrated camera of the same robot; the warp at `u` is where the target
+sees `p`:
 
     u' = w_ab(u),  kept when  c_ab(u) > certainty  and  ‖w_ba(u') − u‖ < cycle
 
 `c_ab` is RoMa's overlap probability; the forward-backward check drops points hidden or
-ambiguous in the target. Each target frame is matched with the reference frames of nearest
-joint configuration (`‖q − q_ref‖`, radians and metres): the robot then looks most alike
-(gripper opening, wrist roll). With several, a point's pixel is the median over those where it
-passes, kept when they are a majority. The reference is cropped around its projected points (with a
-margin) so the robot fills the matched image.
+ambiguous in the target. `(b, p) ↔ u'` is a robot keypoint (`keypoints.py`) at the target's
+timestep. Surface points, not named ones: a joint origin lies inside its housing, and the
+warp carries the surface in front of it, off the origin by about `r · sin Δθ` for a change of
+viewing direction `Δθ` (SynGrasp, 256²: named points gave a median camera error of 23 cm,
+surface points 6 cm; docs/dataset-onboarding.md). The geometry only says which surface point a
+reference pixel shows; the solve never sees it.
 
-The pixels are picks (`r4r.data.priors.Pick`), as if clicked, for `r4r rig --picks`: a PnP-RANSAC
-start, then the bundle's Cauchy loss handles the outliers left.
-
-Limits (measured in docs/dataset-onboarding.md): a named point is rarely a surface point (a
-joint origin lies inside its housing); the warp carries the surface in front of it, which
-projects onto the point only from the reference's viewing direction, so transferred pixels
-drift by about `r · sin Δθ` (housing radius `r`, change of viewing direction `Δθ`). A point
-hidden in the reference by another link transfers that link's surface.
+Each target frame is matched with the reference frame of nearest joint configuration
+(`‖q − q_ref‖`, radians and metres) that shows enough of the robot: it then looks most alike
+(gripper opening, wrist roll). The reference is cropped around its points (with a margin) so
+the robot fills the matched image. The pixels are written as picks (`r4r.data.priors.Pick`) for
+`r4r rig --picks`: a PnP-RANSAC start, then the bundle's Cauchy loss handles outliers left.
 
 Ref: Edstedt et al., RoMa v2, arXiv:2511.15706.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import mujoco
+import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from r4r.data.priors import Pick
-from r4r.geometry import camera, se3
+from r4r.data.priors import Pick, RobotPoint
+from r4r.geometry import se3
 
 from .kinematics import forward_kinematics
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from shape_extensions import IntVar
     from torch import Tensor
 
-    from r4r.data.priors import RobotPoint
     from r4r.matching import Matches, RoMaV2
-    from r4r.types import RGB, UV, Mat3x3, Mat4x4
+    from r4r.types import RGB, UV, XYZ, Mat3x3, Mat4x4
 
     from .robot import Robot
 
 # Pairs matched at once (each encodes two frames)
 BATCH = 8
-# A projected point counts as seen this far inside the image (pixels) and in front (m)
-BORDER = 2.0
-MIN_DEPTH = 0.05
-# A reference frame needs this many seen points to be used
-MIN_SEEN = 2
+# Reference frames tried per target frame, nearest first, for one with MIN_POINTS points
+CANDIDATES = 8
+MIN_POINTS = 8
+# Rays are cast this far at most (m)
+MAX_DISTANCE = 100.0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -66,72 +68,109 @@ class TransferConfig:
     certainty: float = 0.1
     # Maximum forward-backward distance (reference pixels)
     cycle: float = 3.0
-    # Reference crop: the box of its seen points grown by this fraction of its size on each
-    # side (inf: the whole frame)
+    # Reference crop: the box of its points grown by this fraction of its size on each side
+    # (inf: the whole frame)
     margin: float = 0.5
     # Target frames per episode, spread over its joint configurations
-    frames: int = 8
-    # Reference frames matched with each target frame (nearest joint configurations); a point
-    # is kept where it passes the checks for a majority of them
-    references: int = 1
+    frames: int = 16
+    # Surface points per reference frame, drawn from a grid of `grid` rays per image row
+    points: int = 48
+    grid: int = 64
 
 
 @dataclass(frozen=True, slots=True)
-class Reference[R: IntVar, NQ: IntVar, P: IntVar]:
-    """`R` frames of a calibrated camera: images, joint positions and the pixels of `P`
-    robot points, with whether each is seen."""
+class Reference[R: IntVar, NQ: IntVar]:
+    """`R` frames of calibrated static cameras (one image size): images, joint positions, and
+    each frame's camera pose (base frame, OpenCV axes) and intrinsics."""
 
     frames: Tensor[[R, *RGB, int, int]]  # uint8
     qpos: Tensor[[R, NQ]]
-    pixels: Tensor[[R, P, *UV]]
-    seen: Tensor[[R, P]]
+    world_from_camera: Tensor[[R, *Mat4x4]]
+    intrinsics: Tensor[[R, *Mat3x3]]
 
 
 @dataclass(frozen=True, slots=True)
-class Matched[N: IntVar, NRef: IntVar, P: IntVar]:
-    """`P` points carried from `NRef` reference frames (`reference`, indices) into each of `N`
-    target frames: pixels, RoMa certainty, forward-backward distance (reference pixels) and
-    whether the reference sees the point."""
+class SurfacePoints[M: IntVar]:
+    """`M` reference pixels and the robot surface point each shows: body index and offset (m,
+    in the body's frame)."""
 
-    pixels: Tensor[[N, NRef, P, *UV]]
-    certainty: Tensor[[N, NRef, P]]
-    cycle: Tensor[[N, NRef, P]]
-    seen: Tensor[[N, NRef, P]]
-    reference: Tensor[[N, NRef]]
+    pixels: Tensor[[M, *UV]]
+    body: Tensor[[M]]
+    offset: Tensor[[M, *XYZ]]
 
 
 @dataclass(frozen=True, slots=True)
 class Transferred[N: IntVar, P: IntVar]:
-    """`P` points in `N` target frames: pixel (median over the references that passed the
-    checks), how many passed, and whether that is a majority of the references."""
+    """Up to `P` surface points in each of `N` target frames: their pixels there, the point
+    (body, offset), and whether it passed the checks (padding never does)."""
 
     pixels: Tensor[[N, P, *UV]]
-    votes: Tensor[[N, P]]
+    body: Tensor[[N, P]]
+    offset: Tensor[[N, P, *XYZ]]
     kept: Tensor[[N, P]]
 
 
-def project_points[T: IntVar, NQ: IntVar](
+def surface_points[NQ: IntVar](
+    model: mujoco.MjModel,
     robot: Robot[int, int, int],
-    qpos: Tensor[[T, NQ]],
-    points: Sequence[RobotPoint],
+    qpos: Tensor[[NQ]],
     world_from_camera: Tensor[[*Mat4x4]],
     intrinsics: Tensor[[*Mat3x3]],
     size: tuple[int, int],
-) -> tuple[Tensor[[T, int, *UV]], Tensor[[T, int]]]:
-    """Pixels of `points` at every timestep in a static camera of image `size` (H, W), and
-    whether each is seen (in front, inside the image): `u = π_K(P⁻¹ W_b(q_t) p)`."""
+    bodies: Collection[int],
+    config: TransferConfig,
+    seed: int = 0,
+) -> SurfacePoints[int]:
+    """Up to `config.points` pixels (at random) of a grid whose rays first meet a geom of
+    `bodies`, away from its outline (the four grid neighbours meet the same body), with the
+    point met: `p = W_b(q)⁻¹ (o + t d)`, ray `o + t d` through the pixel (`d = R K⁻¹ (u, 1)`).
 
-    world = forward_kinematics(robot, qpos)
-    body = torch.tensor([robot.body(p.body) for p in points], device=qpos.device)
-    offset = qpos.new_tensor([p.offset for p in points])
-    camera_from_body = se3.inverse(world_from_camera) @ world[:, body]
-    local = se3.transform_points(camera_from_body, offset[None, :, None])[..., 0, :]
-    t = len(qpos)
-    pixels = camera.project(intrinsics.expand(t, len(points), 3, 3), local[..., None, :])[..., 0, :]
+    `model` is the description compiled with its geometry (`robot.compile_model`), `robot` the
+    same description's kinematics; scene geometry is not modelled, so occluders are not known.
+    """
+
+    data = mujoco.MjData(model)
+    data.qpos[:] = qpos.double().cpu().numpy()
+    mujoco.mj_kinematics(model, data)
     height, width = size
-    inside = (pixels >= -0.5 + BORDER).all(-1)
-    inside &= (pixels[..., 0] <= width - 0.5 - BORDER) & (pixels[..., 1] <= height - 0.5 - BORDER)
-    return pixels, inside & (local[..., 2] > MIN_DEPTH)
+    step = width / config.grid
+    columns, rows = np.arange(step / 2, width, step), np.arange(step / 2, height, step)
+    u, v = np.meshgrid(columns, rows)
+    pixels = np.stack((u, v, np.ones_like(u)), -1).reshape(-1, 3)
+    pose = world_from_camera.double().cpu().numpy()
+    direction = pixels @ np.linalg.inv(intrinsics.double().cpu().numpy()).T @ pose[:3, :3].T
+    direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+    origin = pose[:3, 3].copy()
+    geom = np.full(len(direction), -1, dtype=np.int32)
+    distance = np.full(len(direction), -1.0)
+    mujoco.mj_multiRay(
+        model,
+        data,
+        origin,
+        direction.reshape(-1).copy(),
+        None,
+        1,
+        -1,
+        geom,
+        distance,
+        None,
+        len(direction),
+        MAX_DISTANCE,
+    )
+    body = np.where(geom >= 0, model.geom_bodyid[np.maximum(geom, 0)], -1).reshape(u.shape)
+    inner = np.isin(body, list(bodies))
+    centre = body[1:-1, 1:-1]
+    inner[1:-1, 1:-1] &= (centre == body[:-2, 1:-1]) & (centre == body[2:, 1:-1])
+    inner[1:-1, 1:-1] &= (centre == body[1:-1, :-2]) & (centre == body[1:-1, 2:])
+    inner[[0, -1], :] = inner[:, [0, -1]] = False
+    index = np.flatnonzero(inner)
+    if len(index) > config.points:
+        index = np.sort(np.random.default_rng(seed).choice(index, config.points, replace=False))
+    met = torch.from_numpy(origin + direction[index] * distance[index, None])
+    hit = torch.from_numpy(body.reshape(-1)[index]).long()
+    world_from_body = forward_kinematics(robot, qpos[None].double().cpu())[0]
+    offset = se3.transform_points(se3.inverse(world_from_body[hit]), met[:, None])[:, 0]
+    return SurfacePoints(torch.from_numpy(pixels[index, :2]), hit, offset)
 
 
 def spread_frames[T: IntVar, NQ: IntVar](qpos: Tensor[[T, NQ]], count: int) -> Tensor[[int]]:
@@ -147,15 +186,12 @@ def spread_frames[T: IntVar, NQ: IntVar](qpos: Tensor[[T, NQ]], count: int) -> T
 
 
 def nearest[R: IntVar, N: IntVar, NQ: IntVar](
-    reference: Reference[R, NQ, int], qpos: Tensor[[N, NQ]], count: int
+    reference_qpos: Tensor[[R, NQ]], qpos: Tensor[[N, NQ]], count: int
 ) -> Tensor[[N, int]]:
-    """For each joint configuration, the `count` reference frames nearest to it (nearest
-    first) among those that see at least `MIN_SEEN` points."""
+    """For each joint configuration, the `count` nearest reference frames, nearest first."""
 
-    distance = torch.cdist(qpos, reference.qpos.to(qpos))
-    usable = reference.seen.sum(-1) >= MIN_SEEN
-    distance = distance.masked_fill(~usable.to(qpos.device), torch.inf)
-    return distance.topk(min(count, len(reference.qpos)), dim=-1, largest=False).indices
+    distance = torch.cdist(qpos, reference_qpos.to(qpos))
+    return distance.topk(min(count, len(reference_qpos)), dim=-1, largest=False).indices
 
 
 def read_warp[B: IntVar, P: IntVar](
@@ -195,6 +231,8 @@ def crop_box(
     side, widened to `aspect` (width / height) and kept inside an image of `size` (H, W)."""
 
     height, width = size
+    if math.isinf(margin) or not len(pixels):
+        return 0, 0, width, height
     low, high = pixels.amin(0), pixels.amax(0)
     centre = (low + high) / 2
     half = (high - low) / 2 * (1 + 2 * margin) + 16
@@ -206,113 +244,124 @@ def crop_box(
     return round(x0), round(y0), round(x0 + 2 * half_w), round(y0 + 2 * half_h)
 
 
-def match_points[N: IntVar, NRef: IntVar, P: IntVar](
+def match_points[N: IntVar, P: IntVar](
     model: RoMaV2,
-    reference: Reference[int, int, P],
-    chosen: Tensor[[N, NRef]],
+    references: Tensor[[N, *RGB, int, int]],
+    pixels: Tensor[[N, P, *UV]],
+    seen: Tensor[[N, P]],
     targets: Tensor[[N, *RGB, int, int]],
     margin: float,
-) -> Matched[N, NRef, P]:
-    """Each target frame (uint8) matched with its `chosen` reference frames, each cropped to
-    its seen points (`crop_box`) and resized to the target's size."""
+) -> tuple[Tensor[[N, P, *UV]], Tensor[[N, P]], Tensor[[N, P]]]:
+    """Reference frame `i` (uint8, cropped to its `seen` pixels, resized to the target's size)
+    matched with target frame `i`: each pixel's match in the target, its certainty and its
+    forward-backward distance (reference pixels)."""
 
     device = next(model.parameters()).device
-    count = chosen.shape[1]
-    pairs = rearrange(chosen.cpu(), "n r -> (n r)").tolist()
     height, width = targets.shape[-2:]
+    size = (references.shape[-2], references.shape[-1])
     found, certainty, cycle = [], [], []
-    for start in range(0, len(pairs), BATCH):
-        crops, pixels, zoom = [], [], []
-        for r in pairs[start : start + BATCH]:
-            x0, y0, x1, y1 = crop_box(
-                reference.pixels[r][reference.seen[r]],
-                (reference.frames.shape[-2], reference.frames.shape[-1]),
-                width / height,
-                margin,
-            )
-            image = reference.frames[r, :, y0:y1, x0:x1].to(device).float() / 255
+    for start in range(0, len(targets), BATCH):
+        crops, cropped, zoom = [], [], []
+        for i in range(start, min(start + BATCH, len(targets))):
+            x0, y0, x1, y1 = crop_box(pixels[i][seen[i]], size, width / height, margin)
+            image = references[i, :, y0:y1, x0:x1].to(device).float() / 255
             crops.append(
                 F.interpolate(image[None], (height, width), mode="bilinear", antialias=True)[0]
             )
             # Reference pixels → crop pixels: `u' = (u − x0 + ½) · s − ½`, `s` per axis
-            scale = reference.pixels.new_tensor((width / (x1 - x0), height / (y1 - y0)))
-            offset = reference.pixels.new_tensor((x0, y0))
-            pixels.append((reference.pixels[r] - offset + 0.5) * scale - 0.5)
+            scale = pixels.new_tensor((width / (x1 - x0), height / (y1 - y0)))
+            cropped.append((pixels[i] - pixels.new_tensor((x0, y0)) + 0.5) * scale - 0.5)
             zoom.append(float(scale.mean()))
-        index = torch.arange(start, start + len(crops)) // count
-        target = targets[index].to(device).float() / 255
+        target = targets[start : start + len(crops)].to(device).float() / 255
         encoding = model.encode(torch.cat((torch.stack(crops), target)))
-        n = len(crops)
-        a = torch.arange(n, device=device)
-        matched = read_warp(
-            model.match(encoding[a], encoding[a + n]), torch.stack(pixels).to(device)
-        )
+        a = torch.arange(len(crops), device=device)
+        matches = model.match(encoding[a], encoding[a + len(crops)])
+        matched = read_warp(matches, torch.stack(cropped).to(device))
         found.append(matched[0].cpu())
         certainty.append(matched[1].cpu())
-        # Forward-backward distance back in reference pixels
         cycle.append(matched[2].cpu() / torch.tensor(zoom, dtype=matched[2].dtype)[:, None])
-    like = reference.pixels
-
-    def per_target(parts: list[Tensor]) -> Tensor:  # [N · NRef, P, ...] → [N, NRef, P, ...]
-        return rearrange(torch.cat(parts).to(like), "(n r) ... -> n r ...", r=count)
-
-    return Matched(
-        per_target(found),
-        per_target(certainty),
-        per_target(cycle),
-        reference.seen[chosen.to(reference.seen.device)],
-        chosen,
+    return (
+        torch.cat(found).to(pixels),
+        torch.cat(certainty).to(pixels),
+        torch.cat(cycle).to(pixels),
     )
 
 
-def pooled[N: IntVar, NRef: IntVar, P: IntVar](
-    matched: Matched[N, NRef, P], certainty: float, cycle: float
-) -> Transferred[N, P]:
-    """A point passes for one reference when it is seen there, `c > certainty` and the
-    forward-backward distance is below `cycle`; its pixel is the median over the references
-    where it passes, kept when they are a majority (`> NRef / 2`)."""
-
-    passed = matched.seen & (matched.certainty > certainty) & (matched.cycle < cycle)
-    masked = matched.pixels.masked_fill(~passed[..., None], torch.nan)
-    pixels = masked.nanmedian(dim=1).values
-    votes = passed.sum(1)
-    kept = 2 * votes > matched.reference.shape[1]
-    return Transferred(torch.nan_to_num(pixels), votes, kept)
-
-
-def transfer[N: IntVar, P: IntVar](
-    model: RoMaV2,
-    reference: Reference[int, int, P],
+def transfer[N: IntVar](
+    matcher: RoMaV2,
+    model: mujoco.MjModel,
+    robot: Robot[int, int, int],
+    reference: Reference[int, int],
     targets: Tensor[[N, *RGB, int, int]],
     target_qpos: Tensor[[N, int]],
+    bodies: Collection[int],
     config: TransferConfig,
-) -> Transferred[N, P]:
-    """The reference's points in each target frame (uint8), from its `config.references`
-    reference frames of nearest joint configuration."""
+) -> Transferred[N, int]:
+    """Surface points of `bodies` carried into each target frame (uint8) from its nearest
+    reference frame showing at least `MIN_POINTS` of them (`surface_points`)."""
 
-    chosen = nearest(reference, target_qpos.to(reference.qpos), config.references)
-    matched = match_points(model, reference, chosen, targets, config.margin)
-    return pooled(matched, config.certainty, config.cycle)
+    size = (reference.frames.shape[-2], reference.frames.shape[-1])
+    candidates = nearest(reference.qpos, target_qpos.to(reference.qpos), CANDIDATES)
+    chosen, found = [], []
+    for row in candidates.tolist():
+        for r in row:
+            points = surface_points(
+                model,
+                robot,
+                reference.qpos[r],
+                reference.world_from_camera[r],
+                reference.intrinsics[r],
+                size,
+                bodies,
+                config,
+                seed=r,
+            )
+            if len(points.body) >= MIN_POINTS:
+                break
+        chosen.append(r)
+        found.append(points)
+    count = config.points
+    like = reference.world_from_camera
+    pixels = like.new_zeros(len(found), count, 2)
+    body = torch.zeros(len(found), count, dtype=torch.long)
+    offset = like.new_zeros(len(found), count, 3)
+    seen = torch.zeros(len(found), count, dtype=torch.bool)
+    for i, points in enumerate(found):
+        m = len(points.body)
+        pixels[i, :m], body[i, :m], offset[i, :m] = (
+            points.pixels.to(like),
+            points.body,
+            points.offset,
+        )
+        seen[i, :m] = True
+    moved, certainty, cycle = match_points(
+        matcher, reference.frames[torch.tensor(chosen)], pixels, seen, targets, config.margin
+    )
+    kept = seen & (certainty > config.certainty) & (cycle < config.cycle)
+    return Transferred(moved, body, offset, kept)
 
 
 def as_picks[N: IntVar, P: IntVar](
     transferred: Transferred[N, P],
-    names: Sequence[str],
+    body_names: Sequence[str],
     episode: int,
     camera_name: str,
     frames: Sequence[int],
-) -> list[Pick]:
-    """One pick per target frame (the video's own frame index) with its kept points."""
+) -> tuple[dict[str, RobotPoint], list[Pick]]:
+    """The kept points as named robot points (`e<episode>f<frame>p<j>`) and one pick per
+    target frame (the video's own frame index) that kept any."""
 
-    picks = []
+    points, picks = {}, []
     for i, frame in enumerate(frames):
-        pixels = {
-            name: (float(xy[0]), float(xy[1]))
-            for name, xy, kept in zip(
-                names, transferred.pixels[i].tolist(), transferred.kept[i].tolist(), strict=True
+        pixels = {}
+        for j in transferred.kept[i].nonzero()[:, 0].tolist():
+            name = f"e{episode}f{frame}p{j}"
+            offset = transferred.offset[i, j].tolist()
+            points[name] = RobotPoint(
+                body_names[int(transferred.body[i, j])], (offset[0], offset[1], offset[2])
             )
-            if kept
-        }
+            xy = transferred.pixels[i, j].tolist()
+            pixels[name] = (xy[0], xy[1])
         if pixels:
             picks.append(Pick(episode, camera_name, frame, pixels))
-    return picks
+    return points, picks

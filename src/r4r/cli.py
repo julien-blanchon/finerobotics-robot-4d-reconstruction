@@ -18,13 +18,14 @@ if TYPE_CHECKING:
     from torch import Tensor
 
     from r4r.data.episode import CameraStream, Episode
-    from r4r.data.priors import CameraPrior, DatasetPriors
+    from r4r.data.priors import CameraPrior, DatasetPriors, RobotPoint
     from r4r.matching import RoMaV2
     from r4r.rago.calibrate import FitConfig
     from r4r.rago.lens import Lens
     from r4r.rago.rig import KinematicFreedom
     from r4r.rago.robot import BodyMount, CameraMount, Robot
     from r4r.rago.stages import RigEpisode, RigFit
+    from r4r.rago.transfer import Reference
     from r4r.types import Mat3x3, Mat4x4
     from r4r.viz.overlay import SavedSolution, Solution
 
@@ -691,6 +692,161 @@ def _print_rig(
 
 
 @dataclass(frozen=True, slots=True)
+class Picks:
+    """Robot keypoints of a static camera transferred from calibrated frames by RoMa v2: a picks
+    file for `r4r rig --picks`, without clicks (`r4r.rago.transfer`).
+
+    References are episodes where the camera's pose is known: recorded for the episode
+    (per-episode table, pose column) or held by the priors.
+    """
+
+    dataset: tyro.conf.Positional[str]
+    output: tyro.conf.Positional[Path]
+    camera: str
+    # Episodes to place the camera in (targets)
+    episodes: tuple[int, ...]
+    # Calibrated episodes to transfer from (of `reference_dataset`, default this dataset)
+    references: tuple[int, ...]
+    reference_dataset: str | None = None
+    # Robot points: body names (their origins) or the priors' `robot_points`; default every
+    # body origin (one per place: origins within 1 cm of an earlier one are left out)
+    points: tuple[str, ...] = ()
+    # Target frames per episode, spread over its joint configurations
+    frames: int = 8
+    # Decoding strides of the target and reference videos
+    stride: int = 1
+    reference_stride: int = 3
+    certainty: float = 0.1
+    # Forward-backward tolerance (reference pixels)
+    cycle: float = 3.0
+    # Reference crop margin around its points (fraction; inf: whole frames)
+    margin: float = 0.5
+
+    def run(self) -> None:
+        import json
+        import math
+
+        import torch
+
+        from r4r.data.lerobot import load_episode
+        from r4r.data.priors import RobotPoint
+        from r4r.rago.robot import body_mounts, qpos_from_state
+        from r4r.rago.transfer import TransferConfig, as_picks, spread_frames, transfer
+
+        config = TransferConfig(
+            certainty=self.certainty, cycle=self.cycle, margin=self.margin, frames=self.frames
+        )
+        source = dataset_root(self.reference_dataset or self.dataset)
+        first = load_episode(source, self.references[0], decode=())
+        robot = _robot(first.robot, (), body_mounts(first.priors)).to("cpu", torch.float64)
+        named = first.priors.robot_points
+        names = self.points or _distinct_bodies(robot, first)
+        points = [named.get(n) or RobotPoint(n) for n in names]
+        reference = _transfer_reference(
+            source, self.references, self.camera, self.reference_stride, robot, points
+        )
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = _matcher(device)
+        root = dataset_root(self.dataset)
+        picks = []
+        for number in self.episodes:
+            episode = load_episode(root, number, stride=self.stride, decode=(self.camera,))
+            stream = next(c for c in episode.cameras if c.name == self.camera)
+            qpos = qpos_from_state(robot, episode.state, episode.joints)
+            chosen = spread_frames(qpos, config.frames)
+            moved = transfer(model, reference, stream.frames[chosen], qpos[chosen], config)
+            found = as_picks(moved, names, number, self.camera, (chosen * self.stride).tolist())
+            picks += found
+            kept = moved.kept
+            certainty = moved.certainty[kept]
+            print(
+                f"episode {number}: {int(kept.sum())} points in {len(found)} of {len(chosen)} "
+                f"frames (median certainty "
+                f"{float(certainty.median()) if len(certainty) else math.nan:.2f})"
+            )
+        offsets = {n: p for n, p in zip(names, points, strict=True) if n in named}
+        raw = {
+            "points": {n: {"body": p.body, "offset": list(p.offset)} for n, p in offsets.items()},
+            "picks": [
+                {"episode": p.episode, "camera": p.camera, "frame": p.frame, "pixels": p.pixels}
+                for p in picks
+            ],
+        }
+        self.output.write_text(json.dumps(raw, indent=1))
+        print(f"wrote {self.output} ({len(picks)} picks)")
+
+
+def _distinct_bodies(robot: Robot[int, int, int], episode: Episode[int, int]) -> tuple[str, ...]:
+    """Bodies whose origins are more than 1 cm from every earlier body's, at the episode's
+    first timestep."""
+
+    from r4r.rago.kinematics import forward_kinematics
+    from r4r.rago.robot import qpos_from_state
+
+    qpos = qpos_from_state(robot, episode.state[:1], episode.joints)
+    origin = forward_kinematics(robot, qpos)[0, :, :3, 3]
+    kept: list[int] = []
+    for b in range(len(robot.body_names)):
+        if all(float((origin[b] - origin[k]).norm()) > DISTINCT_POINTS for k in kept):
+            kept.append(b)
+    return tuple(robot.body_names[b] for b in kept)
+
+
+# Body origins closer than this (m) are one robot point
+DISTINCT_POINTS = 0.01
+
+
+def _transfer_reference(
+    root: Path,
+    numbers: tuple[int, ...],
+    name: str,
+    stride: int,
+    robot: Robot[int, int, int],
+    points: list[RobotPoint],
+) -> Reference[int, int, int]:
+    """Frames of camera `name` in calibrated episodes, with the pixels of `points`: its pose
+    recorded for the episode, else the priors'; its intrinsics recorded, else the priors' focal."""
+
+    import torch
+
+    from r4r.data.lerobot import load_episode
+    from r4r.geometry import se3
+    from r4r.rago.robot import qpos_from_state
+    from r4r.rago.transfer import Reference, project_points
+
+    parts = []
+    for number in numbers:
+        episode = load_episode(root, number, stride=stride, decode=(name,))
+        stream = next(c for c in episode.cameras if c.name == name)
+        prior = stream.prior
+        if stream.moving or prior.distortion:
+            raise SystemExit(f"{name}: references are static ideal-pinhole cameras")
+        pose = stream.pose
+        if pose is None and prior.position is not None and prior.orientation is not None:
+            rotation = se3.quaternion_to_matrix(
+                torch.tensor(prior.orientation, dtype=torch.float64)
+            )
+            pose = se3.from_rotation_translation(rotation, torch.tensor(prior.position).double())
+        if pose is None or (stream.intrinsics is None and prior.focal is None):
+            raise SystemExit(f"{name} in episode {number}: no known pose or focal to transfer from")
+        height, width = stream.size
+        k = stream.intrinsics
+        if k is None:
+            k = torch.tensor(
+                pinhole_guess(prior.focal or 0.0, prior.aspect, width, height), dtype=torch.float64
+            )
+        qpos = qpos_from_state(robot, episode.state, episode.joints)
+        pixels, seen = project_points(robot, qpos, points, pose.double(), k.double(), stream.size)
+        parts.append((stream.frames, qpos, pixels, seen))
+    return Reference(
+        torch.cat([p[0] for p in parts]),
+        torch.cat([p[1] for p in parts]),
+        torch.cat([p[2] for p in parts]),
+        torch.cat([p[3] for p in parts]),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class Sheet:
     """Contact sheet: camera frames next to the robot skeleton (top, side, front views)."""
 
@@ -1073,6 +1229,7 @@ type Command = (
     | Annotated[Links, tyro.conf.subcommand("links")]
     | Annotated[Fit, tyro.conf.subcommand("fit")]
     | Annotated[Rig, tyro.conf.subcommand("rig")]
+    | Annotated[Picks, tyro.conf.subcommand("picks")]
     | Annotated[Sheet, tyro.conf.subcommand("sheet")]
     | Annotated[Export, tyro.conf.subcommand("export")]
     | Annotated[Overlay, tyro.conf.subcommand("overlay")]

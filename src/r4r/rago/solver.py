@@ -66,9 +66,12 @@ class _Call(nn.Module):
 
 
 def supports(rig: Rig[int, int, int]) -> bool:
-    """Whether every free row is dataset or episode scope (no frame-scope walk)."""
+    """Whether every free row is dataset or episode scope (no free frame-scope walk; a held
+    one follows its start)."""
 
-    return not any(bool((c.active & (c.previous >= 0)).any()) for c in (rig.cameras, rig.bodies))
+    return not any(
+        bool((c.free_dof.any(1) & (c.previous >= 0)).any()) for c in (rig.cameras, rig.bodies)
+    )
 
 
 @dataclass(frozen=True, slots=True)

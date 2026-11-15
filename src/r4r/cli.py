@@ -7,9 +7,10 @@ Datasets are named by their delivery root, absolute or relative to `DELIVERY`
 from __future__ import annotations
 
 import functools
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import tyro
 
@@ -548,6 +549,34 @@ def _write_rig(
             "fitted": {"episodes": list(episodes), "groups": groups},
         }
         print(f"wrote {write_body(rig.root, name, body, station)}")
+    _write_odometry(fit, rig, episodes)
+
+
+def _write_odometry(fit: RigFit, rig: _RigInputs, episodes: tuple[int, ...]) -> None:
+    """Fit the recorded base motion's dataset-level correction to the bundle's free base
+    (`odometry.fit_gain`) and store it, on top of any correction already applied."""
+
+    from r4r.data.priors import write_odometry_correction
+    from r4r.rago.odometry import fit_gain
+    from r4r.rago.stages import solved_base_motion
+
+    spec = rig.loaded[0].priors.base_odometry
+    if spec is None:
+        return
+    solved = solved_base_motion(rig.robot, rig.episodes, fit.world_from_body.detach())
+    if not solved:
+        return
+    motions = [e.base_motion for e in rig.episodes if e.base_motion is not None]
+    gain = fit_gain([m.cpu() for m in motions], [s.cpu() for s in solved], 1 / rig.loaded[0].fps)
+    if spec.correction is not None:
+        gain = spec.correction.then(gain)
+    values = {
+        "scale": round(gain.scale, 5),
+        "heading_gain": round(gain.heading_gain, 5),
+        "yaw_rate": round(gain.yaw_rate, 6),
+        "fitted": {"episodes": list(episodes)},
+    }
+    print(f"wrote {write_odometry_correction(rig.root, values)}")
 
 
 def _focal_varies(fit: RigFit, camera: int) -> bool:
@@ -931,30 +960,35 @@ class Focal:
 
 @dataclass(frozen=True, slots=True)
 class Reconstruct:
-    """Every episode with the dataset's frozen priors (after `r4r rig --write`). An episode whose
-    priors leave nothing free (cameras recorded or held, focals known; `r4r.reconstruction`)
-    is written from the priors and forward kinematics alone, without reading its video; the
-    others are solved for what is free per episode or frame (re-placed static cameras, a
-    moving base, unknown focals), without agreement groups.
+    """Every episode with the dataset's frozen priors (after `r4r rig --write`), by the path its
+    unknowns allow (`r4r.plan`): fast (every value held or recorded: the priors and forward
+    kinematics, no video read), light (episode-scope unknowns fitted on a few keyframes, CPU:
+    `r4r.rago.light`) or full (something never calibrated: the whole rig per episode).
 
     Writes `<out>/<family>/<dataset>/shard-<k>.parquet`, one per `--shard-size` episodes of the
     selection: per frame and camera, `episode, frame, camera`, `world_from_camera` (robot base
     frame, OpenCV axes, 16 values, row-major) and `fx, fy, cx, cy`; per episode (schema
-    metadata `r4r.episodes`, JSON) whether it was solved, its median reprojection error and
-    inlier share, or the error that stopped it. Shards already written are skipped."""
+    metadata `r4r.episodes`, JSON) its route, fit check and errors, or the error that stopped
+    it. Shards already written are skipped. `--plan` only counts the routes and estimates the
+    cost (`r4r.plan`)."""
 
     dataset: tyro.conf.Positional[str]
-    out: tyro.conf.Positional[Path]
+    out: tyro.conf.Positional[Path] = Path("reconstruction")
     # Episodes to process (default: every episode of the dataset)
     episodes: tuple[int, ...] = ()
     # Episodes per output file
     shard_size: int = 1000
     # This worker's part, `i/n`: the shards k with k mod n = i (e.g. a Slurm array task)
     shard: str = "0/1"
-    # Solve every episode, also those the priors fully determine
+    # Solve every episode in full, also those the priors determine
     solve: bool = False
+    # The fit check on keyframes: `auto` for real (not simulated) episodes holding an
+    # episode-scope camera at its record
+    check: Literal["auto", "on", "off"] = "auto"
+    # Count each route and estimate CPU / GPU hours, without reconstructing
+    plan: bool = False
     stride: int = 1
-    # RoMa links between cameras every this many (strided) timesteps
+    # RoMa links between cameras every this many (strided) timesteps (full path)
     every: int = 10
     focal: float = 0.7
 
@@ -965,6 +999,11 @@ class Reconstruct:
         from r4r.reconstruction import shard_path, shards, write_shard
 
         root = dataset_root(self.dataset)
+        if self.plan:
+            from r4r.plan import dataset_plan, describe
+
+            print(describe([dataset_plan(root, self.episodes or None)]))
+            return
         selection = list(self.episodes) or list(range(episode_count(root)))
         worker, workers = (int(v) for v in self.shard.split("/"))
         if not 0 <= worker < workers:
@@ -980,25 +1019,74 @@ class Reconstruct:
             start = time.perf_counter()
             tables, summary = [], []
             for number in selection[k * size : (k + 1) * size]:
+                began = time.perf_counter()
                 try:
                     table, record = self._episode(number)
                 except Exception as error:  # one bad episode must not stop the others
-                    record = {"episode": number, "error": f"{type(error).__name__}: {error}"}
+                    record: dict[str, object] = {
+                        "episode": number,
+                        "error": f"{type(error).__name__}: {error}",
+                    }
                     print(f"episode {number}: failed: {record['error']}")
                 else:
                     tables.append(table)
+                record["seconds"] = round(time.perf_counter() - began, 3)
                 summary.append(record)
             write_shard(path, tables, summary)
-            solved = sum(bool(r.get("solved")) for r in summary)
-            failed = sum("error" in r for r in summary)
+            routes = Counter(str(r.get("route", "failed")) for r in summary)
+            flagged = sum(bool(r.get("flagged")) for r in summary)
             print(
-                f"shard {k}: {len(summary)} episodes ({solved} solved, {failed} failed) -> "
+                f"shard {k}: {len(summary)} episodes ({dict(routes)}, {flagged} flagged) -> "
                 f"{path} ({time.perf_counter() - start:.1f} s)"
             )
 
     def _episode(self, number: int) -> tuple[pa.Table, dict[str, object]]:
-        """One episode's pose table and summary: from the priors when they hold everything
-        (no video read), else solved."""
+        """One episode's pose table and summary, by its route (class doc)."""
+
+        from r4r.data.lerobot import simulated
+        from r4r.plan import episode_unknowns
+        from r4r.rago.light import LightConfig
+        from r4r.reconstruction import held_poses, keyframe_episode, pose_table
+
+        rig = _prepare_rig(self.dataset, (number,), self.stride, self.focal, (), "cpu")
+        episode = rig.episodes[0]
+        unknowns = episode_unknowns(
+            rig.loaded[0].priors,
+            rig.names,
+            {s.name for s in rig.streams if s.moving},
+            set(episode.poses),
+            set(episode.intrinsics),
+        )
+        summary: dict[str, object] = {"episode": number, "route": unknowns.route}
+        if self.solve or unknowns.route == "full":
+            return self._solved(number, summary | {"missing": list(unknowns.missing)})
+        check = self.check == "on" or (self.check == "auto" and simulated(rig.root) is False)
+        checked = unknowns.recorded if check else ()
+        if unknowns.free or checked:
+            poses, found = keyframe_episode(
+                rig.root,
+                number,
+                rig.robot,
+                episode,
+                rig.names,
+                rig.intrinsics,
+                rig.lens,
+                self.stride,
+                unknowns.free,
+                checked,
+                LightConfig(),
+            )
+            summary |= found
+            if found.get("flagged"):
+                summary["route"] = "light"
+        else:
+            poses = held_poses(rig.robot, episode, rig.names)
+        return pose_table(number, self.stride, rig.names, poses, rig.intrinsics), summary
+
+    def _solved(
+        self, number: int, summary: dict[str, object]
+    ) -> tuple[pa.Table, dict[str, object]]:
+        """The full path: the whole rig on this episode (free values within their ranges)."""
 
         import time
         from dataclasses import replace
@@ -1006,21 +1094,11 @@ class Reconstruct:
         import torch
 
         from r4r.rago.stages import RigConfig, calibrate_rig
-        from r4r.reconstruction import held_poses, pose_table
-
-        rig = _prepare_rig(self.dataset, (number,), self.stride, self.focal, (), "cpu")
-        kinematic = kinematic_freedom(rig.loaded[0].priors, rig.robot, self.stride)
-        held = None
-        if not self.solve:
-            held = held_poses(
-                rig.robot, rig.episodes[0], rig.names, rig.known_focal, rig.known_mount, kinematic
-            )
-        if held is not None:
-            table = pose_table(number, self.stride, rig.names, held, rig.intrinsics)
-            return table, {"episode": number, "solved": False}
+        from r4r.reconstruction import pose_table
 
         start = time.perf_counter()
         rig = _prepare_rig(self.dataset, (number,), self.stride, self.focal)
+        kinematic = kinematic_freedom(rig.loaded[0].priors, rig.robot, self.stride)
         unknown = [
             n
             for n, s, k in zip(rig.names, rig.streams, rig.known_mount, strict=True)
@@ -1050,13 +1128,56 @@ class Reconstruct:
             f"episode {number}: median {fit.median_error:.2f} px, inliers "
             f"{fit.inlier_fraction:.0%} ({time.perf_counter() - start:.0f} s)"
         )
-        summary: dict[str, object] = {
-            "episode": number,
-            "solved": True,
+        return table, summary | {
+            "route": "full",
             "median_px": round(fit.median_error, 4),
             "inliers": round(fit.inlier_fraction, 4),
         }
-        return table, summary
+
+
+@dataclass(frozen=True, slots=True)
+class Stations:
+    """Setups (stations) of a dataset from two thumbnails per episode of a camera that is not on
+    the robot (`r4r.data.setups`, CPU): runs of episodes with the camera in one place. Prints
+    the runs; `--write` sets each episode's `station` in the episodes table (a run takes the
+    label most of its labelled episodes carry, else `auto-<first episode>`)."""
+
+    dataset: tyro.conf.Positional[str]
+    camera: tyro.conf.Positional[str]
+    # First and last episode (inclusive; default: every episode)
+    first: int = 0
+    last: int | None = None
+    write: bool = False
+
+    def run(self) -> None:
+        import time
+
+        from r4r.data.lerobot import episode_count
+        from r4r.data.priors import episode_table_path
+        from r4r.data.setups import SetupConfig, labelled, setups, thumbnails, write_stations
+
+        root = dataset_root(self.dataset)
+        last = episode_count(root) - 1 if self.last is None else self.last
+        start = time.perf_counter()
+        found = thumbnails(root, range(self.first, last + 1), self.camera)
+        runs = setups(found, SetupConfig())
+        took = time.perf_counter() - start
+        print(f"{len(runs)} runs in {last + 1 - self.first} episodes ({took:.0f} s)")
+        path = episode_table_path(root)
+        known = {}
+        if path.exists():
+            import pyarrow.parquet as pq
+
+            table = pq.read_table(path, columns=["episode", "station"]).to_pylist()
+            known = {int(r["episode"]): str(r["station"]) for r in table if r["station"]}
+        stations, relabelled = labelled(runs, known)
+        for first, end in runs:
+            print(f"{first}-{end}: {stations[first]} ({end - first + 1} episodes)")
+        if relabelled:
+            print(f"labelled episodes another run claims: {relabelled}")
+        if self.write:
+            write_stations(path, stations, relabelled)
+            print(f"wrote {path}")
 
 
 @functools.cache
@@ -1079,6 +1200,7 @@ type Command = (
     | Annotated[Preview, tyro.conf.subcommand("preview")]
     | Annotated[Focal, tyro.conf.subcommand("focal")]
     | Annotated[Reconstruct, tyro.conf.subcommand("reconstruct")]
+    | Annotated[Stations, tyro.conf.subcommand("stations")]
 )
 
 

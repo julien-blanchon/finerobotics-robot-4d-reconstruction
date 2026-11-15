@@ -142,9 +142,10 @@ class Corrections[T: IntVar](nn.Module):
         self.free_elements = [f is not None for f in freedoms]
 
     def values(self) -> Tensor[[int, *VxVyVzWxWyWz]]:
-        """δ per row (zero where not free, or held)."""
+        """δ per row; where not free or held: its start (zero, or a frame-scope body's
+        recorded motion, which a held body then follows)."""
 
-        return torch.where(self.free_dof, self.delta, 0.0)
+        return torch.where(self.free_dof, self.delta, se3.se3_log(self.start))
 
     def prior(self, element_from_reference: Tensor[[int, *Mat4x4]]) -> Scalar:
         """Gaussian cost of each row's deviation: `Σ ‖δ‖²` over `prior_residuals`."""

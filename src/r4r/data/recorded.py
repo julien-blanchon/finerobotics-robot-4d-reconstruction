@@ -34,10 +34,16 @@ if TYPE_CHECKING:
 def world_from_camera(values: Tensor[[int, int]], source: PoseColumn) -> Tensor[[int, *Mat4x4]]:
     """Per-frame `world_from_camera` (OpenCV axes) from a recorded column of flattened 3×4 or
     4×4 matrices, or of x, y, z, qw, qx, qy, qz rows (`world_to_camera` or `world_from_camera`
-    layout); NaN where a row is not a finite rigid transform (some records end with zero or
-    infinite rows)."""
+    layout; `base_from_camera` reads as `world_from_camera`), from column `source.start` on (12
+    values when it is not 0, or in `rotation_translation` order); NaN where a row is not a
+    finite rigid transform (some records end with zero or infinite rows)."""
 
     values = values.double()
+    if source.start or source.order == "rotation_translation":
+        values = values[:, source.start : source.start + 12]
+    if source.order == "rotation_translation":
+        rotation = values[:, :9].reshape(len(values), 3, 3)
+        values = torch.cat((rotation, values[:, 9:, None]), 2).reshape(len(values), 12)
     if values.shape[1] == 7:
         q = values[:, 3:]
         rotation = se3.quaternion_to_matrix(q / q.norm(dim=1, keepdim=True))
@@ -65,6 +71,57 @@ def _robot(description: Path):  # noqa: ANN202 (r4r.rago is imported lazily)
     from r4r.rago.robot import load_robot
 
     return load_robot(description).to("cpu", torch.float64)
+
+
+def median_pose(poses: Tensor[[int, *Mat4x4]]) -> Tensor[[*Mat4x4]]:
+    """A robust centre of jittering poses: the medoid rotation (least summed angle to the
+    others, `argmin_i Σ_j ∠(R_i, R_j)`) and the coordinate-wise median translation."""
+
+    rotation = poses[:, :3, :3]
+    cosine = (
+        (rotation[:, None].transpose(-1, -2) @ rotation[None]).diagonal(0, -2, -1).sum(-1) - 1
+    ) / 2
+    angle = torch.arccos(cosine.clamp(-1.0, 1.0))
+    best = int(angle.sum(1).argmin())
+    return se3.from_rotation_translation(rotation[best], poses[:, :3, 3].median(0).values)
+
+
+def base_mounts(
+    poses: dict[str, Tensor[[int, *Mat4x4]]],
+    links: dict[str, str | None],
+    offset: dict[str, tuple[float, float, float]],
+    state: Tensor[[int, int]],
+    joints: tuple[JointMap, ...],
+    description: Path,
+    frames: int = 120,
+) -> dict[str, Tensor[[*Mat4x4]]]:
+    """Each camera's pose for the episode from per-frame `base_from_camera` records (the base
+    frame shifted by the camera's `offset`, m): on its link `l` for a moving camera, robust
+    median over frames of `FK_l(q_t)⁻¹ · (offset + P_t)`; in the base frame for a static one.
+    `frames` valid frames, evenly spread, are used; the recorded poses are taken synchronous
+    with the joint-state rows of the same frames (no `state_shift`)."""
+
+    from r4r.rago.kinematics import forward_kinematics
+    from r4r.rago.robot import qpos_from_state
+
+    robot = _robot(description)
+    mapping = cast("tuple[checked_episode.JointMap, ...]", joints)
+    placed = {}
+    for name, pose in poses.items():
+        valid = pose.flatten(1).isfinite().all(1).nonzero()[:, 0]
+        if not len(valid):
+            raise ValueError(f"recorded camera {name}: no valid frame in this episode")
+        sample = valid[torch.linspace(0, len(valid) - 1, min(frames, len(valid))).long()]
+        shifted = pose[sample].clone()
+        shifted[:, :3, 3] += torch.tensor(offset[name], dtype=shifted.dtype)
+        link = links[name]
+        if link is not None:
+            world = forward_kinematics(
+                robot, qpos_from_state(robot, state[sample].double(), mapping)
+            )
+            shifted = se3.inverse(world[:, robot.body(link)]) @ shifted
+        placed[name] = median_pose(shifted)
+    return placed
 
 
 def base_frame_poses(

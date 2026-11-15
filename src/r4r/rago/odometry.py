@@ -20,18 +20,20 @@ the body's (φ: steering angle), and the body turns ω_u − φ̇.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 
+from r4r.data.priors import OdometryGain
 from r4r.geometry import se3
 
 if TYPE_CHECKING:
     from shape_extensions import IntVar
     from torch import Tensor
 
-    from r4r.types import WXYZ, XY, XYZ, Mat4x4, XYTheta
+    from r4r.types import WXYZ, XY, XYZ, Mat4x4, VxVyVzWxWyWz, XYTheta
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,3 +131,72 @@ def caster_steps[T: IntVar](
     dy = mid.sin() * forward + mid.cos() * sideways
     dtheta = unit_turn - torch.diff(phi, prepend=phi[:1])
     return torch.stack((dx, dy, dtheta), -1)
+
+
+def corrected[T: IntVar](
+    motion: Tensor[[T, *Mat4x4]], gain: OdometryGain, step_time: float
+) -> Tensor[[T, *Mat4x4]]:
+    """`motion` (relative to its first timestep) with each step corrected by `gain` (class doc);
+    `step_time`: seconds between timesteps."""
+
+    parameters = torch.tensor(
+        [math.log(gain.scale), math.log(gain.heading_gain), gain.yaw_rate],
+        dtype=motion.dtype,
+        device=motion.device,
+    )
+    return _corrected(_twists(motion), parameters, step_time)
+
+
+def fit_gain(
+    motions: list[Tensor[[int, *Mat4x4]]],
+    solved: list[Tensor[[int, *Mat4x4]]],
+    step_time: float,
+    lever: float = 1.0,
+) -> OdometryGain:
+    """The `OdometryGain` that brings recorded `motions` closest to `solved` base poses (e.g. the
+    bundle's free base, each relative to its episode's first timestep):
+
+        min_θ Σ_e Σ_t ‖(Δp_et, lever · Δφ_et)‖²,   (Δp, Δφ) = log(S_et⁻¹ M̂_et(θ))
+
+    over `θ = (log s, log g, b)`; `lever` (m) weighs rotation against translation."""
+
+    twists = [_twists(m) for m in motions]
+    parameters = torch.zeros(3, dtype=motions[0].dtype, requires_grad=True)
+    optimizer = torch.optim.LBFGS([parameters], max_iter=100, line_search_fn="strong_wolfe")
+
+    def objective() -> Tensor:
+        optimizer.zero_grad()
+        cost = parameters.new_zeros(())
+        for twist, target in zip(twists, solved, strict=True):
+            error = se3.se3_log(se3.inverse(target) @ _corrected(twist, parameters, step_time))
+            cost = cost + (error[:, :3] ** 2).sum() + lever**2 * (error[:, 3:] ** 2).sum()
+        cost.backward()
+        return cost
+
+    optimizer.step(objective)
+    log_scale, log_gain, bias = parameters.detach().tolist()
+    return OdometryGain(math.exp(log_scale), math.exp(log_gain), bias)
+
+
+def _twists[T: IntVar](motion: Tensor[[T, *Mat4x4]]) -> Tensor[[T, *VxVyVzWxWyWz]]:
+    """Each step's twist `log(M_{t−1}⁻¹ M_t)` (row 0: zero)."""
+
+    step = se3.se3_log(se3.inverse(motion[:-1]) @ motion[1:])
+    return torch.cat((step.new_zeros(1, 6), step))
+
+
+def _corrected[T: IntVar](
+    twist: Tensor[[T, *VxVyVzWxWyWz]], parameters: Tensor[[3]], step_time: float
+) -> Tensor[[T, *Mat4x4]]:
+    """Steps `twist` corrected by `(log s, log g, b)` and chained from the identity."""
+
+    scale = torch.cat((parameters[:1].exp().expand(3), parameters[1:2].exp().expand(3)))
+    bias = torch.zeros_like(twist[0])
+    bias[5] = 1.0
+    step = twist * scale + bias * parameters[2] * step_time
+    step = torch.cat((torch.zeros_like(step[:1]), step[1:]))
+    increments = se3.se3_exp(step)
+    poses = [increments[0]]
+    for t in range(1, len(increments)):
+        poses.append(poses[-1] @ increments[t])
+    return torch.stack(poses)

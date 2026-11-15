@@ -255,6 +255,33 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 
 ## Compute
 
+- **Calibrate setups, not episodes.** Once `r4r rig --write` (or a record) gives every value of
+  dataset or station scope, `r4r reconstruct` holds them: most ready datasets then need no video
+  at all (13-40 ms per episode). Check `r4r reconstruct <dataset> --plan` before launching: it
+  names what is still uncalibrated (a focal, a static pose without ranges, an odometry without
+  its correction, a station never rigged).
+- **Recorded per-frame camera poses are worth a pose column, even jittery ones:** the robust
+  median per episode (`base_from_camera` layout) put ARX Lift-2's hands within 0-0.5 cm median
+  of every recorded frame and separated AgiBot G1's two calibration families (hands 6-7 cm
+  apart; within-episode jitter p95 0.4-1.2 cm, 1-2.5°).
+- **Odometry needs a dataset-level gain at most:** wheel scale, heading gain and yaw-rate bias
+  (`base_odometry.correction`) recover a synthetic miscalibration exactly. On HSR the gain
+  fitted to the full solve's base is near identity (0.966, 0.988) and the full-solve base
+  departs 1-4 cm median (max 8 cm) from the caster record in ways no gain explains (left out
+  episode by episode, the gain does not reduce it). RB-Y1's `publisher.observation.velocity`
+  is not the base's velocity (60 cm off the exact pose record even after the gain).
+- **Sparse matching between a wrist and a static camera on the CPU is weak:** SIFT at 320×180
+  (DROID) gives ~15 RANSAC-consistent matches per pair, mostly wrong. Two static cameras keep
+  one fundamental matrix over the whole episode: pooling their matches over 12 moments into
+  one RANSAC makes the epipolar check usable (DROID: 1-9 px where the record fits, 50 px on
+  episode 1000). The robot itself (KLT tracks on it in the static cameras, short bursts) pins a
+  re-placed base better than cross-view matches.
+- **Setup detection from first frames over-reports unless masked:** objects moved between
+  episodes and lighting changes look like re-placements. Compare only pixels still within each
+  episode (first vs a later frame, standardised), per block, and keep the upper quartile of
+  block correlations; flag single odd episodes separately. It found two errors in hand-made
+  station tables (flexiv 19015-19019 and ur5e 27616-27619 are another view).
+
 - A solve with few unknowns and many observations: Levenberg–Marquardt, not Adam. Keep Adam
   where many independent starts are solved at once (mount search).
 - Re-attaching tracks to links changes the objective: converge with the assignment fixed,

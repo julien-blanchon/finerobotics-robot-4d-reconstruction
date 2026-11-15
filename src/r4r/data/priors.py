@@ -64,7 +64,12 @@ top-level `world_anchor` names
 a camera with a `link` and such a column: per episode, hand-eye between that link's forward
 kinematics and the anchor's recorded motion gives the base in the world, and every such camera
 is placed in the base frame (on its link, moving) at the episode's middle frame
-(`r4r.data.recorded`; molmobot records cameras in its houses, not the base). An episodes
+(`r4r.data.recorded`; molmobot records cameras in its houses, not the base). With
+`"layout": "base_from_camera"` the per-frame records are already in the robot's base frame, up
+to a constant `offset` (x, y, z of the record's origin in the description's base frame): the
+episode's pose is the robust median over its frames, on the camera's link when it moves
+(AgiBot's jittering hand extrinsics); `start` and `order` (`matrix` or `rotation_translation`)
+pick a camera's 12 values out of a feature shared by several cameras. An episodes
 table pose takes precedence. `ignore` leaves a camera out (one that rides on no robot body,
 e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
 absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...],
@@ -125,8 +130,16 @@ class PoseColumn:
     # `record`: the episode's first row, a JSON string or x, y, z, qw, qx, qy, qz, already in
     # the base frame (on the link, moving); `world_to_camera` / `world_from_camera`: a
     # flattened 3×4 or 4×4 matrix per frame in a world frame, placed in the base frame with
-    # the priors' `world_anchor`
-    layout: Literal["record", "world_to_camera", "world_from_camera"] = "record"
+    # the priors' `world_anchor`; `base_from_camera`: such a matrix per frame in the robot's
+    # base frame, up to a constant `offset` (the record's frame origin in the description's base
+    # frame, m): the episode's pose is the robust median over its frames (on the link, moving)
+    layout: Literal["record", "world_to_camera", "world_from_camera", "base_from_camera"] = "record"
+    # Per frame, the camera's values start at column `start` of the feature (several cameras in
+    # one feature); `order`: `matrix` (3×4 or 4×4 row-major) or `rotation_translation` (R
+    # row-major, then t: 12 values)
+    start: int = 0
+    order: Literal["matrix", "rotation_translation"] = "matrix"
+    offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +195,32 @@ class BodyPrior:
 
 
 @dataclass(frozen=True, slots=True)
+class OdometryGain:
+    """A dataset's correction of its recorded base motion, fitted once
+    (`r4r.rago.odometry.fit_gain`) and applied to every episode: each step's twist
+    `ξ = log(M_{t−1}⁻¹ M_t) = (v, ω)` becomes
+
+        ξ' = (s · v, g · ω + (0, 0, b · Δt))
+
+    `s` scales the distance driven (wheel radius), `g` the turns (track width, heading gain),
+    `b` is a constant yaw rate (rad/s, gyro or encoder bias); Δt is the step's duration (s).
+    """
+
+    scale: float = 1.0
+    heading_gain: float = 1.0
+    yaw_rate: float = 0.0
+
+    def then(self, other: OdometryGain) -> OdometryGain:
+        """This correction followed by `other` (on the motion this one corrected)."""
+
+        return OdometryGain(
+            self.scale * other.scale,
+            self.heading_gain * other.heading_gain,
+            other.heading_gain * self.yaw_rate + other.yaw_rate,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class BaseOdometry:
     """Where a mobile base's motion is recorded (see `r4r.rago.odometry`): `feature` columns
     `columns` holding planar poses (x, y, θ or x, y, qz, qw), full poses (x, y, z, qw, qx, qy,
@@ -189,7 +228,8 @@ class BaseOdometry:
     right[, steering]) of a caster or differential drive with its geometry, or a swerve drive's
     steering angles (`columns`) and wheel ground speeds (m/s, `speed_columns` of
     `speed_feature`, default `feature`) with each wheel's contact point (x, y) in the base
-    frame (`wheels`)."""
+    frame (`wheels`). `correction` (`OdometryGain`: `scale`, `heading_gain`, `yaw_rate`) is
+    applied to every episode's motion when given."""
 
     kind: Literal["pose", "velocity", "caster", "swerve"]
     feature: str | tuple[str, ...]  # several: their columns concatenated
@@ -201,6 +241,8 @@ class BaseOdometry:
     speed_feature: str | None = None
     speed_columns: tuple[int, ...] = ()
     wheels: tuple[tuple[float, float], ...] = ()
+    # Fitted once on the calibration sample (`r4r rig --write`): the motion is then held
+    correction: OdometryGain | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +350,7 @@ def load_priors(root: Path) -> DatasetPriors:
             odometry.get("speed_feature"),
             tuple(odometry.get("speed_columns", ())),
             tuple(tuple(w) for w in odometry.get("wheels", ())),
+            _gain(odometry.get("correction"), f"{path}: base_odometry.correction"),
         )
     return DatasetPriors(
         base=raw.get("base", "fixed"),
@@ -375,6 +418,17 @@ def _kinematics(raw: JsonObject | None, where: str) -> KinematicsPrior | None:
     )
 
 
+def _gain(raw: JsonObject | None, where: str) -> OdometryGain | None:
+    if raw is None:
+        return None
+    _checked(raw, _keys(OdometryGain) | {"fitted"}, where)
+    return OdometryGain(
+        float(raw.get("scale", 1.0)),
+        float(raw.get("heading_gain", 1.0)),
+        float(raw.get("yaw_rate", 0.0)),
+    )
+
+
 def _robot_points(raw: Mapping[str, JsonObject], where: str) -> dict[str, RobotPoint]:
     for name, point in raw.items():
         _checked(point, _keys(RobotPoint), f"{where}: robot_points.{name}")
@@ -405,6 +459,9 @@ def _pose_column(raw: JsonObject | None, where: str) -> PoseColumn | None:
         tuple(raw.get("path", ())),
         raw.get("axes", "opencv"),
         raw.get("layout", "record"),
+        int(raw.get("start", 0)),
+        raw.get("order", "matrix"),
+        tuple(raw.get("offset", (0.0, 0.0, 0.0))),
     )
 
 
@@ -574,6 +631,16 @@ def write_camera(
     `stations.<station>` when a station is given."""
 
     return _write(root, "cameras", camera, values, station)
+
+
+def write_odometry_correction(root: Path, values: Mapping[str, object]) -> Path:
+    """Set the priors' `base_odometry.correction` (a fitted `OdometryGain` and its provenance)."""
+
+    path = priors_path(root)
+    raw = json.loads(path.read_text())
+    raw["base_odometry"]["correction"] = dict(values)
+    path.write_text(json.dumps(raw, indent=2) + "\n")
+    return path
 
 
 def write_body(

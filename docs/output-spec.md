@@ -62,6 +62,10 @@ whose robot itself is not calibrated (an arm base, the odometry) is listed as fa
 reason rather than solved. The side file says, per episode and camera, how the camera was
 obtained.
 
+**Cameras the priors ignore** (worn by a person, or a mount no method pins) are written too, NaN
+in every frame of every episode, and their video feature says `camera.calibrated: false`: every
+camera of the dataset has its columns, so users see it exists and is not calibrated.
+
 ### Feature info
 
 - **Video feature** `observation.images.<cam>`: `camera.lens` (`pinhole` | `fisheye`),

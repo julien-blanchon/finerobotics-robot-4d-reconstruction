@@ -211,7 +211,7 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
         )
         for i, e in enumerate(episodes)
     ]
-    starts, intrinsics = _static_starts(
+    starts, intrinsics = static_starts(
         robot, episodes, merged, names, mounts, intrinsics, known_focal, known_mount
     )
     starts = _recorded_mounts(robot, episodes, names, starts)
@@ -527,7 +527,7 @@ def _multi_camera_tracks[C: IntVar](
     )
 
 
-def _static_starts[C: IntVar](
+def static_starts[C: IntVar](
     robot: Robot[int, int, int],
     episodes: list[RigEpisode[int, int]],
     merged: list[Tracks[int, int, C]],

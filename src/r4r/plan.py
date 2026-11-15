@@ -169,6 +169,10 @@ class Cost:
     full_cpu: float = 0.035
     # One `r4r rig` on a sample of a setup (GPU seconds: 10-18 min measured)
     calibration_gpu: float = 900.0
+    # A station whose only new value is one static camera, fitted from a neighbour station
+    # (`rago.station`): CPU seconds (bursts, PnP, LM), GPU seconds (RoMa links)
+    station_cpu: float = 60.0
+    station_gpu: float = 20.0
 
 
 COST = Cost()
@@ -184,6 +188,7 @@ class DatasetPlan:
     routes: Counter[str] = field(default_factory=Counter)
     checked: int = 0  # fast episodes that get the fit check (real data)
     setups: int = 0  # setups (stations) to calibrate first: one `r4r rig` each (GPU)
+    neighbours: int = 0  # setups whose one static camera is fitted from a neighbour station
     placements: int = 0  # setups of a lone camera to place (picks, no GPU)
     odd: int = 0  # episodes of one-off setups (fewer than MIN_SETUP episodes), not calibrated
     reasons: Counter[str] = field(default_factory=Counter)
@@ -213,7 +218,7 @@ def dataset_plan(
     sizes: Counter[str | None] = Counter()
     for (station, _, _), count in groups.items():
         sizes[station] += count
-    stations, lone = set(), set()
+    stations, lone, neighbours = set(), set(), set()
     checked = odd = 0
     cpu = gpu = 0.0
     for (station, poses, intrinsics), count in groups.items():
@@ -222,6 +227,8 @@ def dataset_plan(
             odd += count
         elif unknowns.setup and all(r.endswith(LONE) for r in unknowns.setup):
             lone.add(station)
+        elif unknowns.setup and priors.stations and _from_neighbour(unknowns.setup, moving):
+            neighbours.add(station)
         elif unknowns.setup:
             stations.add(station)
         if unknowns.setup:
@@ -242,7 +249,8 @@ def dataset_plan(
             cpu += count * cost.light_solve
         elif check:
             cpu += count * cost.flagged * cost.light_solve
-    gpu += len(stations) * cost.calibration_gpu
+    gpu += len(stations) * cost.calibration_gpu + len(neighbours) * cost.station_gpu
+    cpu += len(neighbours) * cost.station_cpu
     hours = tables.info.get("total_frames", 0) / tables.fps / 3600 * len(selection)
     return DatasetPlan(
         name=f"{root.parent.parent.name}/{root.name}",
@@ -251,6 +259,7 @@ def dataset_plan(
         routes=routes,
         checked=checked,
         setups=len(stations),
+        neighbours=len(neighbours),
         placements=len(lone),
         odd=odd,
         reasons=reasons,
@@ -297,6 +306,19 @@ def _record_groups(
     return +groups
 
 
+def _from_neighbour(reasons: Sequence[str], moving: Collection[str]) -> bool:
+    """Whether a setup's missing values are one static camera's pose and focal, plus focals a
+    neighbour station gives (`rago.station` fits the rest)."""
+
+    static = {r.split(":")[0] for r in reasons if "placement" not in r} - set(moving)
+    allowed = all(
+        r.endswith(("focal unknown", "pose not calibrated", "pose only a start (no ranges)"))
+        or r.endswith("placement not calibrated")
+        for r in reasons
+    )
+    return allowed and len(static) == 1
+
+
 def _not_null(table: object, columns: tuple[str, ...]) -> list[bool]:
     """Per row: whether every one of `columns` is present and not null."""
 
@@ -316,19 +338,19 @@ def describe(plans: Sequence[DatasetPlan]) -> str:
     """The plans as a Markdown table, with totals and each dataset's main reasons."""
 
     lines = [
-        "| dataset | hours | episodes | fast | light | full | checked | rig setups | place setups "
-        "| odd | CPU h | GPU h |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| dataset | hours | episodes | fast | light | full | checked | rig setups | "
+        "neighbour setups | place setups | odd | CPU h | GPU h |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     lines.extend(
         f"| {p.name} | {p.hours:.0f} | {p.episodes} | {p.routes['fast']} | "
         f"{p.routes['light']} | {p.routes['full']} | {p.checked} | {p.setups} | "
-        f"{p.placements} | {p.odd} | {p.cpu_hours:.1f} | {p.gpu_hours:.2f} |"
+        f"{p.neighbours} | {p.placements} | {p.odd} | {p.cpu_hours:.1f} | {p.gpu_hours:.2f} |"
         for p in plans
     )
     cpu, gpu = sum(p.cpu_hours for p in plans), sum(p.gpu_hours for p in plans)
     hours, count = sum(p.hours for p in plans), sum(p.episodes for p in plans)
-    lines.append(f"| total | {hours:.0f} | {count} | | | | | | | | {cpu:.1f} | {gpu:.2f} |")
+    lines.append(f"| total | {hours:.0f} | {count} | | | | | | | | | {cpu:.1f} | {gpu:.2f} |")
     for p in plans:
         for reason, count in p.reasons.most_common(3):
             lines.append(f"- {p.name}: {count} episodes: {reason}")

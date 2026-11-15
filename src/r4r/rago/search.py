@@ -60,7 +60,8 @@ class SearchResult[C: IntVar]:
     body: int
     body_from_camera: Tensor[[C, *Mat4x4]]
     intrinsics: Tensor[[C, *Mat3x3]]
-    # Scores of every start (body-major, then orientation, then focal factor): lower is better
+    # Scores of every start (body-major, then orientation, then focal factor): lower is better,
+    # inf for a start that diverged (non-finite parameters)
     scores: Tensor[[int]]
 
 
@@ -153,11 +154,18 @@ def search_mount[T: IntVar, NQ: IntVar, C: IntVar](
     # One pixel unit for all starts: per-start units would favour long focal guesses
     unit = tracks.intrinsics[c, 0, 0].to(qpos).expand(copies)
     result = bundle_adjust(virtual, qpos, batch, copy_names, initial, config.bundle, unit)
-    best = int(result.camera_score.argmin())
+    # A start whose parameters diverged scores as the outlier cap (no valid observation), like
+    # a poor fit: never pick it
+    finite = torch.isfinite(result.body_from_camera).all(-1).all(-1)
+    finite &= torch.isfinite(result.intrinsics).all(-1).all(-1)
+    if result.lens is not None:
+        finite &= torch.isfinite(result.lens.distortion).all(-1)
+    if not bool(finite.any()):
+        raise ValueError(f"search_mount({camera!r}): every start diverged (non-finite parameters)")
+    scores = torch.where(finite, result.camera_score, torch.inf)
+    best = int(scores.argmin())
     body_from_camera = robot.body_from_camera[[robot.camera(n) for n in names]].to(qpos).clone()
     body_from_camera[c] = result.body_from_camera[best]
     best_intrinsics = tracks.intrinsics.to(qpos).clone()
     best_intrinsics[c] = result.intrinsics[best]
-    return SearchResult(
-        bodies[best // per_body], body_from_camera, best_intrinsics, result.camera_score
-    )
+    return SearchResult(bodies[best // per_body], body_from_camera, best_intrinsics, scores)

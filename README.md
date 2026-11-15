@@ -102,8 +102,9 @@ distortion; end-effector pose, gripper, aperture, fingertips; base pose; aligned
 all in the episode frame). The schema metadata `r4r.episodes` (JSON) says per episode its
 route, fit check, each camera's source and errors, or the error that stopped it; `r4r.layout`
 holds the feature info. `r4r merge` writes them as a LeRobot v3 dataset with `meta/r4r.json`
-(quality and provenance). Measured: 12 ms per SynGrasp episode (fast route, consecutive data
-files), 0.24 s per sim-panda episode spread over 460k episodes; merge 9 s per 1,000 episodes.
+(quality and provenance). Measured on a login node: fast route 13 ms per SynGrasp episode
+(1,000 episodes in 13 s), 0.32 s per sim-panda episode sampled across 460k (one data file
+each); light route 41-57 s per episode under load; merge ~12 s per 1,000 SynGrasp episodes.
 
 Each episode takes the cheapest route its unknowns allow (`r4r.plan`): values of dataset or
 station scope are held once `r4r rig --write` wrote them (or recorded); only episode-scope ones

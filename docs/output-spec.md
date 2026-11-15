@@ -57,8 +57,10 @@ LeRobot v3 dataset (`r4r merge`). Code: `src/r4r/output.py` (columns), `src/r4r/
 **Cameras not calibrated for an episode** (for example a third view whose session was never
 placed) are still written: their pose, intrinsics and distortion are NaN for every frame of that
 episode, while the other cameras, end effectors and state are written as usual (`r4r reconstruct
---uncalibrated nan`; the default `solve` runs the full solve instead). The side file says, per
-episode and camera, how the camera was obtained.
+--uncalibrated nan`; the default `solve` runs the full solve instead). With `nan`, an episode
+whose robot itself is not calibrated (an arm base, the odometry) is listed as failed with the
+reason rather than solved. The side file says, per episode and camera, how the camera was
+obtained.
 
 ### Feature info
 
@@ -203,3 +205,4 @@ r4r merge <dataset> out/ dest/ --full     # merged copy: dest/<dataset>
 | molmobot rby1-pick-10 (22 episodes, mobile) | base vs `robot_base_pose` | 6·10⁻⁶ mm, 1·10⁻⁵ ° |
 | | cameras vs `extrinsic_cv` (camera-from-world) through the recorded base | 0.05–0.16 mm, ≤ 0.014° median |
 | | left TCP vs `tcp_pose` (base frame, w-first) | a constant 29.8 mm along the approach axis (the record's TCP sits at the pad centre, ours at the fingertips), axes turned 180° |
+| InternData-M1 franka-robotiq (5 episodes, light route) | EE vs `publisher.state.eef_position` (= FK(`panda_link8`)) | ours − 0.1493 m z: 1·10⁻⁵ mm; orientation a constant 45° turn about the flange axis (spread 5·10⁻⁶ °) |

@@ -1185,7 +1185,8 @@ class Reconstruct:
     # Count each route and estimate CPU / GPU hours, without reconstructing
     plan: bool = False
     # Episodes whose setup leaves a camera uncalibrated: `solve` the whole rig (full path), or
-    # write that camera as NaN (`nan`) and the rest by their own route
+    # write that camera as NaN (`nan`) and the rest by their own route (an episode whose robot is
+    # not calibrated, a body or the odometry, then fails with the reason: no full solve)
     uncalibrated: Literal["solve", "nan"] = "solve"
     # Every `stride`-th frame (1 for `r4r merge`: every video frame)
     stride: int = 1
@@ -1262,10 +1263,11 @@ class Reconstruct:
         )
         summary: dict[str, object] = {"episode": number, "route": unknowns.route}
         lacking = uncalibrated_cameras(unknowns, rig.names)
-        if self.solve or (
-            unknowns.route == "full" and (self.uncalibrated == "solve" or lacking is None)
-        ):
+        if self.solve or (unknowns.route == "full" and self.uncalibrated == "solve"):
             return self._solved(number, summary | {"missing": list(unknowns.missing)})
+        if lacking is None:  # `nan`: a body or the odometry is not calibrated, not a camera
+            reasons = "; ".join((*unknowns.setup, *unknowns.missing))
+            raise ValueError(f"not calibrated (no camera alone): {reasons}")
         # Cameras not calibrated for this episode are written as NaN; the others take the
         # route their own unknowns allow
         lacking = lacking or ()

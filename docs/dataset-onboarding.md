@@ -105,13 +105,15 @@ origin) or a named point of the priors or the picks file:
             "pixels": {"tip": [120.5, 88.0], "panda_link4": [101.0, 60.5]}}]}
 ```
 
-- `frame` is the video's own frame index (a multiple of `--stride`); 5 frames × 4–6 visible
-  points per camera and episode are enough for a start (8 at least).
-- Clicks are PnP starts and bundle residuals; each is also followed by KLT (a chain).
-- A camera's `robot_points` in the priors (`["panda_link4", "tip"]`, named in the top-level
-  `robot_points`) seeds chains where its start projects them: a refinement of a close start
-  (by-eye or recorded), not a search.
-- Overlay afterwards, as always.
+- `frame` is the video's own frame index (a multiple of `--stride`); points can also be named
+  once in the priors' top-level `robot_points`.
+- Click where the point is, not where a surface is: a joint origin is on its axis (the centre
+  of the joint housing), a tip between the fingers. The description's gripper must be the real
+  one for gripper points.
+- Enough: 5 frames × 3–4 visible points per camera and episode (PnP needs 6; spread them over
+  the arm and over time, off the arm's plane). Validation against recorded cameras
+  (SynGrasp-1B, 256², 2 px click noise): see `docs/field-notes.md`.
+- Clicks are PnP starts and bundle residuals. Overlay afterwards, as always.
 
 PnP on robot tracks alone can land a camera far off and still fit (DROID: exteriors below the
 table at 0.86 px). Images alone do not pin a per-episode mount (RB-Y1: a wrist 25° off at 0.7 px).

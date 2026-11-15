@@ -13,11 +13,9 @@ with `P_m` the view's pose (`world_from_view`, in the track's body frame), `π_K
 projection, `p_m` the observed pixel, `u` the camera's pixel unit (its initial focal: `r` is
 in normalised image units), `δ` = `cauchy` and `V` the number of views.
 
-Robot keypoints (`keypoints.Keypoints`) come in two kinds. Known points (picks) add residuals
-of the same form, `r_k = (π_K(P_k⁻¹ W_b(q_t) p_k) − u_k) / u_cam`, the point known instead of
-triangulated. Chains (picks and seeds followed by KLT) are tracks rigid with a known body:
-appended to the tracks with that body fixed, their point triangulated like any moving track's.
-Both weigh `keypoint_weight` times their own weight.
+Robot keypoints (`keypoints.Keypoints`, picked robot points) add residuals of the same form,
+`r_k = (π_K(P_k⁻¹ W_b(q_t) p_k) − u_k) / u_cam`, the point known instead of triangulated,
+weighing `keypoint_weight` times their own weight.
 
 A static track lives in the world frame. A moving track (a point on the robot, or on a grasped
 object) is rigid with some link: expressed in that link's frame its point is constant, so the
@@ -196,21 +194,13 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
     track_moving = torch.zeros(obs.count, dtype=torch.bool, device=qpos.device)
     track_moving[obs.track[t.moving]] = True
     candidates = moving_bodies(rig) if config.attach_links else []
-    tracked, seen, chain_body = obs, None, track.new_zeros(0)
-    if keypoints is not None:
-        keypoints = keypoints.to(qpos)
-        known = keypoints.known()
-        seen = _Seen.of(t, known, config) if len(known.time) else None
-        obs, chain_body = _with_chains(t, obs, keypoints.where(keypoints.chain >= 0), config)
 
     def assign() -> Tensor[[int]]:
         with torch.no_grad():
-            found = attach(
-                rig, t, tracked, track_moving, candidates, config.cauchy, config.outlier_cost
-            )
-            return torch.cat((found, chain_body))
+            return attach(rig, t, obs, track_moving, candidates, config.cauchy, config.outlier_cost)
 
     track_body = assign()
+    seen = None if keypoints is None else _Seen.of(t, keypoints.to(qpos), config)
     if config.optimizer == "lm" and supports(rig):
         history = _levenberg_marquardt(rig, t, obs, assign, track_body, config, seen)
         return _result(rig, t, obs, names, config, assign, history, seen)
@@ -256,32 +246,6 @@ def _views(tracks: Tracks[int, int, int]) -> Tensor[[int, int]]:
         len(tracks.view_time), device=views.device
     )
     return views
-
-
-def _with_chains(
-    tracks: Tracks[int, int, int],
-    obs: Observations[int],
-    chains: Keypoints[int],
-    config: BundleConfig,
-) -> tuple[Observations[int], Tensor[[int]]]:
-    """`obs` with the keypoint chains appended as tracks (ids after the tracks'), and each
-    chain's body."""
-
-    if not len(chains.time):
-        return obs, obs.track.new_zeros(0)
-    view = _views(tracks)[chains.camera, chains.time]
-    assert bool((view >= 0).all()), "every robot keypoint must be seen in a view"
-    ids, chain = torch.unique(chains.chain, return_inverse=True)
-    body = torch.zeros(len(ids), dtype=torch.long, device=view.device)
-    body[chain] = chains.body
-    extended = Observations(
-        torch.cat((obs.view, view)),
-        torch.cat((obs.pixel, chains.pixel)),
-        torch.cat((obs.weight, chains.weight * config.keypoint_weight)),
-        torch.cat((obs.track, obs.count + chain)),
-        obs.count + len(ids),
-    )
-    return extended, body
 
 
 @dataclass(frozen=True, slots=True)

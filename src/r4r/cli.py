@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from torch import Tensor
 
     from r4r.data.episode import CameraStream, Episode
-    from r4r.data.priors import CameraPrior, DatasetPriors, RobotPoint
+    from r4r.data.priors import CameraPrior, DatasetPriors
     from r4r.rago.calibrate import FitConfig
     from r4r.rago.lens import Lens
     from r4r.rago.rig import KinematicFreedom
@@ -316,7 +316,7 @@ def _prepare_rig(
 
     from r4r.data.lerobot import load_episode
     from r4r.data.priors import read_picks
-    from r4r.rago.keypoints import KeypointConfig, picked
+    from r4r.rago.keypoints import picked
     from r4r.rago.lens import lens_from_priors
     from r4r.rago.robot import CameraMount, body_mounts, load_robot, qpos_from_state
     from r4r.rago.stages import RigEpisode
@@ -348,16 +348,8 @@ def _prepare_rig(
         named, clicks = read_picks(picks)
         points = {**points, **named}
     keypoints = [
-        picked(
-            [p for p in clicks if p.episode == number],
-            points,
-            robot,
-            names,
-            {c.name: c.frames for c in e.cameras},
-            stride,
-            KeypointConfig(),
-        )
-        for number, e in zip(numbers, loaded, strict=True)
+        picked([p for p in clicks if p.episode == number], points, robot, names, stride)
+        for number in numbers
     ]
     episodes = [
         RigEpisode(
@@ -433,7 +425,6 @@ class Rig:
             link_every=self.every,
             groups=self.groups,
             kinematic=kinematic_freedom(loaded[0].priors, robot, self.stride),
-            seeds=seed_points(loaded[0].priors, streams, robot),
         )
         fit = calibrate_rig(
             robot,
@@ -569,29 +560,6 @@ def distortion_values(
         "distortion": [round(v, 6) for v in lens.distortion[camera, :size].tolist()],
         "distortion_range": (prior.distortion_range or 0.0) if known else 0.0,
     }
-
-
-def seed_points(
-    priors: DatasetPriors,
-    streams: tuple[CameraStream[int, int, int], ...],
-    robot: Robot[int, int, int],
-) -> dict[str, tuple[RobotPoint, ...]]:
-    """Per camera with `robot_points` in its priors: those points (named in the priors'
-    `robot_points`, or a body's name for its origin)."""
-
-    from r4r.data.priors import RobotPoint
-
-    seeds = {}
-    for stream in streams:
-        points = []
-        for name in stream.prior.robot_points:
-            point = priors.robot_points.get(name)
-            if point is None and name not in robot.body_names:
-                raise ValueError(f"{stream.name}: robot point {name!r} is neither named nor a body")
-            points.append(point or RobotPoint(name))
-        if points:
-            seeds[stream.name] = tuple(points)
-    return seeds
 
 
 def kinematic_freedom(

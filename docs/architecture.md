@@ -65,17 +65,18 @@ solver refuses a free mount together with a free body above it; `r4r rig` solves
 
 Robot keypoints (`rago/keypoints.py`) place cameras the scene cannot: a static camera with no
 moving camera to triangulate for it, a head camera that never moves relative to the base, a
-wrist that sees the other arm but not its own gripper.
+wrist that sees the other arm but not its own gripper. A keypoint is a pixel clicked on a
+known robot point (`r4r rig --picks`), whose 3D position is FK of the point:
 
-| kind | from | 3D point | used in |
-|---|---|---|---|
-| known point | a pick: a pixel clicked on a named robot point (`--picks`) | FK of the point | PnP start (stage 1 for a moving camera, in its link's frame; stage 3); a residual in the bundles |
-| chain | a pick or a seed (where the current pose projects a robot point, priors `robot_points`) followed ±10 timesteps by KLT | unknown, rigid with the point's body | a track on that body in the bundles (triangulated by variable projection) |
+- start: PnP on the picks, in the frame of the body the camera rides on (stage 1 for a moving
+  camera, pooled over episodes, instead of the search; stage 3 for a static one);
+- refinement: a reprojection residual in the bundles, next to the tracks; a moving mount with
+  keypoints stays free within its priors' ranges.
 
-KLT follows a surface patch, not the named point (a joint origin lies inside its housing): read
-as the named point, a followed pixel is 2–4 px off (median, SynGrasp 256²) and spoils PnP. A
-seed alone says nothing about the pose; its chain refines a start within its basin. A moving
-mount with keypoints stays free in the bundles within its priors' ranges.
+A rig with no moving camera attaches no track to a link: seen from fixed centres only, such
+tracks pulled good starts 10–80 cm away (SynGrasp, Tien Kung). Pixels found automatically (KLT
+following picks, seeds where a start projects the points) were tried against SynGrasp's
+recorded cameras and dropped: no gain, or worse starts (`keypoints.py`, module doc).
 
 On a mobile base, stage 1 uses each episode's longest span where the record says the base is
 parked (≥ 20 timesteps), stage 3 places static cameras with the base moved, and the bundle

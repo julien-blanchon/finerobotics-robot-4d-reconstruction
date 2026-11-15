@@ -64,11 +64,8 @@ absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...
 video/joint time offset on top of `state_shift`.
 
 `robot_points` names points on the robot (`{"tip": {"body": "panda_hand", "offset": [0, 0,
-0.105]}}`, metres in the body's frame); every body's origin is also a point, named after the
-body. A camera's `robot_points` (a list of names) has `r4r rig` look for those points in its
-video where the camera's current pose projects them (`r4r.rago.keypoints`): a refinement within
-the start's basin. Pixels clicked by hand come from a picks file (`read_picks`, `r4r rig
---picks`).
+0.105]}}`, metres in the body's frame) for picks, pixels clicked on them (`read_picks`, `r4r rig
+--picks`, `r4r.rago.keypoints`); every body's origin is also a point, named after the body.
 
 Unknown keys are errors (a typo would otherwise be ignored silently), except records kept for
 people and never read: `notes`, `base_odometry_measured` (an alternative odometry record) and
@@ -151,8 +148,6 @@ class CameraPrior:
     pose: PoseColumn | None = None
     # Left out of every command (a camera on no robot body, e.g. worn by a person)
     ignore: bool = False
-    # Robot points looked for in this camera's video where its current pose projects them
-    robot_points: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,7 +409,6 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
             intrinsics=_intrinsics_column(c.get("intrinsics"), f"{where}: cameras.{name}"),
             pose=_pose_column(c.get("pose"), f"{where}: cameras.{name}"),
             ignore=bool(c.get("ignore", False)),
-            robot_points=tuple(c.get("robot_points", ())),
         )
         for name, c in raw.items()
     }

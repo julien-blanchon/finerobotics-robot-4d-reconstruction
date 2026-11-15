@@ -159,6 +159,11 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **Simulators randomise:** mounts per episode (molmobot: 1–5 cm, 4–10°), focals, robot base
   placement (InternData-M1: ±5 cm). Use episode scope and the recorded values when they exist;
   images alone don't pin a per-episode mount.
+- **A background change is not a camera change:** setup detection from thumbnails split HABIT's
+  front camera into 188 "setups", but one fixed pose fits episodes from all of them as well as
+  per-episode poses do; the robot was moved between rooms. Before freeing a camera per setup,
+  test one fixed pose across setups on robot points (resting grippers at the same pixels is a
+  quick sign). Freeing it let the light solve wander 15–20 cm at 1–2 px.
 - **Merged roots mix setups:** community-v3 roots join many LeRobot repos, each with its own
   cameras and calibration (one root's overlay showed three rooms). Find the setup key first
   (`source/subtree` or `source/publisher_repo` in `meta/episodes`), write it as `station`, and

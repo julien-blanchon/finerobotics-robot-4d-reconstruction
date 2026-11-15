@@ -123,11 +123,12 @@ def load_episode(
             rotation = se3.quaternion_to_matrix(torch.tensor(q, dtype=torch.float64))
             position = torch.tensor([x, y, z], dtype=torch.float64)
             stream = replace(stream, pose=se3.from_rotation_translation(rotation, position))
-        elif prior.pose is not None:
-            # This column holds JSON text: the episode's first row
+        elif prior.pose is not None and prior.pose.layout == "record":
+            # The episode's first row: JSON text, or x, y, z, qw, qx, qy, qz
             text = cast("list[str]", every[prior.pose.column])[0]
             stream = replace(stream, pose=recorded_pose(text, prior.pose))
         cameras.append(stream)
+    cameras = _world_cameras(cameras, every, priors, record, robot, root, feature)
     state, base_motion = _measurements(every, priors, feature, stride)
     return Episode(
         name=f"{root.name}/episode_{episode:06d}",
@@ -140,6 +141,43 @@ def load_episode(
         station=None if record is None else record.station,
         base_motion=base_motion,
     )
+
+
+def _world_cameras(
+    cameras: list[CameraStream[int, int, int]],
+    every: Mapping[str, Column],
+    priors: DatasetPriors,
+    record: EpisodeRecord | None,
+    robot: JsonObject,
+    root: Path,
+    feature: str | tuple[str, ...],
+) -> list[CameraStream[int, int, int]]:
+    """`cameras` with those recorded in a world frame placed in the base frame (or on their
+    link) for this episode (`r4r.data.recorded`); an episodes table pose takes precedence."""
+
+    from .recorded import base_frame_poses, world_from_camera
+
+    world = {
+        c.name: world_from_camera(cast("Tensor", every[c.prior.pose.column]), c.prior.pose)
+        for c in cameras
+        if c.prior.pose is not None
+        and c.prior.pose.layout != "record"
+        and (record is None or c.name not in record.poses)
+    }
+    if not world:
+        return cameras
+    anchor = priors.world_anchor
+    if anchor is None or anchor not in world:
+        raise ValueError(
+            f"{root}: cameras recorded in a world frame need a `world_anchor` among them"
+        )
+    links = {c.name: c.mount if c.moving else None for c in cameras if c.name in world}
+    state = _columns(cast("Mapping[str, Tensor]", every), feature)
+    joints = priors.joint_map(_joints(robot, priors.replaced))
+    placed = base_frame_poses(
+        world, links, anchor, state, joints, _description(root, robot, priors)
+    )
+    return [replace(c, pose=placed[c.name]) if c.name in placed else c for c in cameras]
 
 
 def _decode(

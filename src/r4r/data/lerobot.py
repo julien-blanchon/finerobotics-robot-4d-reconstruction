@@ -18,11 +18,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import torch
+from einops import rearrange
 
 from ..geometry import camera, se3
 from .episode import CameraStream, Episode, JointMap
 from .priors import (
     PRIORS,
+    BaseOdometry,
     CameraPrior,
     DatasetPriors,
     EpisodeRecord,
@@ -35,10 +37,11 @@ from .priors import (
 from .tables import Column, LeRobotTables
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from torch import Tensor
 
+    from r4r.data import priors as checked_priors
     from r4r.types import RGB, Mat3x3, Mat4x4
 
 IMAGE_PREFIX = "observation.images."
@@ -69,6 +72,32 @@ def episode_count(root: Path) -> int:
     """How many episodes the dataset root holds (`meta/info.json`)."""
 
     return _root(root).tables.total_episodes
+
+
+def camera_names(root: Path) -> tuple[tuple[str, ...], frozenset[str]]:
+    """The cameras every command uses (video features that are not depth maps, not ignored by
+    the priors) and those of them that move, as `load_episode` decides (dataset-level priors)."""
+
+    opened = _root(root)
+    names, moving = [], set()
+    for key in opened.tables.video_keys:
+        info = opened.tables.features[key].get("info", {})
+        name = key.removeprefix(IMAGE_PREFIX)
+        prior = opened.priors.cameras.get(name, CameraPrior())
+        if info.get("is_depth_map", False) or prior.ignore:
+            continue
+        names.append(name)
+        stream = _camera(key, info, None, prior, torch.empty(0, 3, 0, 0), (0, 0))
+        if stream.moving:
+            moving.add(name)
+    return tuple(names), frozenset(moving)
+
+
+@functools.cache
+def simulated(root: Path) -> bool | None:
+    """Whether the dataset root is simulated (its `meta/episodes`; None when unsaid)."""
+
+    return _root(root).tables.simulated()
 
 
 def load_episode(
@@ -155,13 +184,31 @@ def _world_cameras(
     """`cameras` with those recorded in a world frame placed in the base frame (or on their
     link) for this episode (`r4r.data.recorded`); an episodes table pose takes precedence."""
 
-    from .recorded import base_frame_poses, world_from_camera
+    from .recorded import base_frame_poses, base_mounts, world_from_camera
 
+    measured = {
+        c.name: world_from_camera(cast("Tensor", every[c.prior.pose.column]), c.prior.pose)
+        for c in cameras
+        if c.prior.pose is not None
+        and c.prior.pose.layout == "base_from_camera"
+        and (record is None or c.name not in record.poses)
+    }
+    if measured:
+        state = _columns(cast("Mapping[str, Tensor]", every), feature)
+        joints = priors.joint_map(_joints(robot, priors.replaced))
+        links = {c.name: c.mount if c.moving else None for c in cameras if c.name in measured}
+        offsets = {
+            c.name: c.prior.pose.offset for c in cameras if c.prior.pose and c.name in measured
+        }
+        placed = base_mounts(
+            measured, links, offsets, state, joints, _description(root, robot, priors)
+        )
+        cameras = [replace(c, pose=placed[c.name]) if c.name in placed else c for c in cameras]
     world = {
         c.name: world_from_camera(cast("Tensor", every[c.prior.pose.column]), c.prior.pose)
         for c in cameras
         if c.prior.pose is not None
-        and c.prior.pose.layout != "record"
+        and c.prior.pose.layout in ("world_to_camera", "world_from_camera")
         and (record is None or c.name not in record.poses)
     }
     if not world:
@@ -190,6 +237,54 @@ def _decode(
 
     times = [start + t for t in timestamps]
     return decode_video_frames(path, times, 1 / fps / 2, "pyav", return_uint8=True)
+
+
+def keyframes(
+    root: Path, episode: int, frames: Sequence[int], cameras: Sequence[str]
+) -> dict[str, Tensor[[int, *RGB, int, int]]]:
+    """uint8 frames of `cameras` at the episode's frame indices `frames` only, each decoded from
+    the nearest key frame before it: a few frames cost a few GOPs, not the whole video."""
+
+    tables = _root(root).tables
+    files = tables.files(episode)
+    timestamps = cast("Tensor", tables.rows(episode, ["timestamp"])["timestamp"])
+    out = {}
+    for name in cameras:
+        path, start = files.videos[IMAGE_PREFIX + name]
+        times = [start + float(timestamps[f]) for f in frames]
+        out[name] = seek_frames(path, times, 0.5 / tables.fps)
+    return out
+
+
+def seek_frames(
+    path: Path, times: Sequence[float], tolerance: float, gap: float = 1.0
+) -> Tensor[[int, *RGB, int, int]]:
+    """uint8 RGB frames of a video file at increasing `times` (seconds): the first frame at or
+    after `time − tolerance` for each. Decoding seeks to the key frame before a time, then runs
+    forward; a time less than `gap` seconds ahead is reached by decoding on, without a seek."""
+
+    import av
+    import numpy as np
+
+    images = []
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        base = float(stream.time_base or 1.0)
+        decoded = None  # the open decoder and the time of its last frame
+        for time in times:
+            if decoded is None or not decoded[1] < time - tolerance < decoded[1] + gap:
+                container.seek(int(max(time - tolerance, 0.0) / base), stream=stream)
+                decoded = (container.decode(stream), -math.inf)
+            image = None
+            for frame in decoded[0]:
+                image = frame
+                decoded = (decoded[0], frame.pts * base if frame.pts is not None else decoded[1])
+                if decoded[1] >= time - tolerance:
+                    break
+            if image is None:
+                raise ValueError(f"{path}: no frame at {time:.3f} s")
+            images.append(image.to_ndarray(format="rgb24"))
+    return rearrange(torch.from_numpy(np.stack(images)), "n h w c -> n c h w")
 
 
 def _needed(
@@ -302,12 +397,27 @@ def _columns(rows: Mapping[str, Tensor], feature: str | tuple[str, ...]) -> Tens
 
 
 def _base_motion(priors: DatasetPriors, rows: Mapping[str, Tensor]) -> Tensor[[int, *Mat4x4]]:
-    """The base's recorded motion (see `r4r.rago.odometry`) at the loaded timesteps."""
+    """The base's recorded motion (see `r4r.rago.odometry`) at the loaded timesteps, with the
+    priors' fitted correction (`base_odometry.correction`) when there is one."""
 
     from r4r.rago import odometry
 
     spec = priors.base_odometry
     assert spec is not None
+    motion = _recorded_motion(spec, rows)
+    if spec.correction is None:
+        return motion
+    time = rows["timestamp"].double()
+    step = float(time[-1] - time[0]) / max(len(time) - 1, 1)
+    # The same OdometryGain seen through r4r.rago's absolute import (one class at run time)
+    return odometry.corrected(motion, cast("checked_priors.OdometryGain", spec.correction), step)
+
+
+def _recorded_motion(spec: BaseOdometry, rows: Mapping[str, Tensor]) -> Tensor[[int, *Mat4x4]]:
+    """The base's motion as recorded (no correction)."""
+
+    from r4r.rago import odometry
+
     values = _columns(rows, spec.feature)[:, list(spec.columns)]
     if spec.kind == "pose" and values.shape[1] == 7:
         return odometry.from_poses_3d(values[:, :3], values[:, 3:])

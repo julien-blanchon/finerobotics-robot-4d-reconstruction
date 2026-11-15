@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 type Column = Tensor | list[str]
 
 # Columns of `meta/episodes` that locate an episode's rows and video segments
-INDEX_COLUMNS = ("episode_index", "data/chunk_index", "data/file_index")
+INDEX_COLUMNS = ("episode_index", "length", "data/chunk_index", "data/file_index")
 VIDEO_COLUMNS = ("chunk_index", "file_index", "from_timestamp")
 
 
@@ -95,6 +95,21 @@ class LeRobotTables:
         table = handle.read_row_groups(groups, columns=wanted)
         table = table.filter(pa.array(table["episode_index"].to_numpy() == episode))
         return {name: _column(table[name]) for name in columns}
+
+    def length(self, episode: int) -> int:
+        """How many frames `episode` has (its row of `meta/episodes`)."""
+
+        return int(self._episode_row(episode)["length"])
+
+    def simulated(self) -> bool | None:
+        """Whether the dataset is simulated (`source/is_simulation` of its first episode in
+        `meta/episodes`; None when the column is absent)."""
+
+        path = min((self.root / "meta" / "episodes").glob("*/*.parquet"))
+        if "source/is_simulation" not in pq.read_schema(path).names:
+            return None
+        value = pq.read_table(path, columns=["source/is_simulation"])[0][0].as_py()
+        return None if value is None else bool(value)
 
     def _episode_row(self, episode: int) -> dict[str, float]:
         path = self._episode_file(episode)

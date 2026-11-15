@@ -835,6 +835,25 @@ def _base_departure[L: IntVar](
     return tuple(out)
 
 
+def solved_base_motion[L: IntVar](
+    robot: Robot[L, int, int],
+    episodes: list[RigEpisode[int, int]],
+    fitted: Tensor[[int, L, *Mat4x4]],
+) -> list[Tensor[[int, *Mat4x4]]]:
+    """Per episode with a recorded base motion: the fitted base relative to its first timestep,
+    `S_t = W_b(0)⁻¹ W_b(t)` (the motion the record should have given)."""
+
+    base = _moving_base(robot)
+    out, start = [], 0
+    for e in episodes:
+        n = len(e.qpos)
+        if base is not None and e.base_motion is not None:
+            world = fitted[start : start + n, base]
+            out.append(se3.inverse(world[:1]) @ world)
+        start += n
+    return out
+
+
 def _moving_base(robot: Robot[int, int, int]) -> int | None:
     """The body a recorded base motion moves: the frame-scope free body nearest the root."""
 

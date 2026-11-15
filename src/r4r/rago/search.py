@@ -52,6 +52,9 @@ class SearchConfig:
         )
     )
     seed: int = 0
+    # A mount farther than this from its body's origin (m) is not a camera on the robot: such
+    # starts are never picked (searches have converged to 0.7-1 m at a low residual)
+    max_mount_distance: float = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +165,14 @@ def search_mount[T: IntVar, NQ: IntVar, C: IntVar](
         finite &= torch.isfinite(result.lens.distortion).all(-1)
     if not bool(finite.any()):
         raise ValueError(f"search_mount({camera!r}): every start diverged (non-finite parameters)")
-    scores = torch.where(finite, result.camera_score, torch.inf)
+    distance = result.body_from_camera[:, :3, 3].norm(dim=-1)
+    plausible = finite & (distance <= config.max_mount_distance)
+    if not bool(plausible.any()):
+        raise ValueError(
+            f"search_mount({camera!r}): every start ended over {config.max_mount_distance} m from"
+            f" its body (closest {float(distance[finite].min()):.2f} m): not a mount on the robot"
+        )
+    scores = torch.where(plausible, result.camera_score, torch.inf)
     best = int(scores.argmin())
     body_from_camera = robot.body_from_camera[[robot.camera(n) for n in names]].to(qpos).clone()
     body_from_camera[c] = result.body_from_camera[best]

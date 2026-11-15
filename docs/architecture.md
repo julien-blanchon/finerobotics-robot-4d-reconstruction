@@ -76,7 +76,11 @@ known robot point (`r4r rig --picks`), whose 3D position is FK of the point:
 A rig with no moving camera attaches no track to a link: seen from fixed centres only, such
 tracks pulled good starts 10–80 cm away (SynGrasp, Tien Kung). Pixels found automatically (KLT
 following picks, seeds where a start projects the points) were tried against SynGrasp's
-recorded cameras and dropped: no gain, or worse starts (`keypoints.py`, module doc).
+recorded cameras and dropped: no gain, or worse starts (`keypoints.py`, module doc). What
+works without clicks is `r4r picks` (`rago/transfer.py`): robot surface points of a calibrated
+session (the description ray-cast in its frames) carried to another session by RoMa v2, at about
+3× the error of clicks ([onboarding](dataset-onboarding.md)). The geometry only names the point
+a reference pixel shows; the solve sees keypoints, never meshes.
 
 On a mobile base, stage 1 uses each episode's longest span where the record says the base is
 parked (≥ 20 timesteps), stage 3 places static cameras with the base moved, and the bundle
@@ -154,9 +158,9 @@ Every camera is radially symmetric (`r4r.geometry.camera`): a ray at `s` from th
 |---|---|---|
 | KLT (OpenCV) | per-camera tracks | every frame of the sampled episodes (CPU, ~2 s per camera per minute of video) |
 | batched search + bundle | mounts, focal, any free parameter | tracks of sampled windows; batched copies |
-| RoMa v2 (`r4r.matching`) | static↔moving and static↔static links | a few dozen frame pairs per episode, kept where it is certain |
+| RoMa v2 (`r4r.matching`) | static↔moving and static↔static links; robot keypoints from calibrated sessions (`r4r picks`) | a few dozen frame pairs per episode, kept where it is certain |
 | ARROW | focal draft (`r4r focal`, gen2 adapter); dense depth and tracks (planned) | sampled frames; all frames (dense pass) |
-| robot meshes | overlays only, never inside the solve | `r4r preview`, `r4r overlay` |
+| robot meshes | overlays; which surface point a reference pixel shows (`r4r picks`); never inside the solve | `r4r preview`, `r4r overlay`, `r4r picks` |
 
 Bad frames (zoomed-in wrist, no texture, dark, motion blur) are not detected by rules on the
 image: they show up as few surviving KLT tracks, low RoMa certainty, high residuals or

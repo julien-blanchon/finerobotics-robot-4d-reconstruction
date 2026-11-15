@@ -13,7 +13,7 @@ ambiguous in the target. `(b, p) ↔ u'` is a robot keypoint (`keypoints.py`) at
 timestep. Surface points, not named ones: a joint origin lies inside its housing, and the
 warp carries the surface in front of it, off the origin by about `r · sin Δθ` for a change of
 viewing direction `Δθ` (SynGrasp, 256²: named points gave a median camera error of 23 cm,
-surface points 6 cm; docs/dataset-onboarding.md). The geometry only says which surface point a
+surface points 5.6 cm; docs/dataset-onboarding.md). The geometry only says which surface point a
 reference pixel shows; the solve never sees it.
 
 Each target frame is matched with the reference frame of nearest joint configuration
@@ -74,7 +74,7 @@ class TransferConfig:
     # Target frames per episode, spread over its joint configurations
     frames: int = 16
     # Surface points per reference frame, drawn from a grid of `grid` rays per image row
-    points: int = 48
+    points: int = 96
     grid: int = 64
 
 

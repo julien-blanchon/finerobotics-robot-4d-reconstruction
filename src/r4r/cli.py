@@ -714,7 +714,7 @@ class Picks:
     # Target frames per episode, spread over its joint configurations
     frames: int = 16
     # Surface points per reference frame
-    points: int = 48
+    points: int = 96
     # Decoding strides of the target and reference videos
     stride: int = 1
     reference_stride: int = 3

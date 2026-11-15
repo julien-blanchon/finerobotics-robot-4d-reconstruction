@@ -21,6 +21,9 @@ automatically were tried and dropped (SynGrasp, ground-truth cameras):
   puts it, and its track did not pull the start back: 6 of 7 starts 2-20 cm off ended further
   away. Points on a link's outline are not material points.
 
+Pixels transferred from a calibrated session by dense matching do work (`transfer.py`, `r4r
+picks`), at about 3× the error of clicks.
+
 Start: PnP-RANSAC (`initialize.locate_camera`) on the picks, expressed in the frame of the body
 the camera rides on (`carried`): the world for a static camera; its link for a moving one,
 where the mount is constant over time.

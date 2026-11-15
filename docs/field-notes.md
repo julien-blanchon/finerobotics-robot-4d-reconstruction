@@ -211,6 +211,13 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   its housing, outline points slide along the link). Followed pixels were 2–4 px off the named
   point (up to 15 px at 256²); as known points they spoiled PnP, as tracks on the link they
   added nothing, and seeded where a start projects the points they made 6 of 7 starts worse.
+- **Robot keypoints transfer between sessions as surface points, not named points** (`r4r
+  picks`): a reference frame with a known camera, the description ray-cast at its joints, RoMa
+  v2 to the target frame of nearest joints, kept where certain and forward-backward consistent.
+  Joint origins carried this way were 12 px off at 256² (SynGrasp: cameras 23 cm off); surface
+  points 6.6 px, cameras 5.6 cm median, 22 of 50 within 5 cm, 9 beyond 20 cm. Many reference
+  episodes are what matters (4 instead of 40: median 1.2 m). Real openneodata sessions: arm on
+  the real one in 7 of 10 overlays.
 - **Reuse wrist mounts across datasets:** write them in one description's link frame per arm.
   Mounts measured in simulation transferred to real robots (Lift-2 → openneodata arx5,
   split-aloha → soft-fold, RoboCOIN). Same kinematics can still mean different link frames.

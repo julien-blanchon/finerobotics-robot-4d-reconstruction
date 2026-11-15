@@ -198,7 +198,19 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   the same way. A wrist camera's image "up" usually points away from the gripper axis. It
   can't work when the camera doesn't see the jaws.
 - **Hand-picked joint positions** in 2–3 frames give a static camera's pose by PnP, but only when
-  the picks leave the arm's plane.
+  the picks leave the arm's plane. `r4r rig --picks` does it in the solver (PnP start, bundle
+  residuals); on SynGrasp-1B's recorded cameras, clicks simulated with 2 px noise placed a lone
+  static camera to ~1–2 cm when 6+ points were visible (numbers in the robot-keypoints commit).
+  A camera that sees fewer than 6 picked points gets no start: pick more frames.
+- **A static-only rig cannot be refined from its own tracks.** Attached to links, the tracks of
+  a lone static camera pulled good starts away (SynGrasp 6–11 cm → 17–32 cm; Tien Kung 20 cm
+  behind its by-eye pose, its own torso then drawn over the table). `r4r rig` no longer
+  attaches tracks to links when no camera moves: such a rig keeps its start unless robot
+  keypoints move it.
+- **KLT does not follow a robot point:** it follows a surface patch (a joint origin lies inside
+  its housing, outline points slide along the link). Followed pixels were 2–4 px off the named
+  point (up to 15 px at 256²); as known points they spoiled PnP, as tracks on the link they
+  added nothing, and seeded where a start projects the points they made 6 of 7 starts worse.
 - **Reuse wrist mounts across datasets:** write them in one description's link frame per arm.
   Mounts measured in simulation transferred to real robots (Lift-2 → openneodata arx5,
   split-aloha → soft-fold, RoboCOIN). Same kinematics can still mean different link frames.

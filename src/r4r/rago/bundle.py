@@ -159,6 +159,7 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
     kinematic: KinematicFreedom | None = None,
     known_focal: tuple[bool, ...] | None = None,
     keypoints: Keypoints[int] | None = None,
+    focal_ranges: tuple[float, ...] | None = None,
 ) -> BundleResult[C, V, T, L]:
     """Refine free mounts and focal lengths by robust reprojection of triangulated tracks.
 
@@ -167,7 +168,8 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
     timestep belongs to (for episode-scope unknowns); `start_at [C, T]` optional starting mounts
     per camera and timestep (episode-scope cameras placed differently in each episode);
     `bodies_at [B, T]` optional starting corrections of the free bodies (e.g. odometry).
-    Cameras with `known_focal` keep their focal length. `kinematic`: joint and time offsets to
+    Cameras with `known_focal` keep their focal length, unless `focal_ranges` gives them a
+    relative prior std (> 0: refined within it). `kinematic`: joint and time offsets to
     refine (`rig.KinematicFreedom`). `keypoints`: robot points seen by the cameras (camera
     and timestep of each must be a view).
     """
@@ -183,7 +185,12 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
         t.intrinsics.to(qpos),
         config.focal_std
         if known_focal is None
-        else torch.tensor([0.0 if k else config.focal_std for k in known_focal]),
+        else torch.tensor(
+            [
+                (focal_ranges[c] if focal_ranges else 0.0) if k else config.focal_std
+                for c, k in enumerate(known_focal)
+            ]
+        ),
         pixel_unit,
         episode,
         start_at,

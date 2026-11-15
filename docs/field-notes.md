@@ -74,6 +74,10 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   best ±90° class 0.7°). It narrows a sign/offset search to a family; positions must pick one.
 - **Check recorded EE positions in the controller's own base frame:** UR's `base` is `base_link`
   turned 180° about z; FK of tool0 then reproduced robomind2's `eef_pose` xyz to 1 mm.
+- **A recorded end-effector pose can follow its own convention:** openneodata aloha's recorded
+  pose matched joint 1 negated to 0.000°, yet the video follows the description's own sign.
+  Confirm any sign or offset chosen from recorded poses on the video (preview at several
+  moments, not only near zero).
 - **Test the arm model first whenever an end-effector pose is recorded:** between two frames,
   the end effector's rotation angle equals the correct FK link's, whatever the base and tool
   offsets. That separates the right model (0.000°) from a wrong one (1.7–5°) in seconds; then

@@ -9,16 +9,17 @@ everything else held at a calibrated neighbour station's values:
    side by side as one sequence (the camera is fixed over the station); KLT within each burst;
    links between the camera and the wrist cameras at the bursts' middle frames: SIFT, and
    RoMa v2 when a matcher is given (a few dozen frame pairs per station).
-2. Starts, in order, until one passes the fit check: the neighbour's pose and focal; PnP on
-   the points the wrist cameras triangulate (`stages.static_starts`, focal searched); PnP on
-   robot surface points transferred from the neighbour's frames (`transfer`, given by the
-   caller as `Transferred` points with their joint positions).
+2. Starts: seeds from calibrated stations (the nearest one on each side of the robot: a third
+   camera facing the robot or behind the arms, `side`), all solved, the passing solve with
+   the lowest check kept; if none passes, PnP on the points the wrist cameras triangulate
+   (`stages.static_starts`, focal searched), then PnP on robot surface points transferred
+   from a neighbour's frames (`transfer`, given by the caller).
 3. From each start, Levenberg–Marquardt on the camera's pose (Gaussian prior around the start,
    wide `position_range` / `orientation_range_deg`) and focal (log-normal, `focal_std`), the
    wrist mounts and arm kinematics held (`light.light_solve`).
 4. The fit check: the median epipolar distance of the links under the solved poses
-   (`light.check`). The first start below `flag` is kept; otherwise the best, flagged for
-   reading its overlay.
+   (`light.check`), below `flag` to pass; a station none passes keeps its best solve, flagged
+   for reading its overlay.
 
 A static camera's focal and distance trade off (a far camera with a long focal sees the robot
 alike): links to the wrist cameras, which move, are what separates them.
@@ -147,23 +148,28 @@ def calibrate_station(
     lens: Lens[int] | None,
     camera: str,
     config: StationConfig,
+    seeds: Sequence[tuple[str, Tensor[[*Mat4x4]], float]],
     picks: Callable[[], tuple[Transferred[int, int], Tensor[[int, int]]] | None] | None = None,
 ) -> StationFit:
-    """Fit `camera` (static) from the starts in order until one passes the check (module doc);
-    `robot.body_from_camera` and `intrinsics` give the neighbour's start; `picks()`, called
-    only if the others fail, gives points transferred into some of the station's frames and
-    the joint positions there."""
+    """Fit `camera` (static) from every seed (name, pose, focal: calibrated stations, e.g. the
+    nearest one placed in front of the robot and the nearest behind it) and keep the solve with
+    the lowest check among those that pass; if none passes, PnP on wrist-triangulated points,
+    then `picks()` (points transferred into some of the station's frames and the joint
+    positions there), the first that passes; else the lowest check, flagged."""
 
     c = names.index(camera)
-    pose = robot.body_from_camera[robot.camera(camera)].to(data.qpos)
-    neighbour = (pose, float(intrinsics[c, 0, 0]))
+    solved = [
+        _solve(data, robot, names, intrinsics, lens, camera, config, (pose, focal), name)
+        for name, pose, focal in seeds
+    ]
+    passing = [f for f in solved if not f.flagged]
+    if passing:
+        return min(passing, key=lambda f: f.check.median_px)
     starts: list[tuple[str, Callable[[], tuple[Tensor, float] | None]]] = [
-        ("neighbour", lambda: neighbour),
         ("pnp", lambda: _pnp_start(robot, data, names, intrinsics, camera)),
     ]
     if picks is not None:
         starts.append(("picks", lambda: _picks_start(robot, picks(), intrinsics[c], data)))
-    best: StationFit | None = None
     for name, start in starts:
         found = start()
         if found is None:
@@ -171,10 +177,17 @@ def calibrate_station(
         fit = _solve(data, robot, names, intrinsics, lens, camera, config, found, name)
         if not fit.flagged:
             return fit
-        if best is None or fit.check.median_px < best.check.median_px:
-            best = fit
-    assert best is not None, "the neighbour start is always tried"
-    return best
+        solved.append(fit)
+    if not solved:
+        raise ValueError(f"{camera}: no start (no seed, PnP and picks found none)")
+    return min(solved, key=lambda f: f.check.median_px)
+
+
+def side(pose: Tensor[[*Mat4x4]]) -> str:
+    """Where a static camera sits: `facing` the robot (in front of the base, x > 0) or
+    `behind` it."""
+
+    return "facing" if float(pose[0, 3]) > 0 else "behind"
 
 
 def _solve(

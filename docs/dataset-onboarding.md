@@ -49,7 +49,7 @@ Only then calibrate: the solver refines good priors; it does not rescue bad ones
 | joint mapping | varying state columns that drive nothing → a missing joint | `joints`: index, URDF joint, `sign`, optional `from`/`to` |
 | signs, offsets | joints outside their limits → wrong sign, offset or unit | `sign`, a `from`/`to` range |
 | units | degrees converted automatically; `normalised_percent` needs a range per joint | `joints[].from/to` |
-| description | wrong gripper, wrong arm, single-arm file for bimanual data, unreadable meshes | `description`: corrected copy under `priors/descriptions/<embodiment>/` |
+| description | wrong gripper, wrong arm, wrong arm mount or layout, link lengths, single-arm file for bimanual data, unreadable meshes | `description`: corrected copy under `priors/descriptions/<embodiment>/`. A prior like any other: the agent fixes it itself and iterates until the overlay is right, never leaves it as a blocker |
 | timing | video/state lag (`r4r fit --shifts`); sub-frame part refined later | `state_shift`, `kinematics.time_offset_frames` |
 | encoder offsets | small remaining errors, refined in every `r4r rig` bundle | `kinematics`: `joint_offset_deg`, `joint_offset_mm` |
 | camera link | metadata often wrong; `r4r links` gives still share and rotation residual per body | `cameras.<name>.mount`, `link` |

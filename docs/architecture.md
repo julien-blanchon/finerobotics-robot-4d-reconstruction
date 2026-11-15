@@ -157,6 +157,43 @@ Every camera is radially symmetric (`r4r.geometry.camera`): a ray at `s` from th
 - Static cameras' focal is weakly constrained by one episode (focal ↔ distance): it comes from
   preparation and is shared across episodes.
 
+## Processing every episode: routes (`r4r reconstruct`)
+
+Each episode takes the cheapest route its unknowns allow (`r4r.plan`). Values of dataset or
+station scope are held once `r4r rig --write` wrote them (or recorded); only episode-scope ones
+stay free.
+
+| route | when | how | cost (measured on a login node) |
+|---|---|---|---|
+| fast | everything held or recorded (a moving base on its odometry with a fitted `base_odometry.correction`, or a recorded pose) | forward kinematics × mount, no video read | 13 ms per SynGrasp episode (1,000 in 13 s); 13–40 ms in general; 0.32 s per sim-panda episode sampled across 460k (one data file each) |
+| light | episode-scope 6-DoF unknowns with a start (a re-placed robot base, a re-placed static camera), or a real episode the fit check flags | 6 bursts of 16 frames decoded alone, KLT + SIFT links, LM on those unknowns only (`rago/light.py`) | 5–9 s CPU; 41–57 s per episode under load |
+| full | its setup was never calibrated, or an unknown has no start | the whole rig on the episode | ~0.36 GPU s per second of video |
+
+- **Fit check:** real episodes holding a recorded episode-scope camera (DROID's per-episode
+  calibration) are checked on the bursts: the epipolar distance of verified matches between
+  the held cameras; above 25 px the record is freed and solved light (`--check on/off/auto`).
+- **`--plan`:** counts the routes over a dataset from its priors and episodes table alone (no
+  episode loaded) and estimates CPU and GPU hours, calibrating each uncalibrated setup once
+  included.
+- **`--solve`** solves every episode in full. **`--uncalibrated nan`** writes a camera its setup
+  never calibrated as NaN instead of running the full route.
+- **`r4r stations`:** runs of episodes with one placement of a camera that is not on the robot,
+  from two thumbnails per episode (~30 ms per episode); `--write` stores them as the `station`
+  column of the episodes table. **`r4r station`** then calibrates each new station's static
+  camera from its calibrated neighbour (`rago/station.py`: neighbour's pose, PnP on wrist
+  triangulations, transferred robot points, in that order, each checked), mostly on the CPU.
+- **Output layout:** `out/<family>/<dataset>/shard-<k>.parquet`, one file per `--shard-size`
+  episodes (default 1000) of the selection, one row per frame in the
+  [output spec](output-spec.md)'s columns. The schema metadata `r4r.episodes` (JSON) gives per
+  episode its route, fit check, each camera's source and errors, or the error that stopped it;
+  `r4r.layout` holds the feature info.
+- **Resumable:** a shard is written once, atomically; shards already written are skipped.
+- **Spread over processes:** `--shard i/n` takes the shards `k` with `k mod n = i`, e.g. a
+  Slurm array: `--shard $SLURM_ARRAY_TASK_ID/$SLURM_ARRAY_TASK_COUNT`.
+- **Merge:** `r4r merge` writes the shards as a LeRobot v3 dataset with `meta/r4r.json`
+  (quality and provenance), ~12 s per 1,000 SynGrasp episodes
+  ([packaging](output-spec.md#packaging-r4r-merge)).
+
 ## Which tool is used where
 
 | tool | used for | on what |

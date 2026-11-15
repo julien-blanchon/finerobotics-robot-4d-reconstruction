@@ -1495,7 +1495,13 @@ class Station:
         from r4r.data.lerobot import _root
         from r4r.data.priors import episode_table_path
         from r4r.plan import MIN_SETUP
-        from r4r.rago.station import StationConfig, calibrate_station, samples, station_data
+        from r4r.rago.station import (
+            StationConfig,
+            calibrate_station,
+            samples,
+            side,
+            station_data,
+        )
 
         root = dataset_root(self.dataset)
         priors = _root(root).priors
@@ -1516,8 +1522,16 @@ class Station:
         matcher = _matcher("cuda") if torch.cuda.is_available() else None
         config = StationConfig()
         for name in todo:
-            before = [n for n in done if min(runs[n]) < min(runs[name])]
-            neighbour = before[-1] if before else done[0]
+            # The nearest calibrated station in episode order gives the held values; the
+            # nearest on each side of the robot (facing it, behind it) a seed for the camera
+            nearest = sorted(done, key=lambda n: abs(min(runs[n]) - min(runs[name])))
+            neighbour = nearest[0]
+            seeds, sides = [], set()
+            for other in nearest:
+                pose, focal = _station_camera(priors.stations[other], self.camera)
+                if side(pose) not in sides:
+                    sides.add(side(pose))
+                    seeds.append((other, pose, focal))
             block = copy.deepcopy(priors.stations[neighbour])
             values = block["cameras"][self.camera]
             values |= {
@@ -1543,10 +1557,11 @@ class Station:
                 matcher,
             )
             fit = calibrate_station(
-                data, rig.robot, rig.names, rig.intrinsics, rig.lens, self.camera, config
+                data, rig.robot, rig.names, rig.intrinsics, rig.lens, self.camera, config, seeds
             )
             print(
-                f"{name} ({len(runs[name])} episodes) from {neighbour}: start {fit.start}, "
+                f"{name} ({len(runs[name])} episodes), held values of {neighbour}: "
+                f"from {fit.start}, "
                 f"focal {fit.focal:.0f} px, check {fit.check.median_px:.2f} px"
                 + (" FLAGGED: read its overlay" if fit.flagged else "")
             )
@@ -1579,6 +1594,19 @@ def _placed(block: JsonObject, camera: str) -> bool:
         and values.get("focal") is not None
         and not values.get("fitted", {}).get("flagged")
     )
+
+
+def _station_camera(block: JsonObject, camera: str) -> tuple[Tensor[[*Mat4x4]], float]:
+    """A calibrated station's camera: its `base_from_camera` and focal."""
+
+    import torch
+
+    from r4r.geometry import se3
+
+    values = block["cameras"][camera]
+    rotation = se3.quaternion_to_matrix(torch.tensor(values["orientation"], dtype=torch.float64))
+    position = torch.tensor(values["position"], dtype=torch.float64)
+    return se3.from_rotation_translation(rotation, position), float(values["focal"])
 
 
 def _write_station(root: Path, name: str, block: JsonObject) -> None:

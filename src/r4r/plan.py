@@ -172,10 +172,11 @@ class Cost:
     # A station whose only new value is one static camera, fitted from a neighbour station
     # (`r4r station`): CPU seconds (bursts, PnP, LM), GPU seconds (RoMa links and transferred
     # points; 20-60 s measured). Share of such stations that pass the fit check; the rest
-    # still need a rig (openneodata arx5: 0 of 5 validation stations passed, 2026-11-15)
+    # still need a rig (openneodata arx5, leave-one-out over 8 full-rig stations with RoMa
+    # links: 2 passed, 1 of them correctly, 2026-11-15)
     station_cpu: float = 60.0
     station_gpu: float = 40.0
-    station_pass: float = 0.0
+    station_pass: float = 0.125
 
 
 COST = Cost()

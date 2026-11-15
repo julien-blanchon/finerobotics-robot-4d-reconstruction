@@ -287,7 +287,24 @@ class Fit:
                     "score": round(fit.score, 4),
                 },
             }
-            print(f"wrote {write_camera(root, self.camera, values, station_of(loaded))}")
+            refusal = write_refusal(fit.median_error)
+            print(
+                f"not written: {refusal}"
+                if refusal
+                else f"wrote {write_camera(root, self.camera, values, station_of(loaded))}"
+            )
+
+
+def write_refusal(median_error: float) -> str | None:
+    """Why a fitted mount must not be written to the priors (None: it may be). A NaN median
+    means no reprojection measured the fit (e.g. a head camera still on the parked spans the
+    search uses): writing would store an unchecked mount with tightened ranges."""
+
+    import math
+
+    if not math.isfinite(median_error):
+        return "no reprojection error measured (median NaN): the mount is not determined"
+    return None
 
 
 @dataclass(frozen=True, slots=True)

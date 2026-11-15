@@ -42,6 +42,11 @@ if TYPE_CHECKING:
 
 type Route = Literal["fast", "light", "full"]
 
+# Why a lone re-placed camera's setup is to be placed (picks), not rigged
+LONE = "lone camera re-placed: place it per station"
+# A detected setup with fewer episodes is a one-off view (odd episode), not calibrated
+MIN_SETUP = 10
+
 
 @dataclass(frozen=True, slots=True)
 class Unknowns:
@@ -94,11 +99,11 @@ def episode_unknowns(
     free = [n for n, state in states if state == "free"]
     setup = focal + [f"{n}: {s.removeprefix('setup: ')}" for n, s in states if s[:6] == "setup:"]
     missing = [f"{n}: {s.removeprefix('missing: ')}" for n, s in states if s[:8] == "missing:"]
-    if free and len(cameras) < 2:
+    if len(cameras) < 2 and (free or missing):
         # Nothing to match it with, and a static camera's own tracks do not pin it (field
         # notes): placed once per setup instead (`r4r stations`, then picks)
-        setup += [f"{n}: lone camera re-placed: place it per station" for n in free]
-        free = []
+        setup += [f"{n}: {LONE}" for n in cameras]
+        free, missing = [], []
     recorded = [n for n, state in states if state == "recorded"]
     return Unknowns(tuple(free), tuple(setup), tuple(missing), tuple(recorded))
 
@@ -178,7 +183,9 @@ class DatasetPlan:
     episodes: int
     routes: Counter[str] = field(default_factory=Counter)
     checked: int = 0  # fast episodes that get the fit check (real data)
-    setups: int = 0  # setups (stations) to calibrate first
+    setups: int = 0  # setups (stations) to calibrate first: one `r4r rig` each (GPU)
+    placements: int = 0  # setups of a lone camera to place (picks, no GPU)
+    odd: int = 0  # episodes of one-off setups (fewer than MIN_SETUP episodes), not calibrated
     reasons: Counter[str] = field(default_factory=Counter)
     cpu_hours: float = 0.0
     gpu_hours: float = 0.0
@@ -202,13 +209,22 @@ def dataset_plan(
     frames = tables.info.get("total_frames", 0) / max(tables.total_episodes, 1)
     seconds = frames / tables.fps
     real = simulated(root) is False
-    routes, reasons, stations = Counter(), Counter(), set()
-    checked = 0
+    routes, reasons = Counter(), Counter()
+    sizes: Counter[str | None] = Counter()
+    for (station, _, _), count in groups.items():
+        sizes[station] += count
+    stations, lone = set(), set()
+    checked = odd = 0
     cpu = gpu = 0.0
     for (station, poses, intrinsics), count in groups.items():
         unknowns = episode_unknowns(priors.for_station(station), names, moving, poses, intrinsics)
-        if unknowns.setup:
+        if unknowns.setup and station is not None and sizes[station] < MIN_SETUP:
+            odd += count
+        elif unknowns.setup and all(r.endswith(LONE) for r in unknowns.setup):
+            lone.add(station)
+        elif unknowns.setup:
             stations.add(station)
+        if unknowns.setup:
             reasons.update(dict.fromkeys(unknowns.setup, count))
         reasons.update(dict.fromkeys(unknowns.missing, count))
         route = unknowns.calibrated_route
@@ -235,6 +251,8 @@ def dataset_plan(
         routes=routes,
         checked=checked,
         setups=len(stations),
+        placements=len(lone),
+        odd=odd,
         reasons=reasons,
         cpu_hours=cpu / 3600,
         gpu_hours=gpu / 3600,
@@ -298,18 +316,19 @@ def describe(plans: Sequence[DatasetPlan]) -> str:
     """The plans as a Markdown table, with totals and each dataset's main reasons."""
 
     lines = [
-        "| dataset | hours | episodes | fast | light | full | checked | setups | CPU h | GPU h |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| dataset | hours | episodes | fast | light | full | checked | rig setups | place setups "
+        "| odd | CPU h | GPU h |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     lines.extend(
         f"| {p.name} | {p.hours:.0f} | {p.episodes} | {p.routes['fast']} | "
         f"{p.routes['light']} | {p.routes['full']} | {p.checked} | {p.setups} | "
-        f"{p.cpu_hours:.1f} | {p.gpu_hours:.2f} |"
+        f"{p.placements} | {p.odd} | {p.cpu_hours:.1f} | {p.gpu_hours:.2f} |"
         for p in plans
     )
     cpu, gpu = sum(p.cpu_hours for p in plans), sum(p.gpu_hours for p in plans)
     hours, count = sum(p.hours for p in plans), sum(p.episodes for p in plans)
-    lines.append(f"| total | {hours:.0f} | {count} | | | | | | {cpu:.1f} | {gpu:.2f} |")
+    lines.append(f"| total | {hours:.0f} | {count} | | | | | | | | {cpu:.1f} | {gpu:.2f} |")
     for p in plans:
         for reason, count in p.reasons.most_common(3):
             lines.append(f"- {p.name}: {count} episodes: {reason}")

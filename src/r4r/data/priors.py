@@ -57,7 +57,13 @@ per episode and record them with the episode, too many episodes for a table):
 "axes": "forward_left_up"}`: `path` walks the JSON (`key=value` picks the list item whose `key`
 equals `value`) to an object with `position` (x, y, z) and `orientation` (w, x, y, z) in the
 robot base frame (moving camera: on its link); `axes` are the recorded camera axes (`opencv`,
-or `forward_left_up`: x forward, y left, z up, Isaac Sim's "world" camera axes). An episodes
+or `forward_left_up`: x forward, y left, z up, Isaac Sim's "world" camera axes). With
+`"layout": "world_to_camera"` (or `world_from_camera`) the column holds a flattened 3×4 / 4×4
+matrix per frame in the simulator's world frame instead, and the top-level `world_anchor` names
+a camera with a `link` and such a column: per episode, hand-eye between that link's forward
+kinematics and the anchor's recorded motion gives the base in the world, and every such camera
+is placed in the base frame (on its link, moving) at the episode's middle frame
+(`r4r.data.recorded`; molmobot records cameras in its houses, not the base). An episodes
 table pose takes precedence. `ignore` leaves a camera out (one that rides on no robot body,
 e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
 absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...],
@@ -115,6 +121,11 @@ class PoseColumn:
     column: str
     path: tuple[str, ...]
     axes: Literal["opencv", "forward_left_up"] = "opencv"
+    # `record`: the episode's first row, a JSON string or x, y, z, qw, qx, qy, qz, already in
+    # the base frame (on the link, moving); `world_to_camera` / `world_from_camera`: a
+    # flattened 3×4 or 4×4 matrix per frame in a world frame, placed in the base frame with
+    # the priors' `world_anchor`
+    layout: Literal["record", "world_to_camera", "world_from_camera"] = "record"
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +234,9 @@ class DatasetPriors:
     # Per-station overrides (raw priors fields `cameras`, `bodies`, set on top of the
     # dataset's, entry by entry): {station: {"cameras": {...}, "bodies": {...}}}
     stations: dict[str, JsonObject] = field(default_factory=dict)
+    # The camera on a known link that ties cameras recorded in a world frame (pose `layout`
+    # world_*) to the robot's base, per episode (`r4r.data.recorded`)
+    world_anchor: str | None = None
     # The raw dataset-level `cameras` and `bodies` (for merging station overrides)
     raw: JsonObject = field(default_factory=dict, repr=False, compare=False)
     notes: str = ""
@@ -307,6 +321,7 @@ def load_priors(root: Path) -> DatasetPriors:
         kinematics=_kinematics(raw.get("kinematics"), str(path)),
         robot_points=_robot_points(raw.get("robot_points", {}), str(path)),
         stations=raw.get("stations", {}),
+        world_anchor=raw.get("world_anchor"),
         raw={"cameras": raw.get("cameras", {}), "bodies": raw.get("bodies", {})},
         notes=raw.get("notes", ""),
     )
@@ -384,7 +399,12 @@ def _pose_column(raw: JsonObject | None, where: str) -> PoseColumn | None:
     if raw is None:
         return None
     _checked(raw, _keys(PoseColumn), f"{where}.pose")
-    return PoseColumn(raw["column"], tuple(raw.get("path", ())), raw.get("axes", "opencv"))
+    return PoseColumn(
+        raw["column"],
+        tuple(raw.get("path", ())),
+        raw.get("axes", "opencv"),
+        raw.get("layout", "record"),
+    )
 
 
 def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior]:

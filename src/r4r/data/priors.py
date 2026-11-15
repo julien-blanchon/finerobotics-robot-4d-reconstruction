@@ -64,7 +64,12 @@ top-level `world_anchor` names
 a camera with a `link` and such a column: per episode, hand-eye between that link's forward
 kinematics and the anchor's recorded motion gives the base in the world, and every such camera
 is placed in the base frame (on its link, moving) at the episode's middle frame
-(`r4r.data.recorded`; molmobot records cameras in its houses, not the base). An episodes
+(`r4r.data.recorded`; molmobot records cameras in its houses, not the base). With
+`"layout": "base_from_camera"` the per-frame records are already in the robot's base frame, up
+to a constant `offset` (x, y, z of the record's origin in the description's base frame): the
+episode's pose is the robust median over its frames, on the camera's link when it moves
+(AgiBot's jittering hand extrinsics); `start` and `order` (`matrix` or `rotation_translation`)
+pick a camera's 12 values out of a feature shared by several cameras. An episodes
 table pose takes precedence. `ignore` leaves a camera out (one that rides on no robot body,
 e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
 absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...],

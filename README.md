@@ -85,18 +85,35 @@ r4r overlay sol.pt episode.mp4 --episode 0   # a video of one solved episode
 r4r rig     droid/datasets/droid --episodes 150 401 1000 300 --stride 2 --write  # once it looks right
 r4r reconstruct droid/datasets/droid out/ --episodes 0 1 2
 r4r reconstruct syngrasp-1b/datasets/syngrasp-1b out/ --shard 3/64  # all episodes, worker 3 of 64
+r4r reconstruct droid/datasets/droid --plan  # routes and CPU / GPU hours, nothing run
+r4r stations openneodata/datasets/arx5 third_view --write  # setups from thumbnails (CPU)
 ```
 
 `reconstruct` writes `out/<family>/<dataset>/shard-<k>.parquet`, one file per `--shard-size`
 episodes (default 1000) of the selection (`--episodes`, default all): one row per frame and
 camera with `episode, frame, camera`, `world_from_camera` (4×4 row-major, robot base frame, OpenCV
-axes) and `fx, fy, cx, cy`. The schema metadata `r4r.episodes` (JSON) says per episode whether it
-was solved, its median reprojection error and inlier share, or the error that stopped it.
+axes) and `fx, fy, cx, cy`. The schema metadata `r4r.episodes` (JSON) says per episode its
+route, fit check and errors, or the error that stopped it.
 
-- **No solve when nothing is free:** cameras recorded for the episode (episodes table, recorded
-  column) or held by the priors, focals known, no free body, kinematics held. Poses are then
-  forward kinematics × mount, without reading the video (SynGrasp-1B: ~4 ms per episode).
-  `--solve` solves those too.
+Each episode takes the cheapest route its unknowns allow (`r4r.plan`): values of dataset or
+station scope are held once `r4r rig --write` wrote them (or recorded); only episode-scope ones
+stay free.
+
+| route | when | cost (measured) |
+|---|---|---|
+| fast | everything held or recorded (a moving base on its odometry with a fitted `base_odometry.correction`, or a recorded pose) | forward kinematics × mount, no video: 13-40 ms CPU per episode |
+| light | episode-scope 6-DoF unknowns with a start (a re-placed robot base, a re-placed static camera), or a real episode the fit check flags | 6 bursts of 16 frames decoded alone, KLT + SIFT links, LM on those unknowns only: 5-9 s CPU |
+| full | its setup was never calibrated, or an unknown has no start | the whole rig: ~0.36 GPU s per second of video |
+
+- **Fit check:** real episodes holding a recorded episode-scope camera (DROID's per-episode
+  calibration) are checked on the bursts: the epipolar distance of verified matches between
+  the held cameras; above 25 px the record is freed and solved light (`--check on/off/auto`).
+- **`--plan`:** counts the routes over a dataset from its priors and episodes table alone, and
+  estimates CPU and GPU hours (calibrating each uncalibrated setup once included).
+- **`r4r stations`:** runs of episodes with one placement of a camera that is not on the robot,
+  from two thumbnails per episode (~30 ms per episode); `--write` stores them as the `station`
+  column of the episodes table.
+- `--solve` solves every episode in full.
 - **Resumable:** a shard is written once, atomically; shards already written are skipped.
 - **Spread over processes:** `--shard i/n` takes the shards `k` with `k mod n = i`, e.g. a
   Slurm array: `--shard $SLURM_ARRAY_TASK_ID/$SLURM_ARRAY_TASK_COUNT`.

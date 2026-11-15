@@ -116,10 +116,14 @@ def keyframe_episode[C: IntVar, T: IntVar](
     links = light.burst_links(videos, sizes, intrinsics, lens, static.tolist(), config)
     held = held_poses(robot, episode, names)
     summary: dict[str, object] = {"links": len(links.view_a)}
+    view_camera = torch.arange(len(names)).repeat_interleave(len(steps))
+
+    def checked_at(poses: Tensor[[C, T, *Mat4x4]]) -> light.FitCheck:
+        at_views = rearrange(poses[:, steps], "c k i j -> (c k) i j")
+        return light.check(links, at_views, view_camera, intrinsics, lens, static)
+
     if checked:
-        view_camera = torch.arange(len(names)).repeat_interleave(len(steps))
-        at_views = rearrange(held[:, steps], "c k i j -> (c k) i j")
-        fit = light.check(links, at_views, view_camera, intrinsics, lens, static)
+        fit = checked_at(held)
         summary["check_px"] = _rounded(fit.median_px)
         if fit.flagged(config):
             summary["flagged"] = True
@@ -144,6 +148,8 @@ def keyframe_episode[C: IntVar, T: IntVar](
         repeat(mounts, "c i j -> c t i j", t=len(episode.qpos)),
         light.motion_at(solving, base, motion),
     )
+    if checked:
+        summary["check_after_px"] = _rounded(checked_at(poses).median_px)
     return poses, summary
 
 

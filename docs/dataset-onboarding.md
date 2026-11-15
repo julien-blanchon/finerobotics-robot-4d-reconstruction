@@ -40,7 +40,7 @@ Only then calibrate: the solver refines good priors; it does not rescue bad ones
 | 6 | whole rig | `r4r rig <dataset> --episodes … --groups 2 --save sol.pt` | groups agree (mm, 0.1° for dataset scope) |
 | 7 | **overlay** | `r4r overlay sol.pt check.png`, `… episode.mp4 --episode 0` | robot on the real one, every camera, several episodes |
 | 8 | write | `r4r rig … --write`, `r4r export <dataset> robot.xml` | priors and record committed; metadata bugs in `priors/ISSUES.md` |
-| 9 | every episode | `r4r reconstruct <dataset> out/ [--shard i/n]` | one parquet per shard of episodes, residuals per episode in its metadata |
+| 9 | every episode | `r4r reconstruct <dataset> --plan`, then `r4r reconstruct <dataset> out/ [--shard i/n]` | the plan says fast/light for (nearly) every episode; one parquet per shard, route and check per episode in its metadata |
 
 ## Checklist
 
@@ -57,6 +57,8 @@ Only then calibrate: the solver refines good priors; it does not rescue bad ones
 | per-episode intrinsics or poses | several stations, per-unit calibrations, a dataset's own extrinsics | `<dataset>.episodes.parquet` (below) |
 | lens | pinhole or fisheye, recorded coefficients | `lens`, `distortion`, `distortion_range` |
 | scope | bolted (dataset), re-placed (episode), driving (frame) | `scope` on cameras and bodies |
+| setups | sessions where a static camera stays put: `r4r stations <dataset> <camera> --write` | `station` column of the episodes table; values per station in `stations` |
+| odometry gain | `r4r rig --write` on driving episodes fits `base_odometry.correction` | then reconstruct holds the base on its record |
 | second arm | its base placement is usually a guess | `bodies.<base>`: ranges, scope |
 | mobile base | does it move within episodes? where is its motion recorded? | `bodies.<root>` at frame scope, `base_odometry` |
 | anchor | keep one fixed arm or known camera | nothing free on it |

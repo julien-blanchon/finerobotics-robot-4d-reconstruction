@@ -137,9 +137,14 @@ Every camera is radially symmetric (`r4r.geometry.camera`): a ray at `s` from th
 |---|---|---|---|
 | 1 preparation (once per dataset) | priors good enough to run unattended | the agent: `inspect`, `sheet`, `links`, `preview`, `fit --shifts`, focal from records ([onboarding](dataset-onboarding.md)) | ✅ |
 | 2 setup calibration (once per setup) | dataset-scope values, ranges of episode-scope ones | `r4r rig` on 5–20 episodes; consensus; groups; `--write` | ✅ (⬜ window selection, held-out report) |
-| 3 per-episode processing | poses for every frame of every episode | `r4r reconstruct`: nothing free (cameras recorded or held, focals known): pose = FK × mount, no video read; else episode/frame-scope unknowns fitted within their ranges. Sharded output (`--shard-size`), resumable, `--shard i/n` per process | ✅ |
+| 3 per-episode processing | poses for every frame of every episode | `r4r reconstruct`, by route (`r4r.plan`): fast (every calibrated value held: FK × mount, no video read), light (episode-scope unknowns on 6 bursts of frames, CPU: `rago/light.py`), full (setup never calibrated: the whole rig). Fit check on real episodes; `--plan` for the cost; `r4r stations` for setups. Sharded output (`--shard-size`), resumable, `--shard i/n` per process | ✅ |
 | 4 dense reconstruction | depth for every pixel, 3D tracks, fused point cloud | ARROW per encoding, aligned to our cameras (one scale and pose per encoding) | ⬜ |
 
+- Stage 3 at scale: once a dataset's setups are calibrated, nearly every episode is fast
+  (milliseconds, no video) and the rest light (seconds of CPU); GPU only calibrates setups.
+  A mobile base is held on its record with a dataset-level `base_odometry.correction`
+  (`OdometryGain`: wheel scale, heading gain, yaw-rate bias), fitted once by `r4r rig --write`
+  against the bundle's free base.
 - Stage 4 compute, measured on one episode: ~15–20 GPU-minutes at depth stride 2
   (1–1.5 GPU-h at stride 1), i.e. 10–20 GPU-h per hour of video. Options: keyframes, lower
   resolution, or a lighter per-frame depth model scaled with our sparse points.

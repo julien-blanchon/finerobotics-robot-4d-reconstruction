@@ -95,7 +95,10 @@ def episode_unknowns(
     setup = focal + [f"{n}: {s.removeprefix('setup: ')}" for n, s in states if s[:6] == "setup:"]
     missing = [f"{n}: {s.removeprefix('missing: ')}" for n, s in states if s[:8] == "missing:"]
     if free and len(cameras) < 2:
-        missing.append("one camera: no matches between cameras for the light solve")
+        # Nothing to match it with, and a static camera's own tracks do not pin it (field
+        # notes): placed once per setup instead (`r4r stations`, then picks)
+        setup += [f"{n}: lone camera re-placed: place it per station" for n in free]
+        free = []
     recorded = [n for n, state in states if state == "recorded"]
     return Unknowns(tuple(free), tuple(setup), tuple(missing), tuple(recorded))
 
@@ -142,20 +145,24 @@ def _camera_state(priors: DatasetPriors, name: str, moving: bool, posed: bool) -
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Cost:
-    """Per-episode timings measured on this cluster (one CPU thread unless said; `r4r
-    reconstruct` on JUPITER login nodes, 2026-11-15)."""
+    """Per-episode timings measured with `r4r reconstruct` on a JUPITER login node (4 CPU
+    threads, 2026-11-15) and the share of real episodes the fit check flags."""
 
-    # Fast path: loading the state and forward kinematics, seconds per episode and per frame
-    fast_episode: float = 0.05
+    # Fast path: the state and forward kinematics (rby1, syngrasp, sim-sawyer: 13-40 ms per
+    # episode), seconds per episode and per frame
+    fast_episode: float = 0.03
     fast_frame: float = 2e-5
-    # Keyframes (decode, SIFT, matching), seconds per camera; the light LM, seconds
-    keyframes_camera: float = 0.25
-    light_solve: float = 0.6
-    # Full path: GPU seconds per second of video (KLT on CPU alongside, CPU seconds per camera
-    # and second of video)
+    # Bursts (decode, KLT, SIFT links), seconds per camera (DROID's check: 1.1 s, 3 cameras);
+    # the light LM and its extension to every frame (M1: 5 s per episode in all, DROID 9 s)
+    keyframes_camera: float = 0.35
+    light_solve: float = 4.0
+    # Real episodes the fit check flags (DROID: 12 of 34), solved light
+    flagged: float = 0.35
+    # Full path: GPU seconds per second of video (8-10 GPU s per 25 s episode; KLT on CPU
+    # alongside, CPU seconds per camera and second of video)
     full_gpu: float = 0.36
     full_cpu: float = 0.035
-    # One `r4r rig` on a sample of a setup (GPU seconds)
+    # One `r4r rig` on a sample of a setup (GPU seconds: 10-18 min measured)
     calibration_gpu: float = 900.0
 
 
@@ -217,6 +224,8 @@ def dataset_plan(
             cpu += count * cost.keyframes_camera * len(names)
         if route == "light":
             cpu += count * cost.light_solve
+        elif check:
+            cpu += count * cost.flagged * cost.light_solve
     gpu += len(stations) * cost.calibration_gpu
     hours = tables.info.get("total_frames", 0) / tables.fps / 3600 * len(selection)
     return DatasetPlan(

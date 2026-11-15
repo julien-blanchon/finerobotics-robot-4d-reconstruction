@@ -7,9 +7,10 @@ uncalibrated camera of the same robot; the warp at `u` is the point's pixel in t
     u' = w_ab(u),  kept when  c_ab(u) > certainty  and  ‖w_ba(u') − u‖ < cycle
 
 `c_ab` is RoMa's overlap probability; the forward-backward check drops points hidden or
-ambiguous in the target. Each target frame is matched with the reference frame of nearest
+ambiguous in the target. Each target frame is matched with the reference frames of nearest
 joint configuration (`‖q − q_ref‖`, radians and metres): the robot then looks most alike
-(gripper opening, wrist roll). The reference is cropped around its projected points (with a
+(gripper opening, wrist roll). With several, a point's pixel is the median over those where it
+passes, kept when they are a majority. The reference is cropped around its projected points (with a
 margin) so the robot fills the matched image.
 
 The pixels are picks (`r4r.data.priors.Pick`), as if clicked, for `r4r rig --picks`: a PnP-RANSAC
@@ -70,6 +71,9 @@ class TransferConfig:
     margin: float = 0.5
     # Target frames per episode, spread over its joint configurations
     frames: int = 8
+    # Reference frames matched with each target frame (nearest joint configurations); a point
+    # is kept where it passes the checks for a majority of them
+    references: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,15 +88,26 @@ class Reference[R: IntVar, NQ: IntVar, P: IntVar]:
 
 
 @dataclass(frozen=True, slots=True)
+class Matched[N: IntVar, NRef: IntVar, P: IntVar]:
+    """`P` points carried from `NRef` reference frames (`reference`, indices) into each of `N`
+    target frames: pixels, RoMa certainty, forward-backward distance (reference pixels) and
+    whether the reference sees the point."""
+
+    pixels: Tensor[[N, NRef, P, *UV]]
+    certainty: Tensor[[N, NRef, P]]
+    cycle: Tensor[[N, NRef, P]]
+    seen: Tensor[[N, NRef, P]]
+    reference: Tensor[[N, NRef]]
+
+
+@dataclass(frozen=True, slots=True)
 class Transferred[N: IntVar, P: IntVar]:
-    """`P` points in `N` target frames: pixels, RoMa certainty, forward-backward distance
-    (reference pixels), whether the point passed both checks, and the reference frame used."""
+    """`P` points in `N` target frames: pixel (median over the references that passed the
+    checks), how many passed, and whether that is a majority of the references."""
 
     pixels: Tensor[[N, P, *UV]]
-    certainty: Tensor[[N, P]]
-    cycle: Tensor[[N, P]]
+    votes: Tensor[[N, P]]
     kept: Tensor[[N, P]]
-    reference: Tensor[[N]]
 
 
 def project_points[T: IntVar, NQ: IntVar](
@@ -132,14 +147,15 @@ def spread_frames[T: IntVar, NQ: IntVar](qpos: Tensor[[T, NQ]], count: int) -> T
 
 
 def nearest[R: IntVar, N: IntVar, NQ: IntVar](
-    reference: Reference[R, NQ, int], qpos: Tensor[[N, NQ]]
-) -> Tensor[[N]]:
-    """For each joint configuration, the reference frame nearest to it among those that see
-    at least `MIN_SEEN` points."""
+    reference: Reference[R, NQ, int], qpos: Tensor[[N, NQ]], count: int
+) -> Tensor[[N, int]]:
+    """For each joint configuration, the `count` reference frames nearest to it (nearest
+    first) among those that see at least `MIN_SEEN` points."""
 
     distance = torch.cdist(qpos, reference.qpos.to(qpos))
     usable = reference.seen.sum(-1) >= MIN_SEEN
-    return distance.masked_fill(~usable.to(qpos.device), torch.inf).argmin(-1)
+    distance = distance.masked_fill(~usable.to(qpos.device), torch.inf)
+    return distance.topk(min(count, len(reference.qpos)), dim=-1, largest=False).indices
 
 
 def read_warp[B: IntVar, P: IntVar](
@@ -190,28 +206,29 @@ def crop_box(
     return round(x0), round(y0), round(x0 + 2 * half_w), round(y0 + 2 * half_h)
 
 
-def transfer[N: IntVar, P: IntVar](
+def match_points[N: IntVar, NRef: IntVar, P: IntVar](
     model: RoMaV2,
     reference: Reference[int, int, P],
+    chosen: Tensor[[N, NRef]],
     targets: Tensor[[N, *RGB, int, int]],
-    target_qpos: Tensor[[N, int]],
-    config: TransferConfig,
-) -> Transferred[N, P]:
-    """The reference's points in each target frame (uint8), each matched with its nearest
-    reference frame (cropped to its seen points, resized to the target's size)."""
+    margin: float,
+) -> Matched[N, NRef, P]:
+    """Each target frame (uint8) matched with its `chosen` reference frames, each cropped to
+    its seen points (`crop_box`) and resized to the target's size."""
 
     device = next(model.parameters()).device
-    chosen = nearest(reference, target_qpos.to(reference.qpos)).cpu()
+    count = chosen.shape[1]
+    pairs = rearrange(chosen.cpu(), "n r -> (n r)").tolist()
     height, width = targets.shape[-2:]
     found, certainty, cycle = [], [], []
-    for start in range(0, len(targets), BATCH):
+    for start in range(0, len(pairs), BATCH):
         crops, pixels, zoom = [], [], []
-        for r in chosen[start : start + BATCH].tolist():
+        for r in pairs[start : start + BATCH]:
             x0, y0, x1, y1 = crop_box(
                 reference.pixels[r][reference.seen[r]],
                 (reference.frames.shape[-2], reference.frames.shape[-1]),
                 width / height,
-                config.margin,
+                margin,
             )
             image = reference.frames[r, :, y0:y1, x0:x1].to(device).float() / 255
             crops.append(
@@ -222,23 +239,60 @@ def transfer[N: IntVar, P: IntVar](
             offset = reference.pixels.new_tensor((x0, y0))
             pixels.append((reference.pixels[r] - offset + 0.5) * scale - 0.5)
             zoom.append(float(scale.mean()))
-        target = targets[start : start + BATCH].to(device).float() / 255
+        index = torch.arange(start, start + len(crops)) // count
+        target = targets[index].to(device).float() / 255
         encoding = model.encode(torch.cat((torch.stack(crops), target)))
         n = len(crops)
-        index = torch.arange(n, device=device)
+        a = torch.arange(n, device=device)
         matched = read_warp(
-            model.match(encoding[index], encoding[index + n]), torch.stack(pixels).to(device)
+            model.match(encoding[a], encoding[a + n]), torch.stack(pixels).to(device)
         )
         found.append(matched[0].cpu())
         certainty.append(matched[1].cpu())
         # Forward-backward distance back in reference pixels
         cycle.append(matched[2].cpu() / torch.tensor(zoom, dtype=matched[2].dtype)[:, None])
     like = reference.pixels
-    pixels_t = torch.cat(found).to(like)
-    certainty_t, cycle_t = torch.cat(certainty).to(like), torch.cat(cycle).to(like)
-    kept = reference.seen[chosen].to(like.device)
-    kept &= (certainty_t > config.certainty) & (cycle_t < config.cycle)
-    return Transferred(pixels_t, certainty_t, cycle_t, kept, chosen)
+
+    def per_target(parts: list[Tensor]) -> Tensor:  # [N · NRef, P, ...] → [N, NRef, P, ...]
+        return rearrange(torch.cat(parts).to(like), "(n r) ... -> n r ...", r=count)
+
+    return Matched(
+        per_target(found),
+        per_target(certainty),
+        per_target(cycle),
+        reference.seen[chosen.to(reference.seen.device)],
+        chosen,
+    )
+
+
+def pooled[N: IntVar, NRef: IntVar, P: IntVar](
+    matched: Matched[N, NRef, P], certainty: float, cycle: float
+) -> Transferred[N, P]:
+    """A point passes for one reference when it is seen there, `c > certainty` and the
+    forward-backward distance is below `cycle`; its pixel is the median over the references
+    where it passes, kept when they are a majority (`> NRef / 2`)."""
+
+    passed = matched.seen & (matched.certainty > certainty) & (matched.cycle < cycle)
+    masked = matched.pixels.masked_fill(~passed[..., None], torch.nan)
+    pixels = masked.nanmedian(dim=1).values
+    votes = passed.sum(1)
+    kept = 2 * votes > matched.reference.shape[1]
+    return Transferred(torch.nan_to_num(pixels), votes, kept)
+
+
+def transfer[N: IntVar, P: IntVar](
+    model: RoMaV2,
+    reference: Reference[int, int, P],
+    targets: Tensor[[N, *RGB, int, int]],
+    target_qpos: Tensor[[N, int]],
+    config: TransferConfig,
+) -> Transferred[N, P]:
+    """The reference's points in each target frame (uint8), from its `config.references`
+    reference frames of nearest joint configuration."""
+
+    chosen = nearest(reference, target_qpos.to(reference.qpos), config.references)
+    matched = match_points(model, reference, chosen, targets, config.margin)
+    return pooled(matched, config.certainty, config.cycle)
 
 
 def as_picks[N: IntVar, P: IntVar](

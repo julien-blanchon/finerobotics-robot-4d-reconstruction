@@ -713,6 +713,8 @@ class Picks:
     points: tuple[str, ...] = ()
     # Target frames per episode, spread over its joint configurations
     frames: int = 8
+    # Reference frames per target frame (nearest joint configurations; majority vote)
+    references_per_frame: int = 1
     # Decoding strides of the target and reference videos
     stride: int = 1
     reference_stride: int = 3
@@ -724,7 +726,6 @@ class Picks:
 
     def run(self) -> None:
         import json
-        import math
 
         import torch
 
@@ -734,7 +735,11 @@ class Picks:
         from r4r.rago.transfer import TransferConfig, as_picks, spread_frames, transfer
 
         config = TransferConfig(
-            certainty=self.certainty, cycle=self.cycle, margin=self.margin, frames=self.frames
+            certainty=self.certainty,
+            cycle=self.cycle,
+            margin=self.margin,
+            frames=self.frames,
+            references=self.references_per_frame,
         )
         source = dataset_root(self.reference_dataset or self.dataset)
         first = load_episode(source, self.references[0], decode=())
@@ -757,12 +762,9 @@ class Picks:
             moved = transfer(model, reference, stream.frames[chosen], qpos[chosen], config)
             found = as_picks(moved, names, number, self.camera, (chosen * self.stride).tolist())
             picks += found
-            kept = moved.kept
-            certainty = moved.certainty[kept]
             print(
-                f"episode {number}: {int(kept.sum())} points in {len(found)} of {len(chosen)} "
-                f"frames (median certainty "
-                f"{float(certainty.median()) if len(certainty) else math.nan:.2f})"
+                f"episode {number}: {int(moved.kept.sum())} points in {len(found)} of "
+                f"{len(chosen)} frames"
             )
         offsets = {n: p for n, p in zip(names, points, strict=True) if n in named}
         raw = {

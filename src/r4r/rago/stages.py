@@ -230,6 +230,7 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
     # 4-5. Bundles: all episodes, then groups. Known focals stay fixed; those found in stage 3
     # are refined
     frozen = _freeze_moving_mounts(robot, names, starts[0], _with_keypoints(episodes, names))
+    config = bundle_setting(robot, names, config)
     everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config, known_focal)
     group_fits = _group_bundles(
         frozen, episodes, merged, names, intrinsics, starts, config, known_focal
@@ -265,6 +266,19 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
         group_time_offsets=tuple(f.time_offset for f in fits),
         keypoint_error=everything.keypoint_error,
     )
+
+
+def bundle_setting(
+    robot: Robot[int, int, int], names: tuple[str, ...], config: RigConfig
+) -> RigConfig:
+    """`config` for the bundles of a rig: with no moving camera, tracks are not attached to
+    links. A track on the robot is then seen from fixed centres only, and attached to a link it
+    pulled good starts away (SynGrasp, one static camera: 6-11 cm starts ended 17-32 cm off;
+    Tien Kung 20 cm behind its by-eye pose): such a rig is placed by its robot keypoints."""
+
+    if any(robot.camera_body[robot.camera(n)] != 0 for n in names):
+        return config
+    return replace(config, bundle=replace(config.bundle, attach_links=False))
 
 
 def _with_keypoints(episodes: list[RigEpisode[int, int]], names: tuple[str, ...]) -> set[str]:

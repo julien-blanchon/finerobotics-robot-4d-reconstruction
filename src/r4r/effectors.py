@@ -19,8 +19,9 @@ a parallel gripper, the thumb–index fingertip distance `‖p_thumb − p_index
 Presets hold the geometry of common grippers and hands. Their bodies are regular expressions:
 `body` over the description, pads and fingertips over the bodies below it. Without an `ee`
 block in the priors, an arm is found where a preset matches (pads and fingertips included);
-of nested matches the deepest is kept. Geometry from the descriptions' own frames and meshes
-(collision vertices at the jaw tips and finger pads).
+of nested matches the deepest is kept; a matched pad or fingertip must end its branch of the
+tree (a jaw, a finger tip). Geometry from the descriptions' own frames and meshes (collision
+vertices at the jaw tips and finger pads).
 """
 
 from __future__ import annotations
@@ -76,7 +77,7 @@ PRESETS: dict[str, EffectorPrior] = {
     # each finger slides along the hand's y, touching at q = 0
     "franka_hand": EffectorPrior(
         type="parallel",
-        body="panda_hand$",
+        body="(panda|fr3)_hand$",
         position=(0.0, 0.0, 0.1034),
         orientation=IDENTITY,
         pads=(RobotPoint("leftfinger$"), RobotPoint("rightfinger$")),
@@ -242,8 +243,12 @@ def _find(robot: Robot[int, int, int], body: int, pattern: str) -> int | None:
 
 
 def _points_found(robot: Robot[int, int, int], body: str, prior: EffectorPrior) -> bool:
+    """Whether every pad and fingertip of `prior` is found below `body`, each on a body that
+    ends its branch (a jaw or a finger tip, not an arm link like `link7`)."""
+
     points = [*(prior.pads or ()), *(prior.fingertips or {}).values()]
-    return all(_find(robot, robot.body(body), p.body) is not None for p in points)
+    found = [_find(robot, robot.body(body), p.body) for p in points]
+    return all(f is not None and f not in robot.body_parent for f in found)
 
 
 def _resolved(robot: Robot[int, int, int], arm: str, prior: EffectorPrior) -> Effector:

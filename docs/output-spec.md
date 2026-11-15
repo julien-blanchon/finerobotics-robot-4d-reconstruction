@@ -124,7 +124,7 @@ against the description, and of nested matches the deepest is kept.
 
 | preset | body | `ee` origin in the body | jaws / fingers |
 |---|---|---|---|
-| `franka_hand` | `panda_hand` | 0.1034 m along z (`panda_hand_tcp`) | pads on the finger origins, touching at q = 0 |
+| `franka_hand` | `panda_hand`, `fr3_hand` | 0.1034 m along z (`panda_hand_tcp`) | pads on the finger origins, touching at q = 0 |
 | `robotiq_2f85` | `robotiq_85_base_link` | 0.1493 m along z (`robotiq_tcp`), closing along x | pads on the inner fingers (0.079 m open) |
 | `piper` | `*gripper_base` | 0.1358 m along z | `link7` / `link8` |
 | `arx_x5` | `*link6` | 0.1576 m along x | `link7` / `link8`, 0.0498 m apart when touching |

@@ -128,6 +128,9 @@ class RigConfig:
     groups: int = 2
     # Joint-encoder and video/joint time offsets refined in the bundles (None: held)
     kinematic: KinematicFreedom | None = None
+    # Per camera, the relative prior std of a known focal in the bundles (0: held; the priors'
+    # `focal_range`); None: known focals held
+    focal_ranges: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -769,6 +772,7 @@ def _bundle[C: IntVar](
         known_focal=known_focal,
         kinematic=config.kinematic,
         keypoints=keypoints,
+        focal_ranges=config.focal_ranges,
     )
 
 

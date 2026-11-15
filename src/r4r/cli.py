@@ -295,6 +295,15 @@ class Fit:
             )
 
 
+def focal_ranges(streams: tuple[CameraStream[int, int, int], ...]) -> tuple[float, ...]:
+    """Per camera, how far the bundles may refine a focal the priors give (relative std): its
+    `focal_range`; 0 (held) for focals recorded per episode or given without a range."""
+
+    return tuple(
+        0.0 if c.intrinsics is not None else float(c.prior.focal_range or 0.0) for c in streams
+    )
+
+
 def write_refusal(median_error: float) -> str | None:
     """Why a fitted mount must not be written to the priors (None: it may be). A NaN median
     means no reprojection measured the fit (e.g. a head camera still on the parked spans the
@@ -461,6 +470,7 @@ class Rig:
             link_every=self.every,
             groups=self.groups,
             kinematic=kinematic_freedom(loaded[0].priors, robot, self.stride),
+            focal_ranges=focal_ranges(streams),
         )
         fit = calibrate_rig(
             robot,

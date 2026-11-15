@@ -45,6 +45,8 @@ class CameraStream[T: IntVar, H: IntVar, W: IntVar]:
     mount: str | None  # link it is rigid on, when known
     side: str | None  # left, right, center (metadata, used as a sanity check)
     prior: CameraPrior
+    # Image height and width (pixels), known whether or not the frames are decoded
+    size: tuple[int, int]
     # Known intrinsics of this episode at the video resolution (per-episode table), if any
     intrinsics: Tensor[[*Mat3x3]] | None = None
     # Recorded pose in this episode (OpenCV axes), if any: a static camera's pose in the base

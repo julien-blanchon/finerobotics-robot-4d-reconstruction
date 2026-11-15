@@ -1,23 +1,23 @@
 """Load one episode of a LeRobot v3 dataset (finerobotics layout) into an `Episode`.
 
-The only module that imports LeRobot (optional `lerobot` group). finerobotics roots ship the
-robot description in `meta/robot/` and `meta/robot.json`, which maps state columns to
-description joints and may name camera links; camera features declare their role, mount
-(static/dynamic) and side. The dataset's priors (`priors.py`) override all of these.
+The only module that imports LeRobot (optional `lerobot` group), for video decoding only: the
+tables are read with pyarrow (`tables.py`), only the rows and columns an episode needs, and a
+root's metadata and priors once per process. finerobotics roots ship the robot description in
+`meta/robot/` and `meta/robot.json`, which maps state columns to description joints and may
+name camera links; camera features declare their role, mount (static/dynamic) and side. The
+dataset's priors (`priors.py`) override all of these.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import torch
-from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.video_utils import decode_video_frames
 
 from ..geometry import camera, se3
 from .episode import CameraStream, Episode, JointMap
@@ -25,12 +25,14 @@ from .priors import (
     PRIORS,
     CameraPrior,
     DatasetPriors,
+    EpisodeRecord,
     IntrinsicsColumn,
     JsonObject,
     PoseColumn,
     load_episode_record,
     load_priors,
 )
+from .tables import Column, LeRobotTables
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -46,6 +48,29 @@ FORWARD_LEFT_UP_FROM_OPENCV = torch.tensor(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _Root:
+    """What every episode of a root shares: its tables, `meta/robot.json` and priors."""
+
+    tables: LeRobotTables
+    robot: JsonObject
+    priors: DatasetPriors
+
+
+@functools.cache
+def _root(root: Path) -> _Root:
+    """A dataset root opened once per process (episodes of a run reuse its reads)."""
+
+    robot = json.loads((root / "meta" / "robot.json").read_text())
+    return _Root(LeRobotTables(root), robot, load_priors(root))
+
+
+def episode_count(root: Path) -> int:
+    """How many episodes the dataset root holds (`meta/info.json`)."""
+
+    return _root(root).tables.total_episodes
+
+
 def load_episode(
     root: Path, episode: int, stride: int = 1, decode: tuple[str, ...] | None = None
 ) -> Episode[int, int]:
@@ -54,39 +79,43 @@ def load_episode(
     Only the cameras in `decode` get frames (all when None); the others come with none.
     """
 
-    repo_id = f"local/{root.name}"
-    meta = LeRobotDatasetMetadata(repo_id, root=root)
-    rows = LeRobotDataset(repo_id, root=root, episodes=[episode], video_backend="pyav")
-    every = rows.hf_dataset.with_format("torch")
-    rows = every[::stride]
-    timestamps = rows["timestamp"].tolist()
-
-    robot = json.loads((root / "meta" / "robot.json").read_text())
+    opened = _root(root)
+    tables, robot = opened.tables, opened.robot
     record = load_episode_record(root, episode)
     # A station's own mounts and bodies (priors `stations`) on top of the dataset's
-    priors = load_priors(root).for_station(None if record is None else record.station)
+    priors = opened.priors.for_station(None if record is None else record.station)
+    keys = [
+        key
+        for key in tables.video_keys
+        if not tables.features[key].get("info", {}).get("is_depth_map", False)
+        and not priors.cameras.get(key.removeprefix(IMAGE_PREFIX), CameraPrior()).ignore
+    ]
+    feature = priors.state_feature or robot["state"]["feature"]
+    every = tables.rows(episode, _needed(keys, feature, priors, record))
+    timestamps = cast("Tensor", every["timestamp"])[::stride].tolist()
+
     links = {c["key"]: c["urdf_link"] for c in robot.get("cameras", [])}
+    files = tables.files(episode) if decode is None or decode else None
     cameras = []
-    for key in meta.video_keys:
-        if meta.features[key].get("info", {}).get("is_depth_map", False):
-            continue
+    for key in keys:
         name = key.removeprefix(IMAGE_PREFIX)
-        frames = None if decode is None or name in decode else torch.empty(0, 3, 0, 0)
         prior = priors.cameras.get(name, CameraPrior())
-        if prior.ignore:
-            continue
-        stream = _camera(meta, root, episode, key, timestamps, links.get(key), prior, frames)
+        info = tables.features[key].get("info", {})
+        height, width = tables.features[key]["shape"][:2]
+        frames = torch.empty(0, 3, 0, 0)
+        if decode is None or name in decode:
+            assert files is not None
+            frames = _decode(*files.videos[key], timestamps, tables.fps)
+            height, width = frames.shape[-2:]
+        stream = _camera(key, info, links.get(key), prior, frames, (height, width))
         if record is not None and name in record.intrinsics:
             fx, fy, cx, cy = record.intrinsics[name]
             k = torch.tensor([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=torch.float64)
             stream = replace(stream, intrinsics=k)
         elif prior.intrinsics is not None:
-            size = meta.features[key]["shape"][:2]  # height, width
             recorded = prior.intrinsics.column
-            # A slice of a dataset is a dict of columns (the stubs also allow a Dataset)
-            table = cast("Mapping[str, Tensor]", every.select_columns([recorded])[:])
-            column = _columns(table, recorded)
-            k = _recorded_intrinsics(column, prior.intrinsics, size)
+            column = _columns(cast("Mapping[str, Tensor]", every), recorded)
+            k = _recorded_intrinsics(column, prior.intrinsics, tables.features[key]["shape"][:2])
             stream = replace(stream, intrinsics=k)
         # A static camera's pose in the base frame, or a moving camera's mount on its link
         if record is not None and name in record.poses:
@@ -95,19 +124,14 @@ def load_episode(
             position = torch.tensor([x, y, z], dtype=torch.float64)
             stream = replace(stream, pose=se3.from_rotation_translation(rotation, position))
         elif prior.pose is not None:
-            # One row of a dataset is a dict of values; this column holds JSON text
-            row = cast("Mapping[str, str]", every.select_columns([prior.pose.column])[0])
-            text = row[prior.pose.column]
+            # This column holds JSON text: the episode's first row
+            text = cast("list[str]", every[prior.pose.column])[0]
             stream = replace(stream, pose=recorded_pose(text, prior.pose))
         cameras.append(stream)
-    feature = priors.state_feature or robot["state"]["feature"]
-    # The whole episode's columns (a slice of a dataset is a dict of columns)
-    state, base_motion = _measurements(
-        cast("Mapping[str, Tensor]", every[:]), priors, feature, stride
-    )
+    state, base_motion = _measurements(every, priors, feature, stride)
     return Episode(
         name=f"{root.name}/episode_{episode:06d}",
-        fps=meta.fps / stride,
+        fps=tables.fps / stride,
         state=state,
         joints=priors.joint_map(_joints(robot, priors.replaced)),
         robot=_description(root, robot, priors),
@@ -118,8 +142,44 @@ def load_episode(
     )
 
 
+def _decode(
+    path: Path, start: float, timestamps: list[float], fps: float
+) -> Tensor[[int, *RGB, int, int]]:
+    """uint8 frames of a video file at `start + t` for each episode timestamp `t` (seconds),
+    each within half a frame period."""
+
+    from lerobot.datasets.video_utils import decode_video_frames
+
+    times = [start + t for t in timestamps]
+    return decode_video_frames(path, times, 1 / fps / 2, "pyav", return_uint8=True)
+
+
+def _needed(
+    keys: list[str],
+    feature: str | tuple[str, ...],
+    priors: DatasetPriors,
+    record: EpisodeRecord | None,
+) -> list[str]:
+    """The data columns an episode needs: timestamps, the state, the base's odometry and the
+    cameras' recorded intrinsics and poses that no episodes table gives."""
+
+    names = ["timestamp", *((feature,) if isinstance(feature, str) else feature)]
+    odometry = priors.base_odometry
+    if odometry is not None:
+        names += (odometry.feature,) if isinstance(odometry.feature, str) else odometry.feature
+        names += [odometry.speed_feature] if odometry.speed_feature else []
+    for key in keys:
+        name = key.removeprefix(IMAGE_PREFIX)
+        prior = priors.cameras.get(name, CameraPrior())
+        if prior.intrinsics is not None and (record is None or name not in record.intrinsics):
+            names.append(prior.intrinsics.column)
+        if prior.pose is not None and (record is None or name not in record.poses):
+            names.append(prior.pose.column)
+    return list(dict.fromkeys(names))
+
+
 def _measurements(
-    every: Mapping[str, Tensor], priors: DatasetPriors, feature: str | tuple[str, ...], stride: int
+    every: Mapping[str, Column], priors: DatasetPriors, feature: str | tuple[str, ...], stride: int
 ) -> tuple[Tensor[[int, int]], Tensor[[int, *Mat4x4]] | None]:
     """The robot's state and base motion at every `stride`-th frame of the episode `every`.
 
@@ -228,23 +288,13 @@ def _base_motion(priors: DatasetPriors, rows: Mapping[str, Tensor]) -> Tensor[[i
 
 
 def _camera(
-    meta: LeRobotDatasetMetadata,
-    root: Path,
-    episode: int,
     key: str,
-    timestamps: list[float],
+    info: JsonObject,
     link: str | None,
     prior: CameraPrior,
-    frames: Tensor[[int, *RGB, int, int]] | None,
+    frames: Tensor[[int, *RGB, int, int]],
+    size: tuple[int, int],
 ) -> CameraStream[int, int, int]:
-    info = meta.features[key].get("info", {})
-    if frames is None:
-        assert meta.episodes is not None, f"{root}: episode metadata missing"
-        start = meta.episodes[episode][f"videos/{key}/from_timestamp"]
-        path = root / meta.get_video_file_path(episode, key)
-        frames = decode_video_frames(
-            path, [start + t for t in timestamps], 1 / meta.fps / 2, "pyav", return_uint8=True
-        )
     moving = info.get("camera.mount") == "dynamic"
     if prior.mount is not None:
         moving = prior.mount == "moving"
@@ -259,6 +309,7 @@ def _camera(
         mount=mount,
         side=info.get("camera.side"),
         prior=prior,
+        size=size,
     )
 
 

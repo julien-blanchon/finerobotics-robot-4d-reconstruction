@@ -69,7 +69,7 @@ Python 3.13. A dataset is named by its root: an absolute path, or a path relativ
 | `links` | motion evidence for the body each camera rides on (static or moving) | text |
 | `preview` | the description drawn at the recorded joints, cameras from the priors, **no solve** | PNG / MP4 |
 | `fit` | one moving camera: its body, mount and focal; `--shifts` measures the video/state lag | text, `--write` |
-| `rig` | the whole rig in 5 stages (below), checked by groups of episodes | text, `--write`, `--save` |
+| `rig` | the whole rig in 5 stages (below), checked by groups of episodes; `--picks` clicked robot points for cameras the scene cannot pin | text, `--write`, `--save` |
 | `overlay` | the robot drawn with a saved solution over every camera | PNG / MP4 |
 | `export` | the description (MJCF) with every known camera placed and each range | XML |
 | `focal` | a focal-length draft from ARROW (gen2 adapter) when nothing is recorded; GPU | text |

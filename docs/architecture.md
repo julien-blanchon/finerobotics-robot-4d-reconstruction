@@ -22,7 +22,7 @@ leave out is a parameter of the robot description, with a **value** (best known 
 | joint-encoder and sub-frame time offsets | dataset | ✅ `kinematics` in the priors, refined in every `r4r rig` bundle |
 | focal length | dataset (episode for randomising sims) | ✅ prior + fit; ✅ `r4r focal` draft (optional) |
 | moving-camera mount (link, pose) | dataset (episode when recorded per episode) | ✅ search + bundle + episode consensus |
-| static-camera pose | dataset or episode | ✅ PnP on moving-camera points, or a recorded pose, + bundle |
+| static-camera pose | dataset or episode | ✅ PnP on moving-camera points or robot keypoints, or a recorded pose, + bundle |
 | arm-base placement (bimanual) | dataset or episode | ✅ free bodies, written back to the priors |
 | robot base pose | frame | ✅ free body per frame, started from recorded odometry (`base_odometry`); ⬜ legged odometry for humanoids |
 | lens distortion | dataset | ✅ prior + bundle refinement; ⬜ AnyCalib initialiser |
@@ -59,9 +59,24 @@ solver refuses a free mount together with a free body above it; `r4r rig` solves
 |---|---|---|---|
 | 1 mounts | each moving camera's own video | its mount (and focal, distortion), frozen | KLT, batched search, bundle, consensus |
 | 2 tracks | every camera, per episode | multi-camera tracks | KLT + RoMa v2 links every `--every` timesteps |
-| 3 static starts | points triangulated by the moving cameras | each static camera's start, per episode | PnP or recorded pose; consensus; > 10 m rejected |
+| 3 static starts | points triangulated by the moving cameras; picked robot points | each static camera's start, per episode | PnP or recorded pose; consensus; > 10 m rejected |
 | 4 bundle | all episodes | free bodies, static cameras, offsets | kinematic bundle (LM) |
 | 5 groups | separate groups of episodes | disagreement per free body | the same bundle per group |
+
+Robot keypoints (`rago/keypoints.py`) place cameras the scene cannot: a static camera with no
+moving camera to triangulate for it, a head camera that never moves relative to the base, a
+wrist that sees the other arm but not its own gripper. A keypoint is a pixel clicked on a
+known robot point (`r4r rig --picks`), whose 3D position is FK of the point:
+
+- start: PnP on the picks, in the frame of the body the camera rides on (stage 1 for a moving
+  camera, pooled over episodes, instead of the search; stage 3 for a static one);
+- refinement: a reprojection residual in the bundles, next to the tracks; a moving mount with
+  keypoints stays free within its priors' ranges.
+
+A rig with no moving camera attaches no track to a link: seen from fixed centres only, such
+tracks pulled good starts 10–80 cm away (SynGrasp, Tien Kung). Pixels found automatically (KLT
+following picks, seeds where a start projects the points) were tried against SynGrasp's
+recorded cameras and dropped: no gain, or worse starts (`keypoints.py`, module doc).
 
 On a mobile base, stage 1 uses each episode's longest span where the record says the base is
 parked (≥ 20 timesteps), stage 3 places static cameras with the base moved, and the bundle

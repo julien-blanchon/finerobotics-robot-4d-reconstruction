@@ -93,6 +93,36 @@ One row per episode and camera, read by the loader ✅:
 | `station` | the setup; `r4r rig` refuses episodes from several stations |
 | `x, y, z, qw, qx, qy, qz` | static camera: its pose in the base frame (OpenCV axes), where `r4r rig` starts it instead of PnP; moving camera: its mount on its link in that episode |
 
+### Cameras the scene cannot pin: robot keypoints
+
+Static-only rigs, fixed head cameras, a wrist that sees the other arm: click a few robot points
+in a few frames and pass them to `r4r rig --picks picks.json` ✅. A point is a body's name (its
+origin) or a named point of the priors or the picks file:
+
+```json
+{"points": {"tip": {"body": "panda_hand", "offset": [0, 0, 0.1034]}},
+ "picks": [{"episode": 0, "camera": "front", "frame": 42,
+            "pixels": {"tip": [120.5, 88.0], "panda_link4": [101.0, 60.5]}}]}
+```
+
+- `frame` is the video's own frame index (a multiple of `--stride`); points can also be named
+  once in the priors' top-level `robot_points`.
+- Click where the point is, not where a surface is: a joint origin is on its axis (the centre
+  of the joint housing), a tip between the fingers. The description's gripper must be the real
+  one for gripper points.
+- Enough: 8 or more picks per camera and episode, over 4–5 frames, spread over the arm and off
+  its plane. Against recorded cameras (clicks simulated with 2 px noise, one static camera per
+  episode solved alone):
+
+  | dataset | camera-episodes | picks | error median (p90, max) | no start |
+  |---|---|---|---|---|
+  | SynGrasp-1B, 256² | 31 | 8–20 | 1.7 cm / 1.1° (3.6 cm / 2.5°, 5.0 cm) | 1 |
+  | SynGrasp-1B, 256² | 9 | 2–7 | 6–7 picks: 10–13 cm; fewer: none | 2 |
+  | maniskill-sim, 256², f 128 | 9 | 25 | 1.4 cm / 1.4° (2.6 cm / 1.7°) | 0 |
+
+  With 4 px click noise maniskill gave 4.1 cm / 4.2°: click carefully on wide views.
+- Clicks are PnP starts and bundle residuals. Overlay afterwards, as always.
+
 PnP on robot tracks alone can land a camera far off and still fit (DROID: exteriors below the
 table at 0.86 px). Images alone do not pin a per-episode mount (RB-Y1: a wrist 25° off at 0.7 px).
 A moving camera with per-episode pose columns gets `"scope": "episode"` and a tight range.

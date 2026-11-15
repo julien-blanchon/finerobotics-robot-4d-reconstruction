@@ -13,6 +13,10 @@ with `P_m` the view's pose (`world_from_view`, in the track's body frame), `π_K
 projection, `p_m` the observed pixel, `u` the camera's pixel unit (its initial focal: `r` is
 in normalised image units), `δ` = `cauchy` and `V` the number of views.
 
+Robot keypoints (`keypoints.Keypoints`, picked robot points) add residuals of the same form,
+`r_k = (π_K(P_k⁻¹ W_b(q_t) p_k) − u_k) / u_cam`, the point known instead of triangulated,
+weighing `keypoint_weight` times their own weight.
+
 A static track lives in the world frame. A moving track (a point on the robot, or on a grasped
 object) is rigid with some link: expressed in that link's frame its point is constant, so the
 same triangulation runs on the rays carried into the link frame by forward kinematics. Each
@@ -39,6 +43,7 @@ import torch.nn.functional as F
 
 from r4r.geometry import camera, se3
 
+from . import keypoints as robot_keypoints
 from .rig import MOTION_THRESHOLD, KinematicFreedom, Rig
 from .solver import LMConfig, levenberg_marquardt, supports
 
@@ -50,6 +55,7 @@ if TYPE_CHECKING:
 
     from r4r.types import UV, Mat3x3, Mat4x4
 
+    from .keypoints import Keypoints
     from .lens import Lens
     from .robot import Robot
     from .tracks import Tracks
@@ -90,6 +96,9 @@ class BundleConfig:
     # else Adam; "adam": always Adam (`iterations` steps)
     optimizer: str = "lm"
     lm: LMConfig = field(default_factory=LMConfig)
+    # Weight of a robot keypoint observation relative to a track observation: a few hundred
+    # keypoints against ~10⁵ track observations, each a known point in metres
+    keypoint_weight: float = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +130,8 @@ class BundleResult[C: IntVar, V: IntVar, T: IntVar, L: IntVar]:
     time_offset: float
     # Distortion per camera with its corrections (None: ideal pinholes)
     lens: Lens[C] | None = None
+    # Median reprojection error of the robot keypoints (pixels; NaN without keypoints)
+    keypoint_error: float = math.nan
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +158,7 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
     bodies_at: Tensor[[int, T, *Mat4x4]] | None = None,
     kinematic: KinematicFreedom | None = None,
     known_focal: tuple[bool, ...] | None = None,
+    keypoints: Keypoints[int] | None = None,
 ) -> BundleResult[C, V, T, L]:
     """Refine free mounts and focal lengths by robust reprojection of triangulated tracks.
 
@@ -156,7 +168,8 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
     per camera and timestep (episode-scope cameras placed differently in each episode);
     `bodies_at [B, T]` optional starting corrections of the free bodies (e.g. odometry).
     Cameras with `known_focal` keep their focal length. `kinematic`: joint and time offsets to
-    refine (`rig.KinematicFreedom`).
+    refine (`rig.KinematicFreedom`). `keypoints`: robot points seen by the cameras (camera
+    and timestep of each must be a view).
     """
 
     t = tracks
@@ -187,9 +200,10 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
             return attach(rig, t, obs, track_moving, candidates, config.cauchy, config.outlier_cost)
 
     track_body = assign()
+    seen = None if keypoints is None else _Seen.of(t, keypoints.to(qpos), config)
     if config.optimizer == "lm" and supports(rig):
-        history = _levenberg_marquardt(rig, t, obs, assign, track_body, config)
-        return _result(rig, t, obs, names, config, assign, history)
+        history = _levenberg_marquardt(rig, t, obs, assign, track_body, config, seen)
+        return _result(rig, t, obs, names, config, assign, history, seen)
     optimizer = torch.optim.Adam(rig.parameters(), lr=config.learning_rate)
     schedule = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda step: 0.5 * (1 + math.cos(math.pi * step / config.iterations))
@@ -201,7 +215,14 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
         body = track_body[obs.track]
         weight = torch.where(body >= 0, obs.weight, 0.0)
         error, valid, _ = reprojection(rig, t, obs, body.clamp_min(WORLD))
-        data = (cauchy(error, config.cauchy) * weight * valid).sum() / (weight * valid).sum()
+        robust = (cauchy(error, config.cauchy) * weight * valid).sum()
+        total = (weight * valid).sum()
+        if seen is not None:
+            difference, in_front = seen.residuals(rig, t)
+            w = seen.weight * in_front
+            robust = robust + (cauchy(difference.norm(dim=-1), config.cauchy) * w).sum()
+            total = total + w.sum()
+        data = robust / total
         prior = rig.prior() / len(t.view_time)
         loss = data + prior
         optimizer.zero_grad()
@@ -209,7 +230,46 @@ def bundle_adjust[M: IntVar, V: IntVar, C: IntVar, T: IntVar, L: IntVar](
         optimizer.step()
         schedule.step()
         history.append(torch.stack((loss, data, prior)).detach())
-    return _result(rig, t, obs, names, config, assign, torch.stack(history))
+    return _result(rig, t, obs, names, config, assign, torch.stack(history), seen)
+
+
+def _views(tracks: Tracks[int, int, int]) -> Tensor[[int, int]]:
+    """View index of each (camera, timestep), −1 where none."""
+
+    views = torch.full(
+        (int(tracks.view_camera.max()) + 1, int(tracks.view_time.max()) + 1),
+        -1,
+        dtype=torch.long,
+        device=tracks.view_time.device,
+    )
+    views[tracks.view_camera, tracks.view_time] = torch.arange(
+        len(tracks.view_time), device=views.device
+    )
+    return views
+
+
+@dataclass(frozen=True, slots=True)
+class _Seen[K: IntVar]:
+    """Robot keypoints ready for the bundle: each observation's view and weight."""
+
+    keypoints: Keypoints[K]
+    view: Tensor[[K]]
+    weight: Tensor[[K]]
+
+    @staticmethod
+    def of(
+        tracks: Tracks[int, int, int], keypoints: Keypoints[K], config: BundleConfig
+    ) -> _Seen[K]:
+        view = _views(tracks)[keypoints.camera, keypoints.time]
+        assert bool((view >= 0).all()), "every robot keypoint must be seen in a view"
+        return _Seen(keypoints, view, keypoints.weight * config.keypoint_weight)
+
+    def residuals(
+        self, rig: Rig[int, int, int], tracks: Tracks[int, int, int]
+    ) -> tuple[Tensor[[K, *UV]], Tensor[[K]]]:
+        k = tracks.view_intrinsics(rig.intrinsics())[self.view]
+        world = rig.world_from_body()
+        return robot_keypoints.residuals(rig, self.keypoints, k, world, MIN_DEPTH)
 
 
 def _levenberg_marquardt[M: IntVar](
@@ -219,25 +279,37 @@ def _levenberg_marquardt[M: IntVar](
     assign: Callable[[], Tensor[[int]]],
     track_body: Tensor[[int]],
     config: BundleConfig,
+    seen: _Seen[int] | None = None,
 ) -> Tensor[[int, 3]]:
-    """The same objective as the Adam loop, minimised by `solver.levenberg_marquardt`."""
+    """The same objective as the Adam loop, minimised by `solver.levenberg_marquardt`.
+    Keypoint observations follow the tracks' (each its own track: no triangulation)."""
 
     state = {"body": track_body[obs.track]}
 
-    def residual_fn() -> tuple[Tensor[[M, *UV]], Tensor[[M]]]:
+    def residual_fn() -> tuple[Tensor[[int, *UV]], Tensor[[int]]]:
         difference, valid, _ = residuals(rig, t, obs, state["body"].clamp_min(WORLD))
-        return difference, valid
+        if seen is None:
+            return difference, valid
+        more, in_front = seen.residuals(rig, t)
+        return torch.cat((difference, more)), torch.cat((valid, in_front))
 
-    def weight_fn(valid: Tensor[[M]]) -> Tensor[[M]]:
-        return torch.where(state["body"] >= 0, obs.weight, 0.0) * valid
+    def weight_fn(valid: Tensor[[int]]) -> Tensor[[int]]:
+        weight = torch.where(state["body"] >= 0, obs.weight, 0.0)
+        if seen is not None:
+            weight = torch.cat((weight, seen.weight))
+        return weight * valid
 
     def reassign() -> None:
         state["body"] = assign()[obs.track]
 
-    time = t.view_time[obs.view]
+    time, track = t.view_time[obs.view], obs.track
+    if seen is not None:
+        time = torch.cat((time, seen.keypoints.time))
+        own = obs.count + torch.arange(len(seen.view), device=track.device)
+        track = torch.cat((track, own))
     steps = len(t.view_time)
     return levenberg_marquardt(
-        rig, residual_fn, weight_fn, time, obs.track, steps, config.cauchy, config.lm, reassign
+        rig, residual_fn, weight_fn, time, track, steps, config.cauchy, config.lm, reassign
     )
 
 
@@ -249,6 +321,7 @@ def _result[V: IntVar, C: IntVar, T: IntVar, L: IntVar](
     config: BundleConfig,
     assign: Callable[[], Tensor[[int]]],
     history: Tensor[[int, 3]],
+    seen: _Seen[int] | None = None,
 ) -> BundleResult[C, V, T, L]:
     with torch.no_grad():
         track_body = assign()
@@ -265,12 +338,19 @@ def _result[V: IntVar, C: IntVar, T: IntVar, L: IntVar](
         per_camera = torch.zeros(len(names), dtype=robust.dtype, device=robust.device)
         weight_sum = torch.zeros_like(per_camera).index_add(0, camera, obs.weight)
         per_camera = per_camera.index_add(0, camera, robust) / weight_sum.clamp_min(1e-12)
+        keypoint_error = math.nan
+        if seen is not None:
+            difference, in_front = seen.residuals(rig, t)
+            pixels = difference.norm(dim=-1) * rig.pixel_unit[seen.keypoints.camera]
+            if bool(in_front.any()):
+                keypoint_error = float(pixels[in_front].median())
+        tracked = (error * unit)[valid]
         return BundleResult(
             body_from_camera=rig.mounts(),
             intrinsics=rig.intrinsics(),
             world_from_view=rig.camera_poses(t.view_camera, t.view_time),
             history=history,
-            median_error=float((error * unit)[valid].median()),
+            median_error=float(tracked.median()) if len(tracked) else math.nan,
             inlier_fraction=float((error[valid] < 3 * config.cauchy).float().mean()),
             score=score,
             camera_score=per_camera,
@@ -280,6 +360,7 @@ def _result[V: IntVar, C: IntVar, T: IntVar, L: IntVar](
             joint_offset=torch.where(rig.joint_std > 0, rig.joint_offset, 0.0).detach(),
             time_offset=float(torch.where(rig.time_std > 0, rig.time_offset, 0.0)),
             lens=rig.lens(),
+            keypoint_error=keypoint_error,
         )
 
 

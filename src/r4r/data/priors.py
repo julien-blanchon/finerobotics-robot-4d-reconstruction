@@ -44,7 +44,9 @@ how far it may vary; `aspect` (fy / fx, default 1) for non-square pixels.
 `lens` is `pinhole` (radial `distortion`: OpenCV's
 k1, k2, k3) or `fisheye` (Kannala–Brandt, OpenCV fisheye's k1..k4); `distortion_range` is the
 prior std of each coefficient when fitting refines them (0: held; default 0 when the
-coefficients are given, wide for a fisheye without them). `intrinsics` reads a camera's
+coefficients are given, wide for a fisheye without them). A static camera whose distortion is
+refined needs a known `focal` (an error otherwise: focal, distortion and distance trade
+off). `intrinsics` reads a camera's
 intrinsics from a column of the dataset itself, per episode (simulators that randomise the
 focal): `{"column": "publisher.<name>_intrinsics", "layout": "fx_fy_cx_cy" | "matrix",
 "size": [w, h], "resize": "stretch" | "height"}`: `size` is the resolution the values are
@@ -475,7 +477,7 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
                 name,
                 ", ".join(sorted(RANGE_KEYS)),
             )
-    return {
+    cameras = {
         name: CameraPrior(
             mount=c.get("mount"),
             link=c.get("link"),
@@ -496,6 +498,43 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
         )
         for name, c in raw.items()
     }
+    for name, camera in cameras.items():
+        _check_lens(camera, f"{where}: cameras.{name}")
+    return cameras
+
+
+# Coefficients of each lens model (OpenCV radial k1..k3, Kannala–Brandt k1..k4)
+LENS_COEFFICIENTS = {"pinhole": 3, "fisheye": 4}
+
+
+def _check_lens(camera: CameraPrior, where: str) -> None:
+    """Reject lens settings the fit cannot use: unknown models, too many or non-finite
+    coefficients, a negative or non-finite `distortion_range`, and a static camera whose
+    distortion is refined while its focal is unknown (focal, distortion and distance trade
+    off: nothing separates them)."""
+
+    size = LENS_COEFFICIENTS.get(camera.lens)
+    if size is None:
+        raise ValueError(f"{where}: lens {camera.lens!r}; known: {sorted(LENS_COEFFICIENTS)}")
+    given = camera.distortion or ()
+    if len(given) > size or not all(math.isfinite(k) for k in given):
+        raise ValueError(
+            f"{where}: distortion {list(given)}: a {camera.lens} lens takes at most {size} finite"
+            " coefficients"
+        )
+    spread = camera.distortion_range
+    if spread is not None and not (math.isfinite(spread) and spread >= 0):
+        raise ValueError(f"{where}: distortion_range {spread}: a finite std ≥ 0 (0 holds)")
+    # As `rago.lens.lens_from_priors`: a fisheye without coefficients is refined by default
+    unknown = camera.lens == "fisheye" and camera.distortion is None
+    refined = spread > 0 if spread is not None else unknown
+    known_focal = camera.focal is not None or camera.intrinsics is not None
+    if camera.mount == "static" and refined and not known_focal:
+        raise ValueError(
+            f"{where}: a static camera with refined distortion needs a known `focal` (focal,"
+            " distortion and distance trade off); give the focal or hold the distortion"
+            " (`distortion_range: 0`)"
+        )
 
 
 def _bodies(raw: Mapping[str, JsonObject], where: str) -> dict[str, BodyPrior]:

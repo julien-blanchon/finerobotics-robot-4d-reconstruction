@@ -36,9 +36,12 @@ COEFFICIENTS = 4
 MIN_RADIUS_SQUARED = 1e-24
 # Newton steps inverting d(s) (quadratic convergence from s = ρ: 6 is plenty in float64)
 NEWTON_STEPS = 6
-# A fisheye angle never exceeds this (rad); d'(s) is kept above MIN_SLOPE where the
-# polynomial folds back (outside the lens's valid field)
+# A fisheye angle never exceeds this (rad), a pinhole's radius on the z = 1 plane this (89.4°
+# off-axis); d'(s) is kept above MIN_SLOPE where the polynomial folds back (outside the lens's
+# valid field). A pixel past the fold (a barrel lens, k1 < 0, or a short focal) has no ray:
+# Newton then runs outwards, and unbounded it overflows into NaN rays and gradients
 MAX_ANGLE = math.pi
+MAX_RADIUS = 100.0
 MIN_SLOPE = 1e-6
 
 
@@ -96,7 +99,7 @@ def rays[Bs: IntTuple, N: IntVar](
     focal, centre = intrinsics[..., None, [0, 1], [0, 1]], intrinsics[..., None, :2, 2]
     xy = (pixels - centre) / focal
     rho = (xy**2).sum(-1).clamp_min(MIN_RADIUS_SQUARED).sqrt()
-    limit = torch.full_like(rho[..., 0], math.inf).masked_fill(fisheye, MAX_ANGLE)
+    limit = torch.full_like(rho[..., 0], MAX_RADIUS).masked_fill(fisheye, MAX_ANGLE)
     s = rho.detach()
     for _ in range(NEWTON_STEPS):
         s = _newton_step(distortion.detach(), s, rho.detach(), limit)

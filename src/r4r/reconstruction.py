@@ -213,6 +213,7 @@ def dataset_layout(
     from r4r.output import CameraInfo, aligned_joints, state_mapping
 
     names = aligned_joints(robot.joint_names, joints)
+    fitted = priors.kinematics
     cameras = tuple(
         CameraInfo(s.name, s.prior.lens, "moving" if s.moving else "static", s.role)
         for s in streams
@@ -223,7 +224,11 @@ def dataset_layout(
         joints=names,
         mobile=priors.base == "mobile" or moving_base(robot) is not None,
         action=joint_action(root),
-        mapping=state_mapping(names, joints),
+        mapping=state_mapping(names, joints, {} if fitted is None else fitted.offsets),
+        lag={
+            "state_shift": float(priors.state_shift),
+            "time_offset": 0.0 if fitted is None else fitted.time_offset,
+        },
     )
 
 

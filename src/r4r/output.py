@@ -80,6 +80,8 @@ class Layout:
     action: bool  # whether `action_aligned` is written
     # Per `state_aligned` entry: its raw state column and the map to it (reversible)
     mapping: tuple[dict[str, object], ...] = field(default=())
+    # The lag correction: `state_shift` (frames, whole) and the fitted `time_offset` (frames)
+    lag: dict[str, float] = field(default_factory=dict)
 
     def features(self) -> dict[str, dict[str, object]]:
         """LeRobot feature entries (`dtype`, `shape`, `names`, `info`) of the r4r columns."""
@@ -147,15 +149,19 @@ class Layout:
                 "features": self.features(),
                 "cameras": self.camera_info(),
                 "state_mapping": list(self.mapping),
+                "lag_frames": self.lag,
                 "action_aligned": self.action,
                 "robot": {"mobile": self.mobile},
             }
         )
 
 
-def state_mapping(joints: tuple[str, ...], maps: tuple[JointMap, ...]) -> tuple[dict, ...]:
+def state_mapping(
+    joints: tuple[str, ...], maps: tuple[JointMap, ...], offsets: dict[str, float]
+) -> tuple[dict, ...]:
     """Per aligned joint, the raw column and its map `q = t0 + (σ s − s0)(t1 − t0)/(s1 − s0)`
-    (or `q = σ s`), plus r4r's fitted offset: enough to go back to the raw state."""
+    (or `q = σ s`), plus r4r's fitted offset `δq` (`q' = q + δq`): enough to go back to the raw
+    state (the lag is in `Layout.lag`)."""
 
     by_name = {m.name: m for m in maps}
     return tuple(
@@ -165,6 +171,7 @@ def state_mapping(joints: tuple[str, ...], maps: tuple[JointMap, ...]) -> tuple[
             "sign": by_name[j].sign,
             "from": by_name[j].source,
             "to": by_name[j].target,
+            "offset": offsets.get(j, 0.0),
         }
         for j in joints
     )

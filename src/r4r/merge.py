@@ -375,6 +375,7 @@ def _write_side_file(
         "source": str(root),
         "failed_episodes": sorted(e for e, r in records.items() if "error" in r),
         "state_mapping": layout["state_mapping"],
+        "lag_frames": layout.get("lag_frames", {}),
         "action": "action_aligned: the action through the state's joint map (no lag correction)"
         if layout["action_aligned"]
         else "untouched: not an absolute joint target in the state's columns",

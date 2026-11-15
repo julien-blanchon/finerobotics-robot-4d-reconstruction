@@ -148,8 +148,8 @@ convention. This is exactly what `qpos_from_state` builds from the joint mapping
 
 Gripper joints appear as their description joints (for example finger positions in metres). The
 raw `observation.state` is not changed. `meta/r4r.json` records the mapping
-(`state_mapping`: raw column, sign, `from` → `to` range per joint), so the conversion can be
-reversed.
+(`state_mapping`: raw column, sign, `from` → `to` range and fitted `offset` per joint;
+`lag_frames`: `state_shift` and `time_offset`), so the conversion can be reversed.
 
 **`action_aligned`** is written only when the dataset's action is an absolute joint target in
 the state's columns: its feature info says `vector.space: joint` and `vector.reference:
@@ -166,7 +166,7 @@ Quality and provenance, not features. The file can be dropped later.
 
 - **Per dataset:** `r4r_commit` (`+dirty` when the checkout had changes), `priors_sha256` (the
   priors JSON and episodes table), `date`, `source` root, `failed_episodes`, `state_mapping`,
-  `action`.
+  `lag_frames`, `action`.
 - **Per episode** (`episodes`; past 20,000 episodes in `meta/r4r.episodes.parquet`):
   `source_episode_index`, `route` (`fast` | `light` | `full`), `median_px`, `track_share`,
   `flagged` (fit check), and `cameras`: per camera `recorded`, `held calibration`,

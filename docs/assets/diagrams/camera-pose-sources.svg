@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-label="how each camera gets its pose: sources in order of preference">
+<title>how each camera gets its pose: sources in order of preference</title>
+<rect x="0.5" y="0.5" width="899" height="499" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="20" y="32" font-size="14" fill="#0f172a" font-weight="700">For each camera, r4r takes the first source that applies</text>
+<text x="868" y="32" font-size="12" fill="#475569" text-anchor="end">accuracy · cost</text>
+<rect x="20" y="54" width="320" height="52" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+<text x="34" y="76" font-size="13" fill="#0f172a" font-weight="600">Pose recorded for this episode?</text>
+<text x="34" y="94" font-size="11" fill="#64748b">episodes table, recorded column, world_anchor</text>
+<path d="M340 80.0 L372 80.0" stroke="#94a3b8" stroke-width="1.8"/>
+<polygon points="380,80.0 372,75.0 372,85.0" fill="#94a3b8"/>
+<text x="344" y="74.0" font-size="11" fill="#64748b" font-style="italic">yes</text>
+<rect x="382" y="54" width="498" height="52" rx="10" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+<circle cx="402" cy="80.0" r="11" fill="#16a34a"/><text x="402" y="84.5" font-size="12" fill="#fff" font-weight="700" text-anchor="middle">1</text>
+<text x="422" y="76" font-size="14" fill="#16a34a" font-weight="700">recorded</text>
+<text x="422" y="94" font-size="12" fill="#475569">the dataset or its upstream gives it</text>
+<text x="868" y="76" font-size="12" fill="#16a34a" font-weight="600" text-anchor="end">exact · free</text>
+<path d="M180 106 L180 116" stroke="#94a3b8" stroke-width="1.8"/>
+<polygon points="180,124 175,116 185,116" fill="#94a3b8"/>
+<text x="188" y="119" font-size="11" fill="#64748b" font-style="italic">no</text>
+<rect x="20" y="124" width="320" height="52" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+<text x="34" y="146" font-size="13" fill="#0f172a" font-weight="600">Mount held in the description?</text>
+<text x="34" y="164" font-size="11" fill="#64748b">a fixed mount, or a value rig --write stored</text>
+<path d="M340 150.0 L372 150.0" stroke="#94a3b8" stroke-width="1.8"/>
+<polygon points="380,150.0 372,145.0 372,155.0" fill="#94a3b8"/>
+<text x="344" y="144.0" font-size="11" fill="#64748b" font-style="italic">yes</text>
+<rect x="382" y="124" width="498" height="52" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6"/>
+<circle cx="402" cy="150.0" r="11" fill="#7c3aed"/><text x="402" y="154.5" font-size="12" fill="#fff" font-weight="700" text-anchor="middle">2</text>
+<text x="422" y="146" font-size="14" fill="#7c3aed" font-weight="700">from the description</text>
+<text x="422" y="164" font-size="12" fill="#475569">the mount is held, nothing solved</text>
+<text x="868" y="146" font-size="12" fill="#7c3aed" font-weight="600" text-anchor="end">as held · free</text>
+<path d="M180 176 L180 186" stroke="#94a3b8" stroke-width="1.8"/>
+<polygon points="180,194 175,186 185,186" fill="#94a3b8"/>
+<text x="188" y="189" font-size="11" fill="#64748b" font-style="italic">no</text>
+<rect x="20" y="194" width="320" height="52" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+<text x="34" y="216" font-size="13" fill="#0f172a" font-weight="600">Camera on a moving link?</text>
+<text x="34" y="234" font-size="11" fill="#64748b">wrist, head on a neck, arm-mounted</text>
+<path d="M340 220.0 L372 220.0" stroke="#94a3b8" stroke-width="1.8"/>
+<polygon points="380,220.0 372,215.0 372,225.0" fill="#94a3b8"/>
+<text x="344" y="214.0" font-size="11" fill="#64748b" font-style="italic">yes</text>
+<rect x="382" y="194" width="498" height="52" rx="10" fill="#fff7ed" stroke="#ea580c" stroke-width="1.6"/>
+<circle cx="402" cy="220.0" r="11" fill="#ea580c"/><text x="402" y="224.5" font-size="12" fill="#fff" font-weight="700" text-anchor="middle">3</text>
+<text x="422" y="216" font-size="14" fill="#ea580c" font-weight="700">searched</text>
+<text x="422" y="234" font-size="12" fill="#475569">mount from its own video tracks (fit, stage 1)</text>
+<text x="868" y="216" font-size="12" fill="#ea580c" font-weight="600" text-anchor="end">~1 cm · GPU</text>
+<path d="M180 246 L180 256" stroke="#94a3b8" stroke-width="1.8"/>
+<polygon points="180,264 175,256 185,256" fill="#94a3b8"/>
+<text x="188" y="259" font-size="11" fill="#64748b" font-style="italic">no</text>
+<rect x="20" y="264" width="320" height="52" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+<text x="34" y="286" font-size="13" fill="#0f172a" font-weight="600">Static, seen with moving cameras?</text>
+<text x="34" y="304" font-size="11" fill="#64748b">it shares the scene with a wrist camera</text>
+<path d="M340 290.0 L372 290.0" stroke="#94a3b8" stroke-width="1.8"/>
+<polygon points="380,290.0 372,285.0 372,295.0" fill="#94a3b8"/>
+<text x="344" y="284.0" font-size="11" fill="#64748b" font-style="italic">yes</text>
+<rect x="382" y="264" width="498" height="52" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.6"/>
+<circle cx="402" cy="290.0" r="11" fill="#0d9488"/><text x="402" y="294.5" font-size="12" fill="#fff" font-weight="700" text-anchor="middle">4</text>
+<text x="422" y="286" font-size="14" fill="#0d9488" font-weight="700">triangulated</text>
+<text x="422" y="304" font-size="12" fill="#475569">PnP on points moving cameras triangulate (stage 3)</text>
+<text x="868" y="286" font-size="12" fill="#0d9488" font-weight="600" text-anchor="end">sub-px overlay · GPU</text>
+<path d="M180 316 L180 326" stroke="#94a3b8" stroke-width="1.8"/>
+<polygon points="180,334 175,326 185,326" fill="#94a3b8"/>
+<text x="188" y="329" font-size="11" fill="#64748b" font-style="italic">no</text>
+<rect x="20" y="334" width="320" height="96" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+<text x="34" y="356" font-size="13" fill="#0f172a" font-weight="600">Nothing pins it from the scene?</text>
+<text x="34" y="374" font-size="11" fill="#64748b">a lone static camera, a fixed head camera:</text>
+<text x="34" y="390" font-size="11" fill="#64748b">use known robot points (picks)</text>
+<path d="M340 382 L372 382" stroke="#94a3b8" stroke-width="1.8"/>
+<polygon points="380,382 372,377 372,387" fill="#94a3b8"/>
+<rect x="382" y="334" width="244" height="96" rx="10" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.6"/>
+<circle cx="402" cy="354" r="11" fill="#0284c7"/><text x="402" y="358.5" font-size="12" fill="#fff" font-weight="700" text-anchor="middle">5</text>
+<text x="420" y="359" font-size="14" fill="#0284c7" font-weight="700">clicked points</text>
+<text x="396" y="382" font-size="11.5" fill="#475569">a person clicks robot points;</text>
+<text x="396" y="398" font-size="11.5" fill="#475569">FK gives 3D, PnP + bundle</text>
+<text x="396" y="419" font-size="11.5" fill="#0284c7" font-weight="600">~1.5 cm · minutes by hand</text>
+<rect x="636" y="334" width="244" height="96" rx="10" fill="#fdf2f8" stroke="#db2777" stroke-width="1.6"/>
+<circle cx="656" cy="354" r="11" fill="#db2777"/><text x="656" y="358.5" font-size="12" fill="#fff" font-weight="700" text-anchor="middle">6</text>
+<text x="674" y="359" font-size="14" fill="#db2777" font-weight="700">transferred points</text>
+<text x="650" y="382" font-size="11.5" fill="#475569">RoMa carries robot points from</text>
+<text x="650" y="398" font-size="11.5" fill="#475569">a calibrated episode (r4r picks)</text>
+<text x="650" y="419" font-size="11.5" fill="#db2777" font-weight="600">~5.6 cm, 1 in 5 fails · GPU s</text>
+<text x="20" y="460" font-size="12" fill="#0f172a" font-weight="600">Every start from 3–6 is refined by the kinematic bundle (stage 4). Then read the overlay.</text>
+<text x="20" y="482" font-size="12" fill="#b91c1c" font-weight="600">Clicks and by-eye placement: once per dataset or a few setups. Per episode, or hundreds of setups: automatic sources only.</text>
+</svg>

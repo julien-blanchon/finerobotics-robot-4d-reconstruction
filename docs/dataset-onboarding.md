@@ -42,6 +42,46 @@ Only then calibrate: the solver refines good priors; it does not rescue bad ones
 | 8 | write | `r4r rig … --write`, `r4r export <dataset> robot.xml` | priors and record committed; metadata bugs in `priors/ISSUES.md` |
 | 9 | every episode | `r4r reconstruct <dataset> --plan`, then `r4r reconstruct <dataset> out/ [--shard i/n]` | the plan says fast/light for (nearly) every episode; one parquet per shard, route and check per episode in its metadata |
 
+### Draft priors
+
+A minimal priors file (trimmed from `priors/droid/droid.json`):
+
+```json
+{
+  "description": "descriptions/franka__panda/panda_robotiq.urdf",
+  "joints": [{"index": 7, "urdf_joint": "gripper_finger_joint", "from": [0, 1], "to": [0, 0.725]}],
+  "cameras": {
+    "wrist_left": {"mount": "moving", "link": "panda_link8",
+                   "position": [-0.0769, 0.0326, 0.0181], "orientation": [0.6963, -0.1177, 0.1221, -0.6965],
+                   "position_range": 0.03, "orientation_range_deg": 5.0, "focal": 183.0, "focal_range": 0.01},
+    "exterior_1_left": {"mount": "static", "scope": "episode", "focal": 131.0, "focal_range": 0.02,
+                        "position_range": 0.05, "orientation_range_deg": 3.0}
+  }
+}
+```
+
+## Placing each camera (step 3–6)
+
+Same order as the README's [How each camera gets its pose](../README.md#how-each-camera-gets-its-pose):
+take the first source that applies.
+
+<img src="assets/diagrams/camera-pose-sources.svg" alt="Sources of a camera pose in order of preference" width="100%">
+
+| # | source | how to set it up | accuracy |
+|---|---|---|---|
+| 1 | recorded | episodes table pose columns, a pose `column` in the camera prior, or world-frame records with `world_anchor` ([below](#per-episode-table-priorsfamilydatasetepisodesparquet)) | exact |
+| 2 | from the description | `position` / `orientation` with zero ranges, or values `r4r rig --write` stored | as held |
+| 3 | searched | `"mount": "moving"` and its `link`; `r4r fit`, or rig stage 1 | ~0.3–1.3 cm on sims |
+| 4 | triangulated | `"mount": "static"`, no pose; rig stage 3 runs PnP on moving cameras' points | sub-pixel overlays |
+| 5 | clicked points | a picks JSON, `r4r rig --picks` ([below](#cameras-the-scene-cannot-pin-robot-keypoints)) | ~1.5 cm, 8+ picks |
+| 6 | transferred points | `r4r picks` from calibrated references, then `r4r rig --picks` ([below](#picks-without-clicks-r4r-picks-keypoint-transfer)) | ~5.6 cm median, ~20 % fail |
+
+**Clicks are for calibration, not for scale.** Clicked points and by-eye placement (`r4r
+preview`) calibrate a dataset once, or a handful of setups. Per-episode results, and setups that
+number in the hundreds, must come from automatic sources: recorded values, held calibration,
+odometry, the light solve, transferred points, with the fit check. A dataset whose per-episode
+cameras need clicks is not solved for those cameras.
+
 ## Checklist
 
 | area | check | where it goes in the priors |

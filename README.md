@@ -32,24 +32,94 @@ come later.
 
 <img src="docs/assets/diagrams/pipeline.svg" alt="Data flow: dataset, description and priors into r4r rig; solution to overlay; written priors to reconstruct" width="100%">
 
-- **Inputs:** a LeRobot dataset, its robot description, and a **priors JSON** that holds what
-  is known about the dataset (joint mapping, cameras, focal lengths, ranges).
-- **`r4r rig`** fits whatever the priors leave free, on a sample of episodes, with one solver:
-  a kinematic bundle adjustment (camera pose = forward kinematics × mount).
-- **Check** with `r4r overlay`; **fix** the priors; **write** them back; **`r4r reconstruct`**
-  every episode.
+- **Inputs:** a LeRobot dataset, its robot description, and a **priors JSON**: what is known
+  about the dataset (joint mapping, cameras, focal lengths, ranges).
+- **`r4r rig`** fits what the priors leave free, on a sample of episodes, with one solver: a
+  kinematic bundle adjustment (camera pose = forward kinematics × mount).
+- **Check** with `r4r overlay`, **fix** the priors, **write** them back, then
+  **`r4r reconstruct`** every episode.
 
 ## Philosophy: an agent in the loop
 
 <img src="docs/assets/diagrams/onboarding-loop.svg" alt="Onboarding loop: draft priors, preview, fit/rig, overlay; fix and repeat; then write and reconstruct" width="100%">
 
-- r4r is meant to be used on a new dataset by **an agent (or a person) working iteratively**:
-  optimise, check by eye (previews, overlays, ground truth when a simulator gives it), tune
-  the priors and the description, repeat until the drawn robot sits on the real one.
-- **The library** provides the solver and the checks.
-- **The agent** brings physical and visual judgement. It keeps its ad-hoc scripts in its own
-  scratchpad and records what it found in a standard format:
-  `priors/<family>/<dataset>.json` (values) and `priors/onboarding/<embodiment>.md` (evidence).
+- A new dataset is onboarded by **an agent (or a person) working iteratively**: optimise,
+  check by eye (previews, overlays, simulator ground truth), tune the priors and the
+  description, repeat until the drawn robot sits on the real one.
+- **The library** provides the solver and the checks. **The agent** brings physical and visual
+  judgement and records what it found: `priors/<family>/<dataset>.json` (values) and
+  `priors/onboarding/<embodiment>.md` (evidence).
+
+## How each camera gets its pose
+
+Every camera needs a pose in the robot's base frame at every frame. A **moving** camera rides on
+a link: pose = FK(joints) · mount, so only its mount is needed. A **static** camera needs its
+pose directly. r4r takes the first source that applies:
+
+<img src="docs/assets/diagrams/camera-pose-sources.svg" alt="Sources of a camera pose in order of preference: recorded, from the description, searched, triangulated, clicked points, transferred points" width="100%">
+
+| # | source | what it is | use when | accuracy | cost |
+|---|---|---|---|---|---|
+| 1 | **recorded** | given per episode by the dataset or upstream: episodes table, recorded column, or world-frame records via `world_anchor` | always, first | exact | none |
+| 2 | **from the description** | the mount is held (description, or a value `rig --write` stored) | fixed, known mount | as held | none |
+| 3 | **searched** | moving camera: mount found from its own video tracks (`r4r fit`, rig stage 1) | wrist or head camera | ~0.3–1.3 cm on sims | GPU, once per setup |
+| 4 | **triangulated** | static camera: PnP on points the moving cameras triangulate (rig stage 3) | shares the scene with a moving camera | sub-px overlays | GPU, once per setup |
+| 5 | **clicked points** | clicked robot points; FK gives 3D; PnP + bundle place the camera (`rig --picks`) | nothing else pins it | ~1.5 cm, 8+ careful clicks (sim ground truth) | minutes by hand |
+| 6 | **transferred points** | the same without clicks: RoMa carries robot points from a calibrated episode (`r4r picks`) | many re-placed setups | ~5.6 cm median (SynGrasp), ~20 % fail | ~2 GPU s per camera-episode |
+
+Every start from 3–6 is refined by the kinematic bundle. **Then read the overlay.**
+
+> **Clicks are for calibration, not for scale.** Clicked points and by-eye placement calibrate a
+> dataset once, or a handful of setups. Per-episode results, and setups that number in the
+> hundreds, must come from automatic sources: recorded values, held calibration, odometry, the
+> light solve, transferred points, with the fit check. A dataset whose per-episode cameras need
+> clicks is not solved for those cameras.
+
+**Picks file** (`r4r rig --picks picks.json`). A point is a body's origin (named after the
+body) or a named offset on a body. Click where the point is, not the surface in front of it: a
+joint origin sits on its axis, mid-housing.
+
+```json
+{"points": {"jaw_mid": {"body": "panda_hand", "offset": [0, 0, 0.1034]}},
+ "picks": [{"episode": 0, "camera": "front", "frame": 42,
+            "pixels": {"panda_link0": [312.0, 401.5], "panda_link2": [298.5, 260.0], "jaw_mid": [355.0, 190.5]}}]}
+```
+
+`panda_link0` is the base flange, `panda_link2` the shoulder housing, `jaw_mid` the midpoint
+between the jaws. Aim for 8+ picks over 4–5 frames, spread over the arm.
+
+<img src="docs/assets/stills/transferred-picks-flexiv.jpg" alt="Transferred robot points on a Flexiv Rizon 4 session: green circles transferred, red crosses reprojected after solving" width="100%">
+
+<sub><b>Transferred points</b> on a new openneodata Flexiv Rizon 4 session. <b>Green</b>: robot
+points RoMa carried from a calibrated episode (the description's surface, ray-cast there, says
+which robot point each reference pixel shows). <b>Red</b>: the same points reprojected after the
+solve. A start only: read the overlay of every session.</sub>
+
+Details and measurements: [onboarding, cameras the scene cannot pin](docs/dataset-onboarding.md#cameras-the-scene-cannot-pin-robot-keypoints).
+
+## Scopes and setups
+
+Each unknown has a **scope**: how often it may change.
+
+| scope | one value per | example |
+|---|---|---|
+| dataset | the whole dataset | a wrist mount, a fixed lens |
+| station (setup) | a run of episodes with the same placement | a third-person camera between two re-placements |
+| episode | episode | a re-placed static camera, a moved arm base |
+| frame | frame | a mobile base driving (from its odometry) |
+
+- **`r4r stations <dataset> <camera>`** finds setups from two thumbnails per episode (~30 ms
+  each, CPU); `--write` stores them as the `station` column of the episodes table.
+- **`r4r station`** then calibrates each new setup's static camera from its calibrated
+  neighbour, so hundreds of setups do not each need a full `r4r rig`.
+
+## The stages of `r4r rig`
+
+<img src="docs/assets/diagrams/rig-stages.svg" alt="The five stages of r4r rig" width="100%">
+
+The same stages on one real DROID episode:
+
+<img src="docs/assets/stills/rig-on-droid.jpg" alt="r4r rig on DROID episode 150: KLT tracks, RoMa links, solved overlay" width="100%">
 
 ## Install
 
@@ -65,85 +135,47 @@ Python 3.13. A dataset is named by its root: an absolute path, or a path relativ
 
 ## Commands
 
-| command | what it does | output |
-|---|---|---|
-| `inspect` | joint mapping, unmapped varying columns, joints past their limits, body tree | text |
-| `sheet` | camera frames next to the robot skeleton | PNG |
-| `links` | motion evidence for the body each camera rides on (static or moving) | text |
-| `preview` | the description drawn at the recorded joints, cameras from the priors, **no solve** | PNG / MP4 |
-| `fit` | one moving camera: its body, mount and focal; `--shifts` measures the video/state lag | text, `--write` |
-| `rig` | the whole rig in 5 stages (below), checked by groups of episodes; `--picks` clicked robot points for cameras the scene cannot pin | text, `--write`, `--save` |
-| `picks` | robot keypoints of a static camera carried from calibrated episodes by RoMa v2 (no clicks), for `rig --picks`; GPU | picks JSON |
-| `overlay` | the robot drawn with a saved solution over every camera | PNG / MP4 |
-| `export` | the description (MJCF) with every known camera placed and each range | XML |
-| `focal` | a focal-length draft from ARROW (gen2 adapter) when nothing is recorded; GPU | text |
-| `reconstruct` | every episode with frozen priors: the [output spec](docs/output-spec.md)'s columns per frame (no solve, no video when the priors hold every camera) | sharded parquet |
-| `merge` | reconstruct shards into a LeRobot v3 dataset: a `--r4r` twin next to the main one, or `--full` a merged copy | LeRobot root |
+| command | what it does |
+|---|---|
+| `inspect` | Print the joint mapping, unmapped columns, joints past their limits, body tree. |
+| `sheet` | Show camera frames next to the robot skeleton (PNG). |
+| `links` | Tell which body each camera rides on (static or moving). |
+| `preview` | Draw the robot with the priors' cameras, no solve (PNG / MP4). |
+| `fit` | Find one moving camera's mount and focal; `--shifts` measures the video/state lag. |
+| `rig` | Solve the whole rig on a few episodes; `--picks` adds clicked points. |
+| `picks` | Transfer robot points from calibrated episodes to new ones (GPU), for `rig --picks`. |
+| `stations` | Find setups (runs of episodes with one camera placement) from thumbnails. |
+| `station` | Calibrate each new setup's static camera from its neighbour setup. |
+| `overlay` | Draw the robot with a saved solution over every camera (PNG / MP4). |
+| `export` | Write the description (MJCF) with every known camera and range. |
+| `focal` | Draft a focal length with ARROW when none is recorded (GPU). |
+| `reconstruct` | Write every episode's per-frame output (sharded parquet); `--plan` costs it first. |
+| `merge` | Turn reconstruct shards into a LeRobot v3 dataset (twin or full copy). |
 
 ```bash
 r4r inspect droid/datasets/droid --episode 0
 r4r preview droid/datasets/droid preview.png --episode 150
 r4r fit     droid/datasets/droid wrist_left --episodes 0 1 2 --shifts -2 -1 0 1 2
 r4r rig     droid/datasets/droid --episodes 150 401 1000 300 --stride 2 --groups 2 --save sol.pt
-r4r overlay sol.pt check.png                 # a grid: a few moments of every episode
-r4r overlay sol.pt episode.mp4 --episode 0   # a video of one solved episode
+r4r overlay sol.pt check.png                 # a grid; `episode.mp4 --episode 0` for a video
 r4r rig     droid/datasets/droid --episodes 150 401 1000 300 --stride 2 --write  # once it looks right
-r4r reconstruct droid/datasets/droid out/ --episodes 0 1 2
-r4r reconstruct syngrasp-1b/datasets/syngrasp-1b out/ --shard 3/64  # all episodes, worker 3 of 64
 r4r reconstruct droid/datasets/droid --plan  # routes and CPU / GPU hours, nothing run
 r4r stations openneodata/datasets/arx5 third_view --write  # setups from thumbnails (CPU)
 r4r merge   syngrasp-1b/datasets/syngrasp-1b out/ dest/  # dest/syngrasp-1b--r4r (LeRobot v3)
 ```
 
-`reconstruct` writes `out/<family>/<dataset>/shard-<k>.parquet`, one file per `--shard-size`
-episodes (default 1000) of the selection (`--episodes`, default all): one row per frame with
-the columns of [`docs/output-spec.md`](docs/output-spec.md) (camera poses, intrinsics,
-distortion; end-effector pose, gripper, aperture, fingertips; base pose; aligned joint state;
-all in the episode frame). The schema metadata `r4r.episodes` (JSON) says per episode its
-route, fit check, each camera's source and errors, or the error that stopped it; `r4r.layout`
-holds the feature info. `r4r merge` writes them as a LeRobot v3 dataset with `meta/r4r.json`
-(quality and provenance). Measured on a login node: fast route 13 ms per SynGrasp episode
-(1,000 episodes in 13 s), 0.32 s per sim-panda episode sampled across 460k (one data file
-each); light route 41-57 s per episode under load; merge ~12 s per 1,000 SynGrasp episodes.
+## Processing every episode: routes
 
-Each episode takes the cheapest route its unknowns allow (`r4r.plan`): values of dataset or
-station scope are held once `r4r rig --write` wrote them (or recorded); only episode-scope ones
-stay free.
+`r4r reconstruct` sends each episode down the cheapest route its unknowns allow.
+`--plan` counts the routes and estimates CPU / GPU hours from the priors alone, without running.
 
-| route | when | cost (measured) |
+| route | when | cost |
 |---|---|---|
-| fast | everything held or recorded (a moving base on its odometry with a fitted `base_odometry.correction`, or a recorded pose) | forward kinematics × mount, no video: 13-40 ms CPU per episode |
-| light | episode-scope 6-DoF unknowns with a start (a re-placed robot base, a re-placed static camera), or a real episode the fit check flags | 6 bursts of 16 frames decoded alone, KLT + SIFT links, LM on those unknowns only: 5-9 s CPU |
-| full | its setup was never calibrated, or an unknown has no start | the whole rig: ~0.36 GPU s per second of video |
+| fast | every value held or recorded | FK × mount, no video: 13–40 ms CPU per episode |
+| light | episode-scope unknowns with a start (re-placed base or static camera), or a flagged fit check | a few bursts of frames: 5–9 s CPU |
+| full | the setup was never calibrated, or an unknown has no start | the whole rig: ~0.36 GPU s per second of video |
 
-- **Fit check:** real episodes holding a recorded episode-scope camera (DROID's per-episode
-  calibration) are checked on the bursts: the epipolar distance of verified matches between
-  the held cameras; above 25 px the record is freed and solved light (`--check on/off/auto`).
-- **`--plan`:** counts the routes over a dataset from its priors and episodes table alone, and
-  estimates CPU and GPU hours (calibrating each uncalibrated setup once included).
-- **`r4r stations`:** runs of episodes with one placement of a camera that is not on the robot,
-  from two thumbnails per episode (~30 ms per episode); `--write` stores them as the `station`
-  column of the episodes table.
-- `--solve` solves every episode in full.
-- **Resumable:** a shard is written once, atomically; shards already written are skipped.
-- **Spread over processes:** `--shard i/n` takes the shards `k` with `k mod n = i`, e.g. a
-  Slurm array: `--shard $SLURM_ARRAY_TASK_ID/$SLURM_ARRAY_TASK_COUNT`.
-
-## The stages of `r4r rig`
-
-<img src="docs/assets/diagrams/rig-stages.svg" alt="The five stages of r4r rig" width="100%">
-
-The same stages on one real DROID episode:
-
-<img src="docs/assets/stills/rig-on-droid.jpg" alt="r4r rig on DROID episode 150: KLT tracks, RoMa links, solved overlay" width="100%">
-
-## Frames
-
-<img src="docs/assets/diagrams/frames.svg" alt="Base frame, link, moving wrist camera and static cameras, from a real DROID solution" width="100%">
-
-- **Moving camera:** rigid on a link. Pose = FK(joint states) · mount; the mount is fitted once.
-- **Static camera:** a pose in the base frame, per dataset or per episode.
-- **Free bodies:** a second arm's base, a mobile base (per frame, started from its odometry).
+Fit check, output layout, sharding, timings: [architecture](docs/architecture.md#processing-every-episode-routes-r4r-reconstruct); columns: [output spec](docs/output-spec.md).
 
 ## A new dataset, step by step
 
@@ -157,23 +189,9 @@ The same stages on one real DROID episode:
 | 6 | Fit moving mounts, then the whole rig on 5–20 episodes | `r4r fit`, `r4r rig --groups 2 --save` |
 | 7 | **Check the overlay**: every camera, several episodes | `r4r overlay` |
 | 8 | Write the fitted values back; record the evidence | `r4r rig --write`, `priors/onboarding/` |
-| 9 | Process every episode | `r4r reconstruct` |
+| 9 | Process every episode | `r4r reconstruct --plan`, then `r4r reconstruct` |
 
-A minimal priors file (trimmed from `priors/droid/droid.json`):
-
-```json
-{
-  "description": "descriptions/franka__panda/panda_robotiq.urdf",
-  "joints": [{"index": 7, "urdf_joint": "gripper_finger_joint", "from": [0, 1], "to": [0, 0.725]}],
-  "cameras": {
-    "wrist_left": {"mount": "moving", "link": "panda_link8",
-                   "position": [-0.0769, 0.0326, 0.0181], "orientation": [0.6963, -0.1177, 0.1221, -0.6965],
-                   "position_range": 0.03, "orientation_range_deg": 5.0, "focal": 183.0, "focal_range": 0.01},
-    "exterior_1_left": {"mount": "static", "scope": "episode", "focal": 131.0, "focal_range": 0.02,
-                        "position_range": 0.05, "orientation_range_deg": 3.0}
-  }
-}
-```
+A priors file is a JSON per dataset; a minimal one (DROID) is in the [onboarding guide](docs/dataset-onboarding.md#draft-priors).
 
 **Low residuals are not enough. Look at the overlay.**
 

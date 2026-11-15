@@ -71,15 +71,20 @@ a camera's or body's `fitted` (provenance of a fit).
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 from .episode import JointMap
+
+if TYPE_CHECKING:
+    import numpy as np
+    import pyarrow as pa
 
 PRIORS = Path(__file__).resolve().parents[3] / "priors"
 
@@ -445,11 +450,13 @@ def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
     path = episode_table_path(root)
     if not path.exists():
         return None
-    import pyarrow.parquet as pq
+    import numpy as np
 
-    table = pq.read_table(path, filters=[("episode", "=", episode)])
-    if table.num_rows == 0:
+    table, episodes = _episode_table(path, path.stat().st_mtime_ns)
+    first, last = (int(i) for i in np.searchsorted(episodes, [episode, episode + 1]))
+    if first == last:
         return None
+    table = table.slice(first, last - first)
     rows = table.to_pylist()
     station = rows[0].get("station")
     pose = ("x", "y", "z", "qw", "qx", "qy", "qz")
@@ -466,6 +473,18 @@ def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
             if all(r.get(k) is not None for k in pose)
         },
     )
+
+
+@functools.lru_cache(maxsize=4)
+def _episode_table(path: Path, modified: int) -> tuple[pa.Table, np.ndarray]:
+    """A dataset's episodes table sorted by episode, with its `episode` column, read once per
+    process (and again only if the file changes: `modified` is its mtime)."""
+
+    import pyarrow.parquet as pq
+
+    del modified  # part of the cache key only
+    table = pq.read_table(path).sort_by("episode")
+    return table, table["episode"].to_numpy()
 
 
 def write_camera(

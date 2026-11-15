@@ -73,7 +73,7 @@ Python 3.13. A dataset is named by its root: an absolute path, or a path relativ
 | `overlay` | the robot drawn with a saved solution over every camera | PNG / MP4 |
 | `export` | the description (MJCF) with every known camera placed and each range | XML |
 | `focal` | a focal-length draft from ARROW (gen2 adapter) when nothing is recorded; GPU | text |
-| `reconstruct` | every episode with frozen priors: poses and intrinsics per frame | parquet |
+| `reconstruct` | every episode with frozen priors: poses and intrinsics per frame (no solve, no video when the priors hold every camera) | sharded parquet |
 
 ```bash
 r4r inspect droid/datasets/droid --episode 0
@@ -84,11 +84,22 @@ r4r overlay sol.pt check.png                 # a grid: a few moments of every ep
 r4r overlay sol.pt episode.mp4 --episode 0   # a video of one solved episode
 r4r rig     droid/datasets/droid --episodes 150 401 1000 300 --stride 2 --write  # once it looks right
 r4r reconstruct droid/datasets/droid out/ --episodes 0 1 2
+r4r reconstruct syngrasp-1b/datasets/syngrasp-1b out/ --shard 3/64  # all episodes, worker 3 of 64
 ```
 
-`reconstruct` writes `out/<family>/<dataset>/episode_<n>.parquet`: one row per frame and
-camera with `world_from_camera` (4×4 row-major, robot base frame, OpenCV axes), `fx, fy, cx, cy`,
-and the episode's median reprojection error and inlier share.
+`reconstruct` writes `out/<family>/<dataset>/shard-<k>.parquet`, one file per `--shard-size`
+episodes (default 1000) of the selection (`--episodes`, default all): one row per frame and
+camera with `episode, frame, camera`, `world_from_camera` (4×4 row-major, robot base frame, OpenCV
+axes) and `fx, fy, cx, cy`. The schema metadata `r4r.episodes` (JSON) says per episode whether it
+was solved, its median reprojection error and inlier share, or the error that stopped it.
+
+- **No solve when nothing is free:** cameras recorded for the episode (episodes table, recorded
+  column) or held by the priors, focals known, no free body, kinematics held. Poses are then
+  forward kinematics × mount, without reading the video (SynGrasp-1B: ~4 ms per episode).
+  `--solve` solves those too.
+- **Resumable:** a shard is written once, atomically; shards already written are skipped.
+- **Spread over processes:** `--shard i/n` takes the shards `k` with `k mod n = i`, e.g. a
+  Slurm array: `--shard $SLURM_ARRAY_TASK_ID/$SLURM_ARRAY_TASK_COUNT`.
 
 ## The stages of `r4r rig`
 

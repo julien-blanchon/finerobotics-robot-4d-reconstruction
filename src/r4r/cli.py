@@ -1299,6 +1299,8 @@ class Reconstruct:
             if found.get("flagged"):
                 summary["route"] = "light"
         light = set(unknowns.free) | (set(checked) if summary.get("flagged") else set())
+        if light - set(names):  # a body solved (a re-placed robot base): every camera with it
+            light |= set(names)
         summary["cameras"] = {
             n: "not calibrated"
             if n in lacking

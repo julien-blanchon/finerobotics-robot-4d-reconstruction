@@ -141,7 +141,7 @@ Every camera is radially symmetric (`r4r.geometry.camera`): a ray at `s` from th
 |---|---|---|---|
 | 1 preparation (once per dataset) | priors good enough to run unattended | the agent: `inspect`, `sheet`, `links`, `preview`, `fit --shifts`, focal from records ([onboarding](dataset-onboarding.md)) | ✅ |
 | 2 setup calibration (once per setup) | dataset-scope values, ranges of episode-scope ones | `r4r rig` on 5–20 episodes; consensus; groups; `--write` | ✅ (⬜ window selection, held-out report) |
-| 3 per-episode processing | poses for every frame of every episode | `r4r reconstruct`, by route (`r4r.plan`): fast (every calibrated value held: FK × mount, no video read), light (episode-scope unknowns on 6 bursts of frames, CPU: `rago/light.py`), full (setup never calibrated: the whole rig). Fit check on real episodes; `--plan` for the cost; `r4r stations` for setups. Sharded output (`--shard-size`), resumable, `--shard i/n` per process | ✅ |
+| 3 per-episode processing | poses for every frame of every episode | `r4r reconstruct`, by route (`r4r.plan`): fast (every calibrated value held: FK × mount, no video read), light (episode-scope unknowns on 6 bursts of frames, CPU: `rago/light.py`), full (setup never calibrated: the whole rig). Fit check on real episodes; `--plan` for the cost; `r4r stations` for setups. Sharded output (`--shard-size`) in the [output spec](output-spec.md)'s columns, resumable, `--shard i/n` per process; `r4r merge` into a LeRobot v3 twin or full copy | ✅ |
 | 4 dense reconstruction | depth for every pixel, 3D tracks, fused point cloud | ARROW per encoding, aligned to our cameras (one scale and pose per encoding) | ⬜ |
 
 - Stage 3 at scale: once a dataset's setups are calibrated, nearly every episode is fast
@@ -170,5 +170,13 @@ Every camera is radially symmetric (`r4r.geometry.camera`): a ray at `s` from th
 Bad frames (zoomed-in wrist, no texture, dark, motion blur) are not detected by rules on the
 image: they show up as few surviving KLT tracks, low RoMa certainty, high residuals or
 disagreement with the other episodes, and are left out by consensus.
+
+## Output
+
+Per frame, in the episode frame (the base at the episode's first frame): camera poses,
+intrinsics and distortion; per arm the `ee` frame (TCP or palm, shared axis meaning), gripper
+opening, aperture and fingertips (`r4r.effectors`, presets per gripper and hand); the base pose;
+the joint state in the description's convention. The whole contract, its side file and
+packaging: [output-spec.md](output-spec.md).
 
 The cluster setup (environments, caches, job helpers) lives in `jupiter/`.

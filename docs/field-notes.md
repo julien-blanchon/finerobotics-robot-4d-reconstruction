@@ -66,6 +66,14 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   (FurnitureBench squashes the wrist to 224x224 but crops the front camera).
 - **End-effector columns of simulators name their frame:** M1's EE position equals FK of
   `panda_link8` exactly, a quick check of the joint mapping.
+- **The rotation test cannot tell quaternion orders apart:** the angle between two quaternions
+  survives any consistent permutation of their components (robomind2 dual-ur5: xyzw and wxyz both
+  2.2°). Check the order with positions or a full-pose fit.
+- **No recorded end-effector pose? Use a wrist camera's own rotation:** the rotation angle between
+  two frames from the essential matrix gives the same test (robocoin lane10: plain mapping 2.5°,
+  best ±90° class 0.7°). It narrows a sign/offset search to a family; positions must pick one.
+- **Check recorded EE positions in the controller's own base frame:** UR's `base` is `base_link`
+  turned 180° about z; FK of tool0 then reproduced robomind2's `eef_pose` xyz to 1 mm.
 - **Test the arm model first whenever an end-effector pose is recorded:** between two frames,
   the end effector's rotation angle equals the correct FK link's, whatever the base and tool
   offsets. That separates the right model (0.000°) from a wrong one (1.7–5°) in seconds; then
@@ -144,6 +152,25 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   cameras and calibration (one root's overlay showed three rooms). Find the setup key first
   (`source/subtree` or `source/publisher_repo` in `meta/episodes`), write it as `station`, and
   never calibrate across setups.
+- **Read the recorder's definition of zero first:** old LeRobot calibrates 0 = arm straight and
+  horizontal, +90 = "rotated"; that gave the whole Koch joint map at once (lift − 90°, 90° − elbow,
+  −wrist), the images only confirmed it. New-LeRobot normalised states (−100..100) have no scale
+  without the per-robot calibration file (full-turn motors only: 1.8° per unit).
+- **Don't judge a joint map from one start-pose silhouette:** with the wrist at −90 the Koch rest is
+  a tall stack, at 0 the gripper lies on the table; an oblique "top" camera stretches a vertical arm.
+- **Pan and roll zero offsets don't block pooling:** a static camera's pose absorbs the pan zero, a
+  wrist mount after the roll joint absorbs the roll zero.
+- **A grafted hand's joint limits check the recorder's order:** `r4r inspect` lists the joints past
+  their limits (LEAP on xArm7: DIP values curl past 2.04 rad while PIP stays near 0).
+- **Two arms of one description implying two body poses:** refit each shoulder origin from its own
+  arm's fit and put the body at their mean (xrobotwin yumi: arms 7.6 cm / 8° apart before; 1 / 6 mm
+  end-effector error after).
+- **Look at a known view before grafting a hand:** a downscaled OmniPicker (two linkage plates per
+  jaw) looks like a four-fingered hand (robocoin lane10). Read the dataset card and `source/dataset`:
+  RoboCOIN lanes merge vendors (lane10 is 94% iSoftStone Tianqin A2 under an AgiBot G1 label).
+- **A layout error can be a joint-1 zero:** a base yaw equals an offset on the first joint
+  (unitree-z1-dual: the delivered yaw-0 mounts drew both arms reaching away; the arms face each
+  other, ±90°).
 - **Joint conventions from statistics:** the first-frame poses of ~1,600 SO-100/101 repos all
   start at the same folded rest pose, which settles the zero convention at once. But the most
   frequent start pose isn't always the rest pose (Koch starts stretched out): check the images.

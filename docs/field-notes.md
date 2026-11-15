@@ -168,6 +168,16 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **Look at a known view before grafting a hand:** a downscaled OmniPicker (two linkage plates per
   jaw) looks like a four-fingered hand (robocoin lane10). Read the dataset card and `source/dataset`:
   RoboCOIN lanes merge vendors (lane10 is 94% iSoftStone Tianqin A2 under an AgiBot G1 label).
+- **"Invented" descriptions often have an official one:** search the manufacturer's GitHub org
+  (Tianji's `robot-assets`, CC BY 4.0, covers the Marvin line). In large asset repos list the tree
+  through the API and fetch only the URDF texts and one variant's meshes.
+- **Joint ranges tell wrist designs apart:** petaldex J6/J7 hugging ±60°/±90° is Marvin's CCS wrist,
+  not the SRS limits the delivered file assumed.
+- **A hand filling the wrist view says nothing about arm lengths:** only a static view can pick an
+  arm variant (petaldex 615 vs 696 vs 809: 9.8 / 9.6 / 11.4 px on 30 clicks). Fix a hand's roll by
+  rendering its four 90° rolls over one wrist frame.
+- **A camera named "head" may not be on the head:** petaldex's sits 33 cm left of and 43 cm above
+  the shoulders; fit it before trusting the description's head-camera frame.
 - **A layout error can be a joint-1 zero:** a base yaw equals an offset on the first joint
   (unitree-z1-dual: the delivered yaw-0 mounts drew both arms reaching away; the arms face each
   other, ±90°).

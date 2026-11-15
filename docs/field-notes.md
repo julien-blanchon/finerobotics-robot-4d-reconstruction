@@ -74,6 +74,13 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   best ±90° class 0.7°). It narrows a sign/offset search to a family; positions must pick one.
 - **Check recorded EE positions in the controller's own base frame:** UR's `base` is `base_link`
   turned 180° about z; FK of tool0 then reproduced robomind2's `eef_pose` xyz to 1 mm.
+- **Check the gripper mapping on wrist frames at the recorded minimum and maximum:** a wrong
+  scale makes the solver bend the wrist focals to compensate (openneodata aloha: 189–246 px).
+- **A static camera solved far away with a long focal at a low median is a bad start,** not a
+  good fit: read the overlay and start it on the right side of the robot (openneodata arx5's
+  third view faces the robot at some stations, sits behind the arms at others).
+- **Clicked points don't move a camera that feature matches already settled** (aist dcam_low):
+  weight them up or start from them.
 - **A recorded end-effector pose can follow its own convention:** openneodata aloha's recorded
   pose matched joint 1 negated to 0.000°, yet the video follows the description's own sign.
   Confirm any sign or offset chosen from recorded poses on the video (preview at several

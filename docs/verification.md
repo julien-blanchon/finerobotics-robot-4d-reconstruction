@@ -69,7 +69,7 @@ unless stated.
 | robomind agilex-real | 59 | fast | 0.1 / 0 | 10 fast | none | — | right gripper on the real one in camera_front, jaw points on the wrist jaws (fixed 2026-11-16) |
 | deco50 body35 | 45 | fast | 0.1 / 0 | 10 fast | none | — | hands approximate (frames off by ~5% of the width in one episode) |
 | rw-rl r1lite-spray-bottle-head-install | 44 | fast | ~0 | 10 fast | none | — | meshes on the jaws and arms. **No EE columns** |
-| robomind ur5e-real (moving episodes) | 36 | fast (1 placement) | 0.2 / 0 | 10 fast | **camera_top in all 10** | — | only camera NaN |
+| robomind ur5e-real (moving episodes) | 36 | fast in 125 sessions; 35 sessions (4,392 episodes) not calibrated | 0.2 / 0 | 10 fast | camera_top in 2 (uncalibrated sessions) | — | arm on the real one in the 8 held episodes; one moving episode per session read (fixed 2026-11-16) |
 | rw-rl r1lite-shelf-restock / tissue-box / scan-item / plug-charger | 33 / 33 / 30 / 25 | fast | ~0 / 0 | 10 fast each | none | — | fingers on the wrist fingers; base motion not checkable on video (fixed 2026-11-16). **No EE columns** |
 | rw-rl g2-box-unpack-pack (+ carton, auto-parts, zip-tie, key) | 32 (+64) | fast | ~0 | 10 fast each | stereo pair (ignored) | — | ok; no gripper/aperture |
 | rdt-ft-data | 30 | fast | 0.1 / 0 | 10 fast | none | — | cam_high sees the grippers only at its top edge, TCPs drawn near them; right base weakly pinned (fixed 2026-11-16) |
@@ -118,6 +118,12 @@ says `not calibrated` or the camera is ignored (`camera.calibrated: false`).
 4. **robomind ur5e-real** (ready for the moving episodes): its only camera, `camera_top`,
    is `not calibrated` in all sampled episodes (plan: 1 placement pending), so the twin
    has no calibrated camera.
+   **Partly fixed 2026-11-16:** the camera is re-placed between recording sessions and is the
+   only camera, so no automatic per-episode or per-setup route exists for it (light needs a
+   second camera, `r4r station` checks against wrist links). Stations = source archives (167);
+   the rig pose is held for the 125 sessions whose sampled episode draws the arm on the real one
+   (1,473 of 2,733 moving episodes); 35 sessions stay NaN (30 visibly 5-10 cm off or another
+   room, 5 not judgeable). They need one rig each or transferred picks.
 5. **omnipicker grippers** (AgiBot G1/G2, genie-1, rw-rl g2): `ee.type` is `parallel` but
    there is no `gripper`/`aperture` column (the preset has no pads). Documented now in
    `output-spec.md`.

@@ -87,13 +87,13 @@ class Report:
 def inspect_episode(episode: Episode[int, int], root: Path) -> Report:
     """The report of one episode (loaded with any `decode`, frames are not used)."""
 
-    from r4r.data.lerobot import dataset_features, robot_record
+    from r4r.data.lerobot import dataset_features, robot_record, video_key
 
     features = dataset_features(root)
     cameras = tuple(
         CameraReport(
             name=c.name,
-            size=tuple(features[f"observation.images.{c.name}"]["shape"][:2]),
+            size=tuple(features[video_key(list(features), c.name)]["shape"][:2]),
             role=c.role,
             side=c.side,
             moving=c.moving,

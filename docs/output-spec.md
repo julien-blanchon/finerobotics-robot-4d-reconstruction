@@ -50,7 +50,8 @@ LeRobot v3 dataset (`r4r merge`). Code: `src/r4r/output.py` (columns), `src/r4r/
 | `observation.state_aligned` | J | joint state in the description's convention (below) |
 | `action_aligned` | J | only for absolute joint-target actions (below) |
 
-`<cam>` is the video key's suffix (`observation.images.<cam>`). `<arm>` comes from the priors'
+`<cam>` is the video key's suffix (`observation.images.<cam>`, or `observation.<cam>` for roots
+that keep their videos there, e.g. FetchMan). `<arm>` comes from the priors'
 `ee` block, or from the presets when the priors have none (`arm` for one end effector,
 `left`/`right` from the body names).
 

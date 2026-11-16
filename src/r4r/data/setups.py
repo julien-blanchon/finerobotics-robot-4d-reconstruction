@@ -69,10 +69,10 @@ def thumbnails(root: Path, episodes: Sequence[int], camera: str) -> Thumbnails:
     """Two decoded frames of `camera` per episode (its first and one `LATER` in), as gradient
     thumbnails and still masks (module doc). Episodes sharing a video file share one opening."""
 
-    from .lerobot import IMAGE_PREFIX, _root, seek_frames
+    from .lerobot import _root, seek_frames, video_key
 
     tables = _root(root).tables
-    key = IMAGE_PREFIX + camera
+    key = video_key(tables.video_keys, camera)
     by_file: dict[Path, list[tuple[int, float, float]]] = {}
     for e in episodes:
         path, start = tables.files(e).videos[key]

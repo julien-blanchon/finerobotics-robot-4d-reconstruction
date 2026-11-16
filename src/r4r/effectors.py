@@ -289,6 +289,20 @@ PRESETS: dict[str, EffectorPrior] = {
         orientation=_orientation((1, 0, 0), (0, 0, 1), (0, -1, 0)),
         fingertips=_tips("L", -1.0),
     ),
+    # Unitree Dex1 (MolmoSpaces G1 MJCF, `<side>_dex_base`): the gripper along the base's +y,
+    # two jaws sliding along its x (`*_Link1_*` on +x); fingertips at y = 0.147 (the jaw meshes'
+    # ends), pads on the jaws' inner faces there, 1.6 mm apart closed, 0.095 m open
+    "dex1": EffectorPrior(
+        type="parallel",
+        body="(left|right)_dex_base$",
+        position=(0.0, 0.147, 0.0),
+        orientation=_orientation((0, 0, 1), (1, 0, 0), (0, 1, 0)),
+        pads=(
+            RobotPoint("_Link1_3$", (0.0001, 0.0497, -0.0142)),
+            RobotPoint("_Link2_2$", (0.002, 0.0747, 0.0152)),
+        ),
+        closed=0.0016,
+    ),
 }
 
 # Presets that share body names with another and apply only under this parent body

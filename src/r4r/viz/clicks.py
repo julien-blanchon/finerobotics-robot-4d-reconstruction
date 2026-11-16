@@ -76,9 +76,11 @@ def _column(table: pa.Table, name: str) -> np.ndarray | None:
 def _episodes(shard: Path) -> Iterator[tuple[int, pa.Table, dict, list[str], dict]]:
     """Per episode: its frame indices, camera columns and end-effector points."""
 
+    from r4r.data.lerobot import camera_name
+
     table = pq.read_table(shard)
     layout = json.loads(table.schema.metadata[b"r4r.layout"])
-    cams = {k.removeprefix("observation.images."): v for k, v in layout["cameras"].items()}
+    cams = {camera_name(k): v for k, v in layout["cameras"].items()}
     arms = sorted({k.split(".")[2] for k in layout["features"] if k.startswith("observation.ee.")})
     index = np.array(table.column("episode_index").to_pylist())
     for episode in dict.fromkeys(index.tolist()):

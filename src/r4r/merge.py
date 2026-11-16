@@ -315,9 +315,12 @@ def _features(info: dict, layout: dict, full: bool) -> dict[str, dict]:
         else {k: v for k, v in main.items() if k in INDEX_COLUMNS or v["dtype"] == "video"}
     )
     features = {k: dict(v) for k, v in keep.items()}
-    for key, extra in layout["cameras"].items():
-        if key in features:
-            features[key]["info"] = {**features[key].get("info", {}), **extra}
+    from r4r.data.lerobot import camera_name
+
+    extras = {camera_name(k): v for k, v in layout["cameras"].items()}
+    for key, feature in features.items():
+        if feature.get("dtype") == "video" and camera_name(key) in extras:
+            feature["info"] = {**feature.get("info", {}), **extras[camera_name(key)]}
     return features | layout["features"]
 
 

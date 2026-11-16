@@ -285,6 +285,14 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   The arm joints became a side table (57k episodes fetched into memory in ~1 h, 1.8 GB in 58
   parquet files, no per-episode files) checked per episode against the delivered end-effector
   pose (0.000 mm). The simulator then gives ground truth for every camera.
+- **A MuJoCo joint equality drives `joint1` from `joint2`, and r4r follows it.** FetchMan's
+  MJCF couples the Dex1 jaws with `joint1 = recorded jaw, joint2 = other jaw`, so the recorded
+  value was overwritten by the unrecorded one (0) and the jaws were drawn 4-7 cm off in the
+  wrist view. Reverse the equality so the recorded joint is `joint2`.
+- **A simulator may record a projection that pins its jittered camera.** FetchMan randomises
+  its head camera per episode without recording it, but `observation.target_point` is the
+  target object projected through that camera: a per-episode fit to it gives the camera to
+  0.05 px. Look for such columns (target points, keypoints, visibility pixels) before solving.
 - **States may be commanded, not measured** (xrobotwin). Or absent: many Open X-Embodiment
   sets record only the end-effector pose. With no joint states there is no FK, so blocked.
 

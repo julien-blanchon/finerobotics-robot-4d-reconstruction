@@ -287,14 +287,14 @@ def ignored_cameras(root: Path) -> tuple[CameraInfo, ...]:
     """The dataset's video cameras (not depth maps) that the priors ignore, with what their
     feature info states (`camera.mount`, `camera.role`; lens from the priors)."""
 
-    from r4r.data.lerobot import _root
+    from r4r.data.lerobot import _root, camera_name
     from r4r.data.priors import CameraPrior
 
     opened = _root(root)
     out = []
     for key in opened.tables.video_keys:
         info = opened.tables.features[key].get("info", {}) or {}
-        name = key.removeprefix("observation.images.")
+        name = camera_name(key)
         prior = opened.priors.cameras.get(name, CameraPrior())
         if prior.ignore and not info.get("is_depth_map", False):
             mount = str(info.get("camera.mount") or "unknown")

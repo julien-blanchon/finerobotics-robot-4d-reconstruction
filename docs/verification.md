@@ -138,7 +138,10 @@ episodes (`priors/onboarding/toyota__hsr.md`, "Held-out diagnosis"):
 - The rest is per HSR unit (`source/hsr_id`, 50 units). No dataset-level head, tilt, focal, lag,
   lift or arm-joint parameter improves the held-out clicks, while a head-mount rotation fitted on
   one episode of a unit fixes another episode of that unit (hsrb55 22 → 8 px, hsrb045 34 → 4 px).
-  Needed: a head-camera mount per unit (stations by `hsr_id`), solved automatically per unit.
+  Needed: a head-camera mount per unit (stations by `hsr_id`, now in an episodes table), solved
+  automatically per unit. `r4r rig` with the head mount refined (focal held) does not agree with
+  the clicks on the two check robots (hsrb045 33 → 28 px, hsrb55 20 → 25 px; 1.1-1.6 px rig
+  residuals), so it was not run on all 50.
   Two of the 8 held-out clicks are not on a fingertip (a held bottle's top, a dark blob).
 
 **Still open:**

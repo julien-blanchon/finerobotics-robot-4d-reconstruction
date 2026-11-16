@@ -315,6 +315,11 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   or by eye; it is only checked if the wrist cameras calibrate.
 - **Humanoid bases need full 3-D odometry:** the pelvis pitches 2–4° even standing. Judge
   odometry by how far the free base departs from it.
+- **A still head camera's free pose trades focal against height:** RoboCOIN Kuavo's head, freed
+  as a static camera, came out 7–15 cm above the head with the focal at 320–392 px (1.9 px). With
+  the description's camera mount held and only the head-pitch zero free, the rig found +20–22°
+  (the recorded pitch reads 0) and the focal blind at 243–245 px, the upstream camera_info
+  value. Free the joint the camera hangs on, not the camera.
 - **Humanoids:** a leg-joint range above 0.1 rad per episode separates standing from walking
   episodes (13–100% walking by dataset): calibrate on standing ones first. A head that never
   moves while standing anchors nothing: the head mount comes by eye and is held.

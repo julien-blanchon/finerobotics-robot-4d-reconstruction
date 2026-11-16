@@ -173,6 +173,13 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   axis to put the two grippers where they are seen (4 equations, 4 unknowns). Reject samples where
   one gripper moves alone (60–100 px): no camera move does that. Keypoint transfer (RoMa) and
   RoMa flow failed on the same data: the room changes and the robot is only at the image edges.
+- **Jaw clicks on an unrecorded gripper mislead:** with the opening unknown, a click lands on one
+  fingertip pad, up to half the stroke from the modelled jaw midpoint. Score to the jaw line between
+  the fully open fingertips instead. HABIT: a reference camera solved on such picks sat 11 cm /
+  9 deg off the scene and its focal followed (238-308 px); a tracks-only rig with the wrist cameras
+  gave 367 px and drew the arm links on the real ones. What remained, the gripper drawn off at far
+  reach, was the gripper mount: its jaws 3.8 cm off the flange axis (a 14.5 deg tilt), found by
+  freeing the jaw point with that camera held. Check the arm links before blaming the camera.
 - **Merged roots mix setups:** community-v3 roots join many LeRobot repos, each with its own
   cameras and calibration (one root's overlay showed three rooms). Find the setup key first
   (`source/subtree` or `source/publisher_repo` in `meta/episodes`), write it as `station`, and

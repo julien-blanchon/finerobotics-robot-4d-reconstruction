@@ -622,10 +622,7 @@ def _write_kinematics(fit: RigFit, rig: _RigInputs, stride: int, episodes: tuple
             offsets[name] = round(offsets.get(name, 0.0) + value, 6)
     path = priors_path(rig.root)
     raw = json.loads(path.read_text())
-    target, group = raw, rig.loaded[0].priors.group
-    if group is not None:  # a dataset mixing robots: the group's own kinematics
-        target = raw["groups"][group]
-        target["kinematics"] = dict(target.get("kinematics", raw["kinematics"]))
+    target = kinematics_target(raw, rig.loaded[0].priors.group)
     target["kinematics"] |= {
         "offsets": offsets,
         "time_offset": round(spec.time_offset + fit.time_offset * stride, 4),
@@ -633,6 +630,19 @@ def _write_kinematics(fit: RigFit, rig: _RigInputs, stride: int, episodes: tuple
     }
     path.write_text(json.dumps(raw, indent=2) + "\n")
     print(f"wrote {path}")
+
+
+def kinematics_target(raw: JsonObject, group: str | None) -> JsonObject:
+    """The raw priors block whose `kinematics` a rig's fit goes into: the dataset's, or a
+    priors group's (a dataset mixing robots), started from the dataset's when the group has
+    none (either may be absent)."""
+
+    if group is None:
+        raw.setdefault("kinematics", {})
+        return raw
+    target = raw["groups"][group]
+    target["kinematics"] = dict(target.get("kinematics") or raw.get("kinematics", {}))
+    return target
 
 
 def _write_odometry(fit: RigFit, rig: _RigInputs, episodes: tuple[int, ...]) -> None:

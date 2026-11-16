@@ -4,6 +4,81 @@ Every dataset whose onboarding status row starts with "ready" (plus the ready st
 abc-130k, AgiBot G1 and openneodata arx5/flexiv) was run end to end on a random sample, from
 the delivered root to a merged twin. Nothing here is a full-dataset run.
 
+## Held-out click validation of the real datasets (2026-11-16)
+
+The overlays below were read by eye. Clicked points on held-out episodes measure them, and
+**no real dataset holds at the bar of ~15 px median** (about 2.3 % of the image width, the
+cobot lanes' 640 px bar scaled). Simulated datasets are covered by the ground truth below.
+
+**Method** (`python -m r4r.viz.clicks`, `src/r4r/viz/clicks.py`):
+1. `sample`: ~10 random episodes spread over data files and stations, without any episode
+   that a rig, picks or check in the onboarding record used.
+2. `r4r reconstruct … --episodes … --uncalibrated nan` (CPU, commit `5234868`/`698201f` priors).
+3. `make`: per episode, one scene-view moment (the gripper farthest from where it started,
+   inside the image) and one wrist-view moment showing the other arm (bimanual). The raw frame is
+   saved with a pixel grid and a zoom, with nothing drawn.
+4. One real fingertip is clicked per target (hidden or ambiguous ones skipped), and `score`
+   measures the error:
+   - to the nearer drawn jaw point `TCP ± y·w/2` (the opening recorded);
+   - to the open jaw line when the opening is constant;
+   - hiw-500 has no EE columns, so its clicks are scored on the flange point.
+   Projection is OpenCV on the twin's columns, independent of r4r's camera code.
+5. `score` also moves the drawn points along the approach axis and reports the error at the
+   median best shift. A large drop at one consistent shift means the TCP depth (the
+   description's gripper length) is wrong, not the camera.
+6. Click noise is about 5-10 px: grippers are often small, blurred or in fisheye views.
+
+Clicks, targets and drawn points, one JSON per dataset:
+`/e/scratch/reformo/blanchon1/r4r-cache/verify/clicks/<family>__<dataset>.json`.
+
+| dataset | h | n (skipped) | median / p90 / max px | image | % width | TCP shift → median | verdict | pattern |
+|---|---|---|---|---|---|---|---|---|
+| airoa-moma-5k (HSR) | 5025 | 8 (1) | 36.9 / 70.8 / 108 | 512×384 | 7.2 | −2 cm → 27.4 | fail | head off per episode, ahead of or beside the fingers |
+| agibot-world g1-cohort-04 | 2620 | 23 (7) | 71.1 / 122 / 146 | 512×384 (fisheyes 512×410) | 13.9 | +10 cm (scan edge) → 27.6 | fail | top_head 71 px, drawn 1.3-1.6× farther from the image centre than the real grippers (focal); hands seeing the other arm 98 px; fisheyes 20-46 px; jaw points at the jaw roots (TCP short); lag ±45 frames ruled out |
+| abc-130k abc-640x480 | 1752 | 21 (19) | 17.4 / 42.0 / 54.0 | 512×384 | 3.4 | +1 cm → 17.5 | fail | top 16.4 px (n 14), wrists 26.9 (left 38). Per station (top / wrist): 2: 17; 8: 16; 9: 54; 18: 17; 19: 21, 16 / 17; 22: 7 / 14; 24: 10; 26: wrist 42; 27: 15 / 34; 29: 8 / 26; 30: 10 / 27; 31: 20; 35: 24 / 47; 37: 41 |
+| abc-130k abc-848x480 | 723 | 19 (11) | 17.0 / 49.4 / 54.8 | 512×290 | 3.3 | +3 cm → 15.7 | fail | top 14.1 px (n 12, holds); wrists 46.5 (left 47.8): the wrist mounts |
+| molmoact2-yam bimanual-yam | 704 | 10 (10) | 35.6 / 113 / 115 | 512×288 | 7.0 | −5 cm → 31.7 | fail | top 25.2 px (per-episode light solve), wrist views of the other arm 114 px |
+| openneodata arx5 (8 stations) | 660 | 7 (13) | 24.1 / 69.5 / 137 | 512×384 | 4.7 | +1 cm → 24.0 | fail (low confidence) | third view 16-25 px in no common direction (light solve per episode); one wrist 137 px |
+| g2-cohort-01 | 516 | 18 (12) | 29.6 / 85.2 / 148 | 512×320 / 410 / 422 | 5.8 | +4 cm → 26.9 | fail | top_head 41 px, hands 27, head fisheye 14; per episode (cart episodes 1696, 10102, 26517 and 5166 worst: problem 8) |
+| droid | 512 | 18 (2) | 13.4 / 86.6 / 109 | 320×180 | 4.2 | +3 cm → 12.9 | fail (% width) | 6 of 9 episodes 3-17 px; 29119 and 74644 (recorded calibration, not flagged) 80-110 px, 27915 (flagged, light solve) 57-86 px: exterior pose wrong per episode |
+| galaxea-open-world r1-lite | 484 | 11 (6) | 24.4 / 32.1 / 49.9 | 512×288 | 4.8 | −2 cm → 22.4 | fail | head views 23.5 px in mixed directions (parked episodes; no driving one sampled), wrists 32 |
+| flexiv-rizon4 (1 station) | 412 | 10 (0) | 50.4 / 70.1 / 72.1 | 512×384 | 9.8 | +10 cm → 11.6 | fail | all drawn 45-70 px above the fingertips, flange clicks 2-11 px: the description's gripper ~10 cm shorter than the real one |
+| hiw-500 | 378 | 10 (5) | 11.0 / 31.8 / 41.5 | head 256×192, wrists 512×384 | 4.3 | — | fail (% width) | flange point: head drawn 7-22 px above in 5 of 7 (≈ 26 px at 640), wrist views of the other arm 29-38 px low |
+| realsource-world | 341 | 15 (4) | 14.8 / 120 / 218 | 512×288 | 2.9 | +1 cm → 13.0 | fail (% width, borderline) | head 14.8 px (max 25); hand cameras 4 of 6 within 28 px, 2 at 181-218 px (18189, 20401: the per-episode hand record wrong) |
+| robomind2 agilex-5b28 Piper | 333 | 12 (3) | 59.8 / 96.9 / 205 | 512×384 | 11.7 | +6 cm → 38.9 | fail | drawn above the real jaws in front and wrist views at every station; 17882 ~200 px (held front camera off) |
+| g2-cohort-02 | 198 | 10 (5) | 20.0 / 38.3 / 43.1 | 512×320 / 410 / 422 | 3.9 | +6 cm → 11.6 | fail | mostly TCP depth (omnipicker_g2) |
+| rw-rl r1lite (5 datasets, pooled) | 165 | 10 (10) | 15.1 / 57 / 59 | 512×288 | 2.9 | per dataset, signs differ | fail (borderline) | top views 4-22 px, three outliers (tissue 403, plug 239 wrist, scan 1845) |
+| openneodata aloha | 157 | 7 (10) | 54.9 / 228 / 234 | 512×384 | 10.7 | +10 cm → 62.9 | fail | third view (light solve per episode) 45-68 px off on most; 2 clicks ~230 px |
+| robomind agilex-real | 59 | 16 (4) | 55.9 / 75.5 / 80.3 | 512×384 | 10.9 | +6 cm → 42.0 | fail | as agilex-5b28: drawn jaw points at the jaw roots and above the real jaws in front and wrist views; state lag ruled out (best at 0-2 frames) |
+| robomind ur5e-real | 36 | 11 (0) | 19.4 / 27.6 / 61.7 | 512×384 | 3.8 | +4 cm → 15.4 | fail | drawn 10-30 px above; part gripper length, rest per-session camera |
+| rdt-ft-data | 30 | 11 (9) | 44.3 / 71.1 / 79.8 | 512×384 | 8.7 | 0 cm → 44.3 | fail | cam_high 34 px in a different direction per room (one held pose for every room); wrists 67 |
+| xvla-soft-fold | 26 | 13 (7) | 22.1 / 68.1 / 98.0 | 512×384 | 4.3 | +2 cm → 20.1 | fail | cam_high 2-9 px on 5 of 10 episodes, 19-25 px on most others; wrists 22-73 px |
+| g2-cohort-03 | 6 | 5 (4) | 12.8 / 23.3 / 26.0 | 512×320 / 410 | 2.5 | +8 cm → 7.8 | holds in px, 5 clicks only | TCP depth |
+| openneodata ur5e (station stack-cups-reversely-A, partial) | ~1 | 10 (0) | 34.5 / 46.7 / 51.2 | 512×384 | 6.7 | +5 cm → 10.3 | fail | all drawn up-right of the fingertips: gripper length |
+| robocoin lane103 (earlier) | 62 | 7 | 12.5 / — / 27 | | | | holds | `priors/onboarding/agilex__cobot_magic.md` |
+
+**Hours.** Holding: lane103 (62 h) and g2-cohort-03 (6 h, 5 clicks), about 68 h. Failing:
+about 15,100 h of real data by dataset hours (flexiv's ready part is one station of ~9 h, arx5
+660 h is its 8 calibrated stations). Of these, abc-848 top (723 h) and realsource-world head
+(341 h) are at the line and fail on their wrist or hand cameras.
+
+**Patterns:**
+- **The gripper drawn short of the real fingertips: TCP depth or gripper length.** At one
+  shift for the whole dataset the error mostly goes: flexiv (+10 cm), openneodata ur5e
+  (+5 cm), g2-cohort-02/03 (+6/+8 cm). It also accounts for part of the error in
+  agilex-real, agilex-5b28 and g1 (+6 to +10 cm, ~40 / 28 px left). The cameras of these
+  datasets are better than the plain numbers say; the twin's EE points are not.
+- **Per-episode or per-session camera error.** droid (a third of episodes, recorded or
+  light-solved), airoa-moma head, g2-cohort-01 (cart), molmoact2, openneodata arx5 and aloha
+  (light-solved third views 16-68 px), rdt (one cam_high for many rooms), ur5e-real sessions.
+  The keyframe check (`check_px`) did not flag droid 29119 and 74644 (80-110 px off).
+- **Focal / scale:** g1-cohort-04 top_head (fx 256.6, aspect 1.33): the drawn points spread
+  1.3-1.6× wider than the real ones.
+- **Wrists:** abc-848 and abc-640 left wrists (38-48 px), molmoact2 (114 px), hiw-500,
+  agilex wrists; realsource-world 2 per-episode hand records far off.
+- Not far-reach only. Lag was scanned on agilex-real (±20 frames) and g1 (±45): no effect.
+
+
 ## Method
 
 Per dataset, CPU only (`CUDA_VISIBLE_DEVICES=""`, `OMP_NUM_THREADS=8`), commit `54b8e49`:

@@ -29,6 +29,7 @@ meshes enter a solve; everything else stays mesh-free.
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -42,11 +43,24 @@ from r4r.geometry import se3
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     import mujoco
     from torch import Tensor
 
-    from r4r.types import RGB, UV, XYZ, Mat4x4, Scalar
+    from r4r.types import RGB, UV, XYZ, Mat4x4
+
+    from .robot import BodyMount, CameraMount, Robot
+
+
+# A frame is a candidate when this share of the robot's points moved from rest, and its mask
+# covers less than this share of the image (more is a lighting change)
+MOVED_SHARE = 0.2
+MAX_AREA = 0.4
+# A point explains mask pixels when its weight (moved share × finger weight) exceeds this
+EXPLAINS = 0.05
+# Joint values beyond this (rad or m) are corrupt state rows (robomind2 agilex: −292.66)
+CORRUPT = 10.0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -65,7 +79,7 @@ class SilhouetteConfig:
     moved: float = 0.04
     finger_weight: float = 0.3
     # Weight of the mask-to-model term against the model-to-mask one
-    coverage_weight: float = 1.0
+    coverage_weight: float = 0.5
     # Robust scale schedule (pixels) and Adam steps per scale; learning rates (rad, m, log f)
     sigmas: tuple[float, ...] = (40.0, 20.0, 10.0, 5.0)
     steps: int = 60
@@ -80,8 +94,11 @@ class SilhouetteConfig:
     # Starts per seed: perturbations of the seed's orientation (degrees) and position (m)
     turn_deg: float = 10.0
     shift: float = 0.1
-    # Score: a moved point within this many pixels of the mask is inside it
+    # Score: a moved point within this many pixels of the mask is inside it; a setup passes
+    # with at least these held-out precision and IoU
     inside_px: float = 3.0
+    pass_precision: float = 0.7
+    pass_iou: float = 0.3
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +142,9 @@ def surface_points(
     bodies, points, finger = [], [], []
     for body, parts in sorted(by_body.items()):
         triangles = np.concatenate([v[f] for v, f in parts])  # [faces, 3 corners, 3]
-        area = np.linalg.norm(np.cross(*(triangles[:, 1:] - triangles[:, :1]).transpose(1, 0, 2)), axis=-1)
+        area = np.linalg.norm(
+            np.cross(*(triangles[:, 1:] - triangles[:, :1]).transpose(1, 0, 2)), axis=-1
+        )
         if area.sum() <= 0:
             continue
         chosen = rng.choice(len(triangles), count, p=area / area.sum())
@@ -133,7 +152,9 @@ def surface_points(
         flip = a + b > 1
         a, b = np.where(flip, 1 - a, a), np.where(flip, 1 - b, b)
         corner = triangles[chosen]
-        points.append(corner[:, 0] + a * (corner[:, 1] - corner[:, 0]) + b * (corner[:, 2] - corner[:, 0]))
+        points.append(
+            corner[:, 0] + a * (corner[:, 1] - corner[:, 0]) + b * (corner[:, 2] - corner[:, 0])
+        )
         bodies.append(np.full(count, body))
         finger.append(np.full(count, bool(re.search(fingers, model.body(body).name))))
     return (
@@ -247,7 +268,7 @@ def loss(
     """Per camera `S`: weighted mean of moved points' robust distance to the mask, plus
     `coverage_weight` × mean of mask samples' robust distance to the robot (now or at rest)."""
 
-    frames, height, width = data.distance.shape
+    _frames, height, width = data.distance.shape
     step = max(config.points // config.explainers, 1)
     uv, front = project(rotation, centre, focal, (height, width), data.now)
     grid = torch.stack([uv[..., 0] / (width - 1), uv[..., 1] / (height - 1)], -1) * 2 - 1
@@ -265,9 +286,12 @@ def loss(
     # Points outside the image say nothing (the mask ends at the border)
     precision = (_rho(distance, sigma) * weight).sum((1, 2)) / weight.sum((1, 2)).clamp(min=1)
 
+    # Only points that moved explain a change (a static body near the camera would explain
+    # anything): where they are now and where the background shows them
     rest_uv, rest_front = project(rotation, centre, focal, (height, width), data.rest[:, ::step])
     explain = torch.cat([uv[:, :, ::step], rest_uv], 2)
-    valid = torch.cat([front[:, :, ::step], rest_front], 2)
+    moving = (data.weight[:, ::step] > EXPLAINS)[None]
+    valid = torch.cat([front[:, :, ::step] & moving, rest_front & moving], 2)
     samples = data.samples[None].expand(count, -1, -1, -1)
     with torch.no_grad():
         gap = torch.cdist(samples.nan_to_num(-1e4), explain)  # [S, F, M, 2N]
@@ -275,7 +299,7 @@ def loss(
         nearest = gap.argmin(-1)
     chosen = torch.gather(explain, 2, repeat(nearest, "s f m -> s f m uv", uv=2))
     near = torch.linalg.norm(samples - chosen, dim=-1)
-    known = ~samples[..., 0].isnan()
+    known = ~samples[..., 0].isnan() & valid.any(-1)[..., None]
     coverage = (_rho(near.nan_to_num(0.0), sigma) * known).sum((1, 2)) / known.sum((1, 2)).clamp(
         min=1
     )
@@ -314,7 +338,9 @@ def fit(
 
     rotation, centre, focal = (x.to(data.now) for x in starts(seeds, config))
     coarse, fine = config.sigmas[: config.coarse], config.sigmas[config.coarse :]
-    rotation, centre, focal, losses = _descend(data, rotation, centre, focal, coarse, free_focal, config)
+    rotation, centre, focal, losses = _descend(
+        data, rotation, centre, focal, coarse, free_focal, config
+    )
     best = torch.argsort(losses)[: config.keep]
     rotation, centre, focal, losses = _descend(
         data, rotation[best], centre[best], focal[best], fine, free_focal, config
@@ -333,9 +359,21 @@ def _descend(
     free_focal: bool,
     config: SilhouetteConfig,
 ) -> tuple[Tensor[[int, 3, 3]], Tensor[[int, *XYZ]], Tensor[[int]], Tensor[[int]]]:
-    """Adam on every camera's rotation, centre (and log focal) through `sigmas`: the cameras
-    and their losses at the last scale."""
+    """Adam on every camera's pose (and log focal) through `sigmas`: the cameras and their
+    losses at the last scale.
 
+    The pose moves in the camera frame about a pivot `p` on the optical axis at the robot's
+    median depth: `X_c = E (X_c0 − p) + p + t`, `E = exp(ω)`, i.e. `R = R0 Eᵀ`,
+    `c = c0 + R0 p − R (p + t)`. Turning about the robot rather than the camera centre keeps
+    rotation and translation nearly independent (a camera turned about its centre moves the
+    whole image, which a translation then undoes: a slow valley for Adam).
+    """
+
+    with torch.no_grad():
+        local = einsum(rotation0, data.now[None] - centre0[:, None, None], "s j i, s f n j -> s f n i")
+        depth = local[..., 2].flatten(1).median(1).values.clamp(min=0.1)
+    pivot = torch.zeros_like(centre0)
+    pivot[:, 2] = depth
     turn = torch.zeros_like(centre0, requires_grad=True)
     move = torch.zeros_like(centre0, requires_grad=True)
     zoom = torch.zeros_like(focal0, requires_grad=True)
@@ -348,7 +386,13 @@ def _descend(
     optimiser = torch.optim.Adam(groups)
 
     def camera() -> tuple[Tensor, Tensor, Tensor]:
-        return rotation0 @ se3.so3_exp(turn), centre0 + move, focal0 * torch.exp(zoom)
+        rotation = rotation0 @ se3.so3_exp(turn).mT
+        centre = (
+            centre0
+            + einsum(rotation0, pivot, "s i j, s j -> s i")
+            - einsum(rotation, pivot + move, "s i j, s j -> s i")
+        )
+        return rotation, centre, focal0 * torch.exp(zoom)
 
     for sigma in sigmas:
         for _ in range(config.steps):
@@ -383,7 +427,9 @@ def score(
     frames, height, width = data.distance.shape
     camera = pose.to(data.now)
     focal_t = torch.tensor([focal]).to(data.now)
-    uv, front = project(camera[None, :3, :3], camera[None, :3, 3], focal_t, (height, width), data.now)
+    uv, front = project(
+        camera[None, :3, :3], camera[None, :3, 3], focal_t, (height, width), data.now
+    )
     u, v = uv[0, ..., 0].round().long(), uv[0, ..., 1].round().long()
     inside = front[0] & (u >= 0) & (u < width) & (v >= 0) & (v < height)
     near = torch.zeros_like(inside)
@@ -423,3 +469,154 @@ def render(
         if near.any():
             cv2.fillPoly(out, list(polygons[near].astype(np.int32)), 255, shift=2)
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeFrames:
+    """One episode's frames kept for a fit or a score (module doc, steps 1-3): the posed surface
+    points now and at rest [F, N, 3], which points are fingers, the masks, the bodies' poses
+    now [F, L, 4, 4] and at rest [L, 4, 4] (for drawing) and the frame indices."""
+
+    now: Tensor[[int, int, *XYZ]]
+    rest: Tensor[[int, int, *XYZ]]
+    finger: Tensor[[int]]
+    masks: list[np.ndarray]
+    world: Tensor[[int, int, *Mat4x4]]
+    world_rest: Tensor[[int, *Mat4x4]]
+    frames: list[int]
+
+
+def episode_frames(
+    images: Tensor[[int, *RGB, int, int]],
+    world: Tensor[[int, int, *Mat4x4]],
+    qpos: Tensor[[int, int]],
+    frames: Sequence[int],
+    model: tuple[Tensor[[int]], Tensor[[int, *XYZ]], Tensor[[int]]],
+    config: SilhouetteConfig,
+) -> EpisodeFrames:
+    """From an episode's `frames` (decoded `images`, bodies' poses `world`, joints `qpos`): the
+    background, the rest frame and the `kept` frames whose masks are largest (below 40 % of the
+    image: a lighting change, not the robot) among those where the robot moved from rest, at
+    least 3 frames apart. `model`: `surface_points`."""
+
+    body, local, finger = model
+    back = background(images)
+    rest = rest_frame(qpos)
+    now = posed(world, body, local)
+    at_rest = now[rest : rest + 1].expand_as(now)
+    moved = (torch.linalg.norm(now - at_rest, dim=-1) / config.moved).clamp(max=1).mean(1)
+    pictures = rearrange(images, "t c h w -> t h w c").numpy()
+    masks = [change_mask(p, back, config) for p in pictures]
+    area = torch.tensor([float((m > 0).mean()) for m in masks])
+    order = torch.argsort(area * (moved > MOVED_SHARE) * (area < MAX_AREA), descending=True)
+    kept: list[int] = []
+    for i in order.tolist():
+        if all(abs(i - j) >= 3 for j in kept):
+            kept.append(i)
+        if len(kept) == config.kept:
+            break
+    return EpisodeFrames(
+        now[kept],
+        at_rest[kept],
+        finger,
+        [masks[i] for i in kept],
+        world[kept],
+        world[rest],
+        [frames[i] for i in kept],
+    )
+
+
+def stacked(episodes: Sequence[EpisodeFrames], config: SilhouetteConfig) -> Views:
+    """`Views` of several episodes' kept frames together."""
+
+    return views(
+        torch.cat([e.now for e in episodes]),
+        torch.cat([e.rest for e in episodes]),
+        episodes[0].finger,
+        [m for e in episodes for m in e.masks],
+        config,
+    )
+
+
+def scored(
+    episodes: Sequence[EpisodeFrames],
+    pose: Tensor[[*Mat4x4]],
+    focal: float,
+    geoms: Sequence[tuple[int, np.ndarray, np.ndarray]],
+    config: SilhouetteConfig,
+) -> SilhouetteScore:
+    """`score` of a camera on episodes' kept frames, the robot drawn now ∪ at rest."""
+
+    drawn = []
+    camera = pose.double().numpy()
+    for episode in episodes:
+        rest = episode.world_rest.double().numpy()
+        for k, mask in enumerate(episode.masks):
+            size = mask.shape[:2]
+            now = render(episode.world[k].double().numpy(), camera, focal, size, geoms)
+            both = now | render(rest, camera, focal, size, geoms)
+            # Decimated meshes leave pinholes
+            drawn.append(cv2.morphologyEx(both, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)))
+    return score(stacked(episodes, config), pose, focal, drawn, config)
+
+
+@dataclass(frozen=True, slots=True)
+class Loaded:
+    """An episode's kept frames for one static camera, the camera's prior placement
+    (`base_from_camera` or None, focal or None, the focal's relative range) and the description's
+    drawn surfaces (for `scored`)."""
+
+    frames: EpisodeFrames
+    prior: tuple[Tensor[[*Mat4x4]] | None, float | None, float | None]
+    geoms: list[tuple[int, np.ndarray, np.ndarray]]
+
+
+def load(root: Path, number: int, camera: str, config: SilhouetteConfig) -> Loaded | None:
+    """Episode `number` of the dataset `root` prepared for `camera` (module doc, steps 1-3):
+    `frames` frames decoded alone, the description posed by the priors' corrected kinematics.
+    None when its state holds corrupt values (|q| > 10)."""
+
+    from r4r.data.lerobot import keyframes, load_episode
+
+    from .kinematics import corrected_qpos, forward_kinematics
+    from .robot import CameraMount, body_mounts, qpos_from_state
+
+    episode = load_episode(root, number, decode=())
+    mounts = tuple(
+        CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in episode.cameras
+    )
+    bodies = body_mounts(episode.priors)
+    robot, model, geoms = _model(episode.robot, mounts, bodies, config.points)
+    qpos = qpos_from_state(robot, episode.state.to(torch.float64), episode.joints)
+    fitted = episode.priors.kinematics
+    if fitted is not None:
+        qpos = corrected_qpos(robot, qpos, fitted.offsets, fitted.time_offset)
+    if bool((qpos.abs() > CORRUPT).any()):
+        return None
+    frames = np.linspace(0, len(qpos) - 1, config.frames).round().astype(int).tolist()
+    images = keyframes(root, number, frames, [camera])[camera]
+    world = forward_kinematics(robot, qpos[frames])
+    kept = episode_frames(images, world, qpos[frames], frames, model, config)
+    prior = next(c.prior for c in episode.cameras if c.name == camera)
+    pose = None
+    if prior.position is not None and prior.orientation is not None:
+        rotation = se3.quaternion_to_matrix(torch.tensor(prior.orientation, dtype=torch.float64))
+        pose = se3.from_rotation_translation(
+            rotation, torch.tensor(prior.position, dtype=torch.float64)
+        )
+    return Loaded(kept, (pose, prior.focal, prior.focal_range), geoms)
+
+
+@functools.cache
+def _model(
+    path: Path, mounts: tuple[CameraMount, ...], bodies: tuple[BodyMount, ...], points: int
+) -> tuple[Robot[int, int, int], tuple[Tensor[[int]], Tensor[[int, *XYZ]], Tensor[[int]]], list]:
+    """A description's kinematics, surface points and drawn surfaces, once per process."""
+
+    from r4r.viz.overlay import surfaces
+
+    from .robot import compile_model, load_robot
+
+    robot = load_robot(path, cameras=mounts, bodies=bodies).to("cpu", torch.float64)
+    model = compile_model(path, None, mounts, bodies, visual=True)
+    return robot, surface_points(model, points), surfaces(model)

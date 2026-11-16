@@ -327,7 +327,13 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   dataset or station scope, `r4r reconstruct` holds them: most ready datasets then need no video
   at all (13-40 ms per episode). Check `r4r reconstruct <dataset> --plan` before launching: it
   names what is still uncalibrated (a focal, a static pose without ranges, an odometry without
-  its correction, a station never rigged).
+  its correction, a station never rigged). A rig result that lives only in a record or the
+  priors' notes is not calibrated for reconstruct: nine "ready" datasets failed the 2026-11-16
+  verification that way. When a rig ran without `--write`, its `--save` file still holds
+  everything (static poses, focals, `world_from_body` for body corrections and the solved base
+  for the odometry gain).
+- **Thread count:** with every core per process, light episodes slowed ~6× on a loaded login
+  node. `r4r reconstruct` now takes 8 threads unless `OMP_NUM_THREADS` is set.
 - **Recorded per-frame camera poses are worth a pose column, even jittery ones:** the robust
   median per episode (`base_from_camera` layout) put ARX Lift-2's hands within 0-0.5 cm median
   of every recorded frame and separated AgiBot G1's two calibration families (hands 6-7 cm

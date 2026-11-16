@@ -46,13 +46,13 @@ unless stated.
 | groot gr1-arms-and-waist-fourier-hands | 841 | fast | 2 / 0 | 10 fast | none | — | arms on the arms; drawn fingers do not follow the rendered hands. **No EE columns** |
 | interndata-m1 franka-robotiq | 811 | light | 324 / 0 | 10 light | none | EE exact (0.00 mm) vs `eef_position/quaternion` = link8 (−149.3 mm, 45°) | ok |
 | abc-130k abc-848x480 (15 stations) | 723 | light (227 full now: top focal unknown) | 31 / 0.2 | 10 light | none | — | skeleton ok. **No EE columns** |
-| molmoact2-yam bimanual-yam | 704 | light after 1 rig | 46 / 0.25 | **10 failed** | — | — | — (not ready, below) |
+| molmoact2-yam bimanual-yam | 704 | light (top camera per episode) | 46 / 0 | 10 light (85 s) | none | — | skeleton on both arms in the top view (fixed 2026-11-16). **No EE columns** |
 | openneodata arx5 (8 stations) | 660 | 31.9k light, 414 neighbour, 1096 odd; 27.6k full now | 52 / **95** | 9 light, 1 fast | none | — | ok |
 | interndata-a1-sim franka-5c46641bda | 527 | fast | 1 / 0 | 10 fast | none | head 0.00 cm; hand 0.34 cm (p95 1.1); EE resid 3.5 mm (45.7 mm, 45° convention) | ok |
 | agibot-world g2-cohort-01 | 516 | fast | 0.6 / 0 | 10 fast | none | — | ok; no gripper/aperture (omnipicker) |
 | droid | 512 | 95.6k fast (checked), **8 full** | 66 / 0.02 | 3 fast, 7 light (flagged) | none | — | ok |
 | robointer-droid | 512 | as droid, 8 full | 66 / 0.02 | 7 fast, 3 light | none | — | ok |
-| galaxea-open-world r1-lite | 484 | fast after 1 rig | 0.3 / 0.25 | **10 failed** | — | — | — (not ready, below) |
+| galaxea-open-world r1-lite | 484 | fast | 0.3 / 0 | 10 fast | none | — | fingers on the wrist fingers; base motion not checkable on video (fixed 2026-11-16). **No EE columns** |
 | molmobot rby1-door-opening | 426 | fast | 0.7 / 0 | 10 fast | none | cameras 0.02-0.03 cm, 0.01° | ok |
 | openneodata flexiv-rizon4 (1 station) | 412 | fast 444 / full 20.4k now | 0.4 / 0 | 10 fast | left_wrist (ignored) | — | ok |
 | realsource-world | 341 | fast | 0.4 / 0 | 10 fast | none | — | meshes on the wrist grippers. **No EE columns** |
@@ -61,19 +61,19 @@ unless stated.
 | agibot-world g2-cohort-02 / -03 | 198 / 6 | fast | ~0 | 10 fast | none | — | ok; no gripper/aperture |
 | molmobot rby1-open / pick-10 / pick-15.15 | 189 / 143 / 55 | fast | ~0 | 10 fast | none | cameras ≤ 0.04 cm, ≤ 0.015°; EE 0.1-0.2 mm (30.3 mm, 180° convention) | ok |
 | interndata-a1-sim genie-1 | 174 | fast | 0.5 / 0 | 10 fast | none | head 0.25 cm; wrists 0.2-1.1 cm (p95 3-4 cm, 4°); EE resid 1 mm, **p95 29 mm** | ok; no gripper/aperture |
-| openneodata aloha | 157 | fast after 1 rig | 0.2 / 0.25 | **10 failed** | — | — | — (not ready) |
+| openneodata aloha | 157 | light (third view per episode) | 17 / 0 | 10 light | none | — | arms on the real ones within a few cm in the third view, right gripper up to ~5 cm off in one episode; wrist fingers approximate (fixed 2026-11-16) |
 | interndata-a1-sim franka-b090d20bcf | 142 | fast | 0.5 / 0 | 10 fast | none | head 0.00 cm; hand 0.43 cm / 0.74°; EE resid 4.1 mm | ok |
 | axis sim-sawyer-cohort-02 | 108 | fast | 0.1 / 0 | 10 fast | none | — | meshes on the arm. **No EE columns** |
 | interndata-m1 franka-panda | 64 | light | 25 / 0 | 10 light | none | EE position exact (0.00 mm) at link8 | ok |
-| open-x-embodiment maniskill-sim | 63 | fast | 0.3 / 0 | 10 fast | none | EE exact; cameras exact in 7 episodes, **4-49 cm / 90° off in 3** | **wrong in those episodes** |
-| robomind agilex-real | 59 | fast after 1 rig | 0.1 / 0.25 | **10 failed** | — | — | — (not ready) |
+| open-x-embodiment maniskill-sim | 63 | fast (main camera per episode: 6 setups) | 0.3 / 0 | 10 fast | none | EE exact; cameras 0.00 cm in all 10 (fixed 2026-11-16) | ok |
+| robomind agilex-real | 59 | fast | 0.1 / 0 | 10 fast | none | — | right gripper on the real one in camera_front, jaw points on the wrist jaws (fixed 2026-11-16) |
 | deco50 body35 | 45 | fast | 0.1 / 0 | 10 fast | none | — | hands approximate (frames off by ~5% of the width in one episode) |
 | rw-rl r1lite-spray-bottle-head-install | 44 | fast | ~0 | 10 fast | none | — | meshes on the jaws and arms. **No EE columns** |
 | robomind ur5e-real (moving episodes) | 36 | fast (1 placement) | 0.2 / 0 | 10 fast | **camera_top in all 10** | — | only camera NaN |
-| rw-rl r1lite-shelf-restock / tissue-box / scan-item / plug-charger | 33 / 33 / 30 / 25 | fast after 1 rig | ~0 / 0.25 | **10 failed each** | — | — | — (not ready) |
+| rw-rl r1lite-shelf-restock / tissue-box / scan-item / plug-charger | 33 / 33 / 30 / 25 | fast | ~0 / 0 | 10 fast each | none | — | fingers on the wrist fingers; base motion not checkable on video (fixed 2026-11-16). **No EE columns** |
 | rw-rl g2-box-unpack-pack (+ carton, auto-parts, zip-tie, key) | 32 (+64) | fast | ~0 | 10 fast each | stereo pair (ignored) | — | ok; no gripper/aperture |
-| rdt-ft-data | 30 | fast after 1 rig | 0.1 / 0.25 | **10 failed** | — | — | — (not ready) |
-| xvla-soft-fold | 26 | fast after 1 rig | ~0 / 0.25 | **10 failed** | — | — | — (not ready) |
+| rdt-ft-data | 30 | fast | 0.1 / 0 | 10 fast | none | — | cam_high sees the grippers only at its top edge, TCPs drawn near them; right base weakly pinned (fixed 2026-11-16) |
+| xvla-soft-fold | 26 | fast | ~0 / 0 | 10 fast | none | — | TCPs on both grippers in cam_high; one episode-end frame off (its streams out of step) (fixed 2026-11-16) |
 | abc-130k abc-1280x720 | 23 | light | 1.4 / 0 | 10 light | none | — | skeleton ok. **No EE columns** |
 | humanoid-everyday h1 | 15 | fast | ~0 | 10 fast | none | — | ok (hands, fingertips) |
 | groot panda-dex-rh / panda | 14 / 12 | fast | ~0 | 10 fast | none | — | ego/front ok; dex-rh EE is typed parallel (dex hands not in the description) |
@@ -97,6 +97,14 @@ says `not calibrated` or the camera is ignored (`camera.calibrated: false`).
    - no `base_odometry.correction`: galaxea-open-world r1-lite (484 h) and rw-rl
      r1lite-shelf-restock, -tissue-box, -scan-item, -plug-charger;
    - focal unknown for every camera: xvla-soft-fold.
+
+   **Fixed 2026-11-16:** every one of these rigs had a `--save` file; the values were written
+   from it as `rig --write` would (body corrections `E = nominal⁻¹ · fitted`, ranges = group
+   disagreement; odometry gains with `odometry.fit_gain` against the saved base; xvla's focals
+   and cam_high pose). openneodata aloha's third view is now episode scope (it is re-placed
+   between sessions). Each was re-run as above (rows marked "fixed 2026-11-16"). Weak spots:
+   agilex-real and rdt right bases (groups 6-8 cm / 10-14° apart), the r1lite gains (two fits
+   differ by ~20 %; tissue-box, scan-item and plug-charger reuse shelf-restock's).
 2. **No end-effector columns** (no `ee` block and no preset matches): airoa-moma-5k (HSR),
    gr1 fourier hands, abc-130k (3 roots) and molmoact2-yam (YAM gripper), groot r1-pro roots,
    realsource-world, axis sim-sawyer, r1lite-spray-bottle, unitree-z1. Together about 10,000 h.
@@ -104,6 +112,9 @@ says `not calibrated` or the camera is ignored (`camera.calibrated: false`).
    takes 5 distinct values over the 30,213 episodes (22,046 / 4,597 / 1,691 / 971 / 908);
    the priors hold the most common one for all, so ~27% of episodes get a wrong static
    camera (24 cm / 90° off in sampled episode 2065). EE and wrist are exact.
+   **Fixed 2026-11-16:** in the base frame there are 6 setups (the robot base also moves:
+   17,151 / 4,895 / 4,597 / 1,691 / 971 / 908); every episode's main camera is now in
+   `maniskill-sim.episodes.parquet`. Ground truth: 0.00 cm on all 10 sampled episodes.
 4. **robomind ur5e-real** (ready for the moving episodes): its only camera, `camera_top`,
    is `not calibrated` in all sampled episodes (plan: 1 placement pending), so the twin
    has no calibrated camera.
@@ -112,6 +123,9 @@ says `not calibrated` or the camera is ignored (`camera.calibrated: false`).
    `output-spec.md`.
 6. **Light route on a loaded login node:** with default threading (~300 threads per process)
    10 light episodes took over 16 minutes; with `OMP_NUM_THREADS=8`, 150-170 s.
+   **Fixed 2026-11-16:** `r4r reconstruct` sets 8 threads (torch, OpenCV, exported to the
+   environment) unless `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`OPENBLAS_NUM_THREADS` is set; 3 light
+   yam episodes with no thread setting: 21 s.
 7. Ground-truth outliers worth a look: genie-1 EE residual p95 29 mm and wrist cameras p95
    3-4 cm (median ~1 mm / 0.2-1 cm, so frames during fast motion); a1-sim wrists p95
    1-2 cm generally.

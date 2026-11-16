@@ -287,7 +287,9 @@ PRESETS: dict[str, EffectorPrior] = {
 
 # Presets that share body names with another and apply only under this parent body
 PARENTS = {"galaxea_r1_pro": "arm_link7$", "galaxea_r1_lite": "arm_link6$"}
-PARENTS |= {"omnipicker": "arm_[lr]_link7$", "omnipicker_g2": "arm_[lr]_end_link$"}
+# (on link7 / the end link, or on the wrist spacer of r4r's corrected real-unit descriptions)
+PARENTS |= {"omnipicker": "(arm_[lr]_link7|gripper_[lr]_flange_link)$"}
+PARENTS |= {"omnipicker_g2": "arm_[lr]_end(_spacer)?_link$"}
 
 # A body name on the left or right side (`left_…`, `…_l_…`, `L_…`, `ee_right`)
 SIDES = (("left", re.compile(r"(^|_)(left|l)(_|$)", re.IGNORECASE)),)

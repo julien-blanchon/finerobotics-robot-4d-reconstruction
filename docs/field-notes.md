@@ -213,6 +213,14 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   axis to put the two grippers where they are seen (4 equations, 4 unknowns). Reject samples where
   one gripper moves alone (60–100 px): no camera move does that. Keypoint transfer (RoMa) and
   RoMa flow failed on the same data: the room changes and the robot is only at the image edges.
+- **Descriptions often lack what sits between the flange and the gripper:**
+  - The parts: a wrist force/torque sensor (AgiBot G1, 10 cm), a coupling (Robotiq on UR, 2.5 cm),
+    or a lab's own longer gripper drawn as a stock one (OpenNeoData, 5-10 cm).
+  - What it looks like: held-out clicks fall beyond the drawn fingertips along the approach axis,
+    at one consistent shift per dataset (`r4r.viz.clicks score`).
+  - The fix: a spacer body in a corrected description where the gripper base was, with the
+    gripper moved out. Cameras mounted on the old gripper base move to the spacer, keeping their
+    mounts, so camera tables stay valid. Then re-score with `clicks redraw`.
 - **Jaw clicks on an unrecorded gripper mislead:** with the opening unknown, a click lands on one
   fingertip pad, up to half the stroke from the modelled jaw midpoint. Score to the jaw line between
   the fully open fingertips instead. HABIT: a reference camera solved on such picks sat 11 cm /

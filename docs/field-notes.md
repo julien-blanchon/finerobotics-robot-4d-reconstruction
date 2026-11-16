@@ -71,6 +71,17 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   4:3 cameras but is 16 % too long for the 16:9 ones. With it held, the rig pushed those cameras
   ~15 cm back along their optical axes in every episode; freed, the focal settled 16 % lower and
   the poses came back within 2-7 cm of the recorded ones.
+- **Check the gripper in the wrist views before scoring cameras by fingertips:** robomind2
+  dual-franka-real's real hands sit 45 deg turned from the description's, with fingertips 5.8 cm
+  past the stock TCP and the gripper column inverted; every static camera looked 15-20 px off until
+  that was fixed. Click both open fingertips in a few wrist frames and fit the TCP offset there.
+- **Cameras re-placed independently need their own setup keys** (`station.<camera>`); label each
+  episode by its own thumbnail distance to reference episodes of each placement. A majority vote
+  over recording-order neighbours relabelled clear episodes into the wrong placement (~100 px off).
+  Thumbnails separate placements only for a camera whose view is mostly fixed background
+  (dual-franka camera_left yes, camera_right no).
+- **A projected point past the lens model's range folds back into the image** (radial polynomial,
+  k1 < 0): guard validation projections by the normalised radius.
 - **A recording date is not a setup:** robomind2 dual-franka-real re-places its side cameras between
   tasks of one day; a light solve started from the wrong setup passed its check at 0.89 px with both
   side cameras drawn off the arm. Check one light overlay per setup.

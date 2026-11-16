@@ -99,7 +99,7 @@ cameras need clicks is not solved for those cameras.
 | lens | pinhole or fisheye, recorded coefficients | `lens`, `distortion`, `distortion_range` |
 | scope | bolted (dataset), re-placed (episode), driving (frame) | `scope` on cameras and bodies |
 | robots | one dataset mixing robots (RoboMIND2 agilex: Piper and ARX arms): per-episode statistics tell them apart (`meta/episodes` `stats/observation.state/q99`) | `groups`: a `match` on a statistic and the group's own description, joints, cameras (`r4r.data.priors`); `r4r stations … --group` per group |
-| setups | sessions where a static camera stays put: `r4r stations <dataset> <camera> --write` | `station` column of the episodes table; values per station in `stations` |
+| setups | sessions where a static camera stays put: `r4r stations <dataset> <camera> --write`; cameras re-placed independently of each other: `--per-camera`, one key per camera | `station` (or `station.<camera>`) column of the episodes table; values per station in `stations` |
 | odometry gain | `r4r rig --write` on driving episodes fits `base_odometry.correction` | then reconstruct holds the base on its record |
 | second arm | its base placement is usually a guess | `bodies.<base>`: ranges, scope |
 | mobile base | does it move within episodes? where is its motion recorded? | `bodies.<root>` at frame scope, `base_odometry` |
@@ -135,6 +135,7 @@ One row per episode and camera, read by the loader ✅:
 | `episode, camera` | keys |
 | `fx, fy, cx, cy` | intrinsics at the video resolution (null when unknown) |
 | `station` | the setup; `r4r rig` refuses episodes from several stations |
+| `station.<camera>` | that camera's own setup, when static cameras are re-placed independently (`r4r stations <dataset> <camera> --per-camera --write`): its values come from `stations.<key>.cameras.<camera>`, on top of the common station's |
 | `x, y, z, qw, qx, qy, qz` | static camera: its pose in the base frame (OpenCV axes), where `r4r rig` starts it instead of PnP; moving camera: its mount on its link in that episode |
 
 ### Cameras the scene cannot pin: robot keypoints

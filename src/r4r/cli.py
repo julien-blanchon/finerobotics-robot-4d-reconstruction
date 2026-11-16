@@ -1878,13 +1878,12 @@ class Ik:
     threads: int = 8
 
     def run(self) -> None:
-        import json
         import time
 
         import numpy as np
         import torch
 
-        from r4r.data.lerobot import _description
+        from r4r.data.lerobot import _description, robot_record
         from r4r.data.priors import load_priors
         from r4r.ik import arm_model, episode_states, ik_arms, solve_episodes, write_side_file
         from r4r.rago.ik import IkConfig
@@ -1892,7 +1891,7 @@ class Ik:
         torch.set_num_threads(self.threads)
         root = dataset_root(self.dataset)
         priors = load_priors(root)
-        robot = json.loads((root / "meta" / "robot.json").read_text())
+        robot = robot_record(root)
         arms = ik_arms(priors.ik)
         description = _description(root, robot, priors)
         models = {name: arm_model(description, arm) for name, arm in arms.items()}

@@ -136,6 +136,8 @@ def _camera_state(priors: DatasetPriors, name: str, moving: bool, posed: bool) -
     prior = priors.cameras.get(name)
     if prior is None:
         return "setup: no camera priors"
+    if prior.mount is not None:  # a station's own mount (streams swapped between setups)
+        moving = prior.mount == "moving"
     if posed or prior.pose is not None:
         return "recorded" if prior.scope == "episode" else "held"
     known = prior.position is not None and prior.orientation is not None

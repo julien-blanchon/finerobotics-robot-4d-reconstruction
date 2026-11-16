@@ -333,6 +333,15 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **A "static" camera can move in the robot frame:** InternData-M1's cameras are fixed in the
   scene but the robot base is re-placed ±5 cm per episode. Model the cameras fixed for the
   dataset and the base free per episode.
+- **A coloured part on the robot is a free, automatic correspondence** (LingYu TA2, 2026-11-16):
+  each gripper carries a small teal-green PCB that a fixed HSV threshold finds in every head
+  frame (one blob per gripper, fold_socks / fold_towel). Unknowns: the head pose, the focal and
+  the PCB's point on the gripper (one 3-vector, mirrored for the other gripper); blobs go to the
+  nearest predicted gripper with a shrinking gate. 1,401 blobs on 8 episodes gave the head at
+  6.5 px median, 11 px held-out fingertip clicks on four other roots, no click spent. The video
+  lag falls out too (residual lowest at shift 0). Scenes with green objects (fruit, blocks) add
+  thousands of false blobs: calibrate on clean roots, then apply. Scratch script:
+  `r4r-cache/onboarding/lingyu/calib_green.py`.
 - **Gate PnP starts with the prior:** PnP from wrist-triangulated points can land metres away at
   a low residual (interndata head camera 0.7–2.4 m off at 2.27 px).
 - **Per-episode focals:** one focal per camera across episodes silently breaks every episode but

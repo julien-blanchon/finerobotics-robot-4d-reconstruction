@@ -2,7 +2,12 @@
 
 A dataset's own metadata (joint mapping, camera links, labels) is often incomplete or wrong.
 Priors live in this repository as `priors/<family>/<dataset>.json`, one per dataset root, and
-take precedence over `meta/robot.json` and the camera feature info:
+take precedence over `meta/robot.json` and the camera feature info. A family of many roots of
+one robot type each (RoboBrain-X0: one root per episode) shares one file per type instead:
+`priors/<family>/family.json` lists the types, `{"types": [{"match": {"info": "robot_type",
+"in": ["..."]}, "priors": "<type>.json"}]}`, and a root without its own file takes the first
+type whose `info` key of `meta/info.json` is one of `in` (`priors_path`); writes (`r4r rig
+--write`) go to that shared file, the episodes table stays per root. A priors file reads:
 
 ```json
 {
@@ -78,8 +83,12 @@ to a constant `offset` (x, y, z of the record's origin in the description's base
 episode's pose is the robust median over its frames, on the camera's link when it moves
 (AgiBot's jittering hand extrinsics); `start` and `order` (`matrix` or `rotation_translation`)
 pick a camera's 12 values out of a feature shared by several cameras. An episodes
-table pose takes precedence. `ignore` leaves a camera out (one that rides on no robot body,
-e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
+table pose takes precedence. `crop` (x, y, width, height in the delivered video's pixels) makes
+a camera of part of a video, e.g. one eye of a side-by-side stereo video, and `size` (width,
+height) resizes it (a 4K video read at 512 px): focal, principal point and every pixel are then
+at the camera's own resolution. `role` (`wrist`, `scene`, ...) replaces the feature info's
+`camera.role` (validation picks wrist and scene views by it). `ignore` leaves a camera out (one
+that rides on no robot body, e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
 absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...],
 "time_offset_frames": 1.0}`, encoder offsets of hinges / slides (only `joints`, if given) and a
 video/joint time offset on top of `state_shift`; `offsets` (joint name → rad or m) and
@@ -251,6 +260,26 @@ class CameraPrior:
     # ranges (one value for all episodes) instead of held: a by-eye mount that the mount search
     # cannot find (a wrist filled by its own hand) but other held cameras pin
     refine: bool = False
+    # The camera's part of the delivered video, (x, y, width, height) in its pixels (one eye of
+    # a side-by-side stereo video), then resized to `size` (width, height): every pixel,
+    # intrinsic and image size of the camera is at the resulting resolution. None: as delivered
+    crop: tuple[int, int, int, int] | None = None
+    size: tuple[int, int] | None = None
+    # The camera's role (`wrist`, `scene`, ...) when its feature info gives none or a wrong one
+    role: str | None = None
+
+    def image_size(self, delivered: tuple[int, int]) -> tuple[int, int]:
+        """The camera's (height, width) for a delivered video of (height, width) `delivered`."""
+
+        if self.size is not None:
+            return self.size[1], self.size[0]
+        return delivered if self.crop is None else (self.crop[3], self.crop[2])
+
+    @property
+    def cropped(self) -> bool:
+        """Whether the camera's frames are a crop or a resize of the delivered video."""
+
+        return self.crop is not None or self.size is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,10 +509,59 @@ def _conditions(match: JsonObject | list[JsonObject]) -> list[JsonObject]:
     return list(match) if isinstance(match, list) else [match] if match else []
 
 
-def priors_path(root: Path) -> Path:
-    """`priors/<family>/<dataset>.json` for a delivery root `<family>/datasets/<dataset>`."""
+FAMILY_FILE = "family.json"
+TYPE_KEYS = frozenset({"match", "priors"})
+TYPE_MATCH_KEYS = frozenset({"info", "in"})
 
-    return PRIORS / root.parent.parent.name / f"{root.name}.json"
+
+def priors_path(root: Path) -> Path:
+    """The priors file of a delivery root `<family>/datasets/<dataset>`: its own
+    `priors/<family>/<dataset>.json` when it exists, else the shared file of the first type of
+    `priors/<family>/family.json` it matches (families of many single-episode roots), else its
+    own path (absent: no priors)."""
+
+    own = PRIORS / root.parent.parent.name / f"{root.name}.json"
+    if own.exists():
+        return own
+    return _typed_path(root) or own
+
+
+def _typed_path(root: Path) -> Path | None:
+    """The shared priors file of a root's type (`family.json`), None when no type matches.
+
+    `family.json` lists types in order, `{"types": [{"match": {"info": "robot_type", "in":
+    ["a", "b"]}, "priors": "a.json"}]}`: a root has the first type where the `info` key of its
+    `meta/info.json` takes one of the `in` values; `priors` is relative to the family's folder.
+    """
+
+    family = PRIORS / root.parent.parent.name / FAMILY_FILE
+    if not family.exists():
+        return None
+    types = _family_types(family, family.stat().st_mtime_ns)
+    info_path = root / "meta" / "info.json"
+    info = json.loads(info_path.read_text()) if info_path.exists() else {}
+    for match, name in types:
+        if info.get(match["info"]) in match["in"]:
+            return family.parent / name
+    return None
+
+
+@functools.lru_cache(maxsize=8)
+def _family_types(path: Path, modified: int) -> tuple[tuple[JsonObject, str], ...]:
+    """A `family.json`'s types, checked, read once per process (again if the file changes:
+    `modified` is its mtime)."""
+
+    del modified  # part of the cache key only
+    raw = _checked(json.loads(path.read_text()), frozenset({"types", "notes"}), str(path))
+    out = []
+    for i, block in enumerate(raw.get("types", [])):
+        where = f"{path}: types[{i}]"
+        _checked(block, TYPE_KEYS, where)
+        match = _checked(block.get("match", {}), TYPE_MATCH_KEYS, f"{where}.match")
+        if set(match) != TYPE_MATCH_KEYS or "priors" not in block:
+            raise ValueError(f"{where} needs `priors` and a `match` with `info` and `in`")
+        out.append((match, block["priors"]))
+    return tuple(out)
 
 
 def load_priors(root: Path) -> DatasetPriors:
@@ -744,11 +822,22 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
             pose=_pose_column(c.get("pose"), f"{where}: cameras.{name}"),
             ignore=bool(c.get("ignore", False)),
             refine=bool(c.get("refine", False)),
+            crop=tuple(int(v) for v in c["crop"]) if c.get("crop") else None,
+            size=tuple(int(v) for v in c["size"]) if c.get("size") else None,
+            role=c.get("role"),
         )
         for name, c in raw.items()
     }
     for name, camera in cameras.items():
         _check_lens(camera, f"{where}: cameras.{name}")
+        crop, size = camera.crop, camera.size
+        if (crop is not None and (len(crop) != 4 or min(crop[2:]) <= 0 or min(crop[:2]) < 0)) or (
+            size is not None and (len(size) != 2 or min(size) <= 0)
+        ):
+            raise ValueError(
+                f"{where}: cameras.{name}: `crop` is [x, y, width, height] and `size` [width,"
+                " height], positive pixels"
+            )
     return cameras
 
 
@@ -861,9 +950,10 @@ class EpisodeRecord:
 
 
 def episode_table_path(root: Path) -> Path:
-    """`priors/<family>/<dataset>.episodes.parquet` next to the dataset's priors."""
+    """`priors/<family>/<dataset>.episodes.parquet`: per root even when the root's priors are its
+    type's shared file (`family.json`), whose roots all number their episodes from 0."""
 
-    return priors_path(root).with_suffix(".episodes.parquet")
+    return PRIORS / root.parent.parent.name / f"{root.name}.episodes.parquet"
 
 
 def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:

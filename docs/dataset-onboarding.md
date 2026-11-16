@@ -105,6 +105,27 @@ cameras need clicks is not solved for those cameras.
 | mobile base | does it move within episodes? where is its motion recorded? | `bodies.<root>` at frame scope, `base_odometry` |
 | anchor | keep one fixed arm or known camera | nothing free on it |
 
+### Toolbox: do two setups share a camera placement? (`r4r stations --compare`)
+
+`r4r stations <dataset> <camera> --compare A B C …` prints, for each pair of the episodes, how
+far the static background moved between their first frames: SIFT matches on pixels that do not
+change during the episode, a RANSAC homography, the median displacement of its inliers in px at
+512 width, and the inlier count (`r4r.data.placements`, CPU, ~0.2 s per episode). Under ~1 px:
+the camera did not move. A few px: a small re-placement. `inf`: no shared background. Use it to
+decide whether two stations or runs can share one camera pose, for example robomind2
+dual-franka camera_right: rig_c dates 0827 and 0829 at 0.4 px (one placement), 0410 and 0515
+(the 4 cm move) at 18.8 px. Thumbnail distances could not separate these (0.73–1.0 for every pair).
+
+Diagnostic only: it reads two episodes and writes nothing. It is not a setup detector. On known
+setups (2026-11-16), grouping by it was not clearly better than `r4r stations`' thumbnail runs.
+It was perfect on dual-franka camera_left A/B/C and somewhat better on abc-640 stations (ARI
+0.82 against 0.76 for thumbnail clustering), but worse on HABIT. Known failures:
+- **Cameras on the robot frame whose room changes** (HABIT front_view): the background changes
+  while the camera stays put on the robot, so the result is `inf` or a false move. Compare the
+  resting robot instead (field notes, "Mount periods from the robot at rest").
+- **Plain walls and tables** (robocoin lane02 cam_high): too few background keypoints. It
+  abstains (`inf`) on most pairs; `inf` with few inliers means "unknown", not "moved".
+
 ### Focal: look for a recorded calibration first
 
 1. The delivered dataset: `info.json` camera fields, per-frame intrinsics columns, `meta/`.

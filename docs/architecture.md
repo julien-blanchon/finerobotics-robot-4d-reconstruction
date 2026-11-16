@@ -179,7 +179,9 @@ stay free.
   never calibrated as NaN instead of running the full route.
 - **`r4r stations`:** runs of episodes with one placement of a camera that is not on the robot,
   from two thumbnails per episode (~30 ms per episode); `--write` stores them as the `station`
-  column of the episodes table. **`r4r station`** then calibrates each new station's static
+  column of the episodes table. `--compare A B …` instead prints the static background's
+  pixel shift between episodes (`data/placements.py`): a diagnostic for "do these setups share
+  the camera?", not a detector. **`r4r station`** then calibrates each new station's static
   camera from its calibrated neighbour (`rago/station.py`: neighbour's pose, PnP on wrist
   triangulations, transferred robot points, in that order, each checked), mostly on the CPU.
 - **Per-camera setups:** static cameras re-placed independently of each other (robomind2

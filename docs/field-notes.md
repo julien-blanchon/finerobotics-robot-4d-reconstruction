@@ -67,6 +67,13 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   held.
 - **Put a head camera on the link its calibration refers to** (e.g. the arm base): unrecorded
   head and lift joints then don't matter.
+- **A recorded K can belong to another stream:** robomind2 Franka's upstream K (640x480) fits its
+  4:3 cameras but is 16 % too long for the 16:9 ones. With it held, the rig pushed those cameras
+  ~15 cm back along their optical axes in every episode; freed, the focal settled 16 % lower and
+  the poses came back within 2-7 cm of the recorded ones.
+- **A recording date is not a setup:** robomind2 dual-franka-real re-places its side cameras between
+  tasks of one day; a light solve started from the wrong setup passed its check at 0.89 px with both
+  side cameras drawn off the arm. Check one light overlay per setup.
 - **Check recorded extrinsics over all episodes, not the first few:** AXIS re-places the camera
   in a third of its episodes. **Count frozen-state episodes** before calibrating (robomind
   ur5e-real: the arm state is frozen in 89% of episodes).

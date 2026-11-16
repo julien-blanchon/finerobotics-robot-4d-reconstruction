@@ -1532,6 +1532,11 @@ class Station:
     focal_std: float = 0.3
     # Store each station's camera under `stations.<name>`
     write: bool = False
+    # Write only this camera's values to each station: its other static cameras are placed by
+    # their own `r4r station` pass (several cameras re-placed per setup)
+    only: bool = False
+    # Fit again the stations a previous run flagged (default: skip them, read their overlays)
+    retry: bool = False
 
     def run(self) -> None:
         import copy
@@ -1563,9 +1568,18 @@ class Station:
         done = [n for n in order if _placed(priors.stations.get(n, {}), self.camera)]
         if not done:
             raise SystemExit(f"no station has {self.camera} calibrated: rig one first")
-        todo = [n for n in (self.stations or order) if n not in done and len(runs[n]) >= MIN_SETUP][
-            : self.limit or None
-        ]
+        tried = {  # stations whose camera a previous run fitted and flagged
+            n
+            for n in order
+            if priors.stations.get(n, {}).get("cameras", {}).get(self.camera, {}).get("fitted")
+        }
+        todo = [
+            n
+            for n in (self.stations or order)
+            if n not in done
+            and len(runs[n]) >= MIN_SETUP
+            and (self.retry or self.stations or n not in tried)
+        ][: self.limit or None]
         matcher = _matcher("cuda") if torch.cuda.is_available() else None
         config = StationConfig(focal_std=self.focal_std)
         # A dataset mixing robots: neighbours come from the station's own priors group
@@ -1632,7 +1646,9 @@ class Station:
                 },
             }
             if self.write:
-                _write_station(root, name, block)
+                _write_station(
+                    root, name, {"cameras": {self.camera: values}} if self.only else block
+                )
             if not fit.flagged:
                 done.append(name)
                 done.sort(key=lambda n: min(runs[n]))

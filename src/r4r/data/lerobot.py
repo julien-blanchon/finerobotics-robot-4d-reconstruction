@@ -78,7 +78,7 @@ def _root(root: Path) -> _Root:
 
     robot = robot_record(root)
     priors = load_priors(root)
-    if "urdf" not in robot and not priors.description:
+    if not (root / "meta" / "robot.json").exists() and not priors.description:
         raise ValueError(f"{root}: no meta/robot.json, so the priors must give a description")
     return _Root(LeRobotTables(root, side=priors.side_directory), robot, priors)
 

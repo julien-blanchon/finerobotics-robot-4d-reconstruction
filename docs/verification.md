@@ -176,6 +176,39 @@ episodes (`priors/onboarding/toyota__hsr.md`, "Held-out diagnosis"):
 - Video: `r4r-cache/verify/g1-cohort-04_57991_handfix.mp4` (held-out episode 57991, priors only). Read at t 100 and 330: in both hand views the own jaws
   are drawn on the real ones along the bottom edges, and the other arm on the real arm. In
   top_head, the arms and grippers are drawn on the real ones.
+
+**G1 arm kinematics from clicks (2026-11-16): nothing to correct at the dataset level.**
+- *Clicks (not held out).* 44 new random episodes (`verify/g1hand/kin_episodes.txt`) were added.
+  The state/video check flags 4 of them (28325, 46303, 88082, 169413); those and 13647 (an
+  ambiguous arm) were left out. That leaves 98 top_head jaw tips on 42 episodes, plus the 70
+  hand clicks of the hand-mount fit (`verify/clicks/calib/agibot-world__g1-cohort-04.top_head.json`).
+- *Fit.* The script is `scratch/g1_kinfit.py`: Gauss-Newton on pixel errors with a Huber loss,
+  and the camera poses held per episode as reconstructed. It fits the hand mounts jointly with
+  one of the following, each fitted on even and odd episodes separately:
+  - 7 joint offsets per arm: left j2/j4/j6 and right j2/j4/j6 agree between the halves, the
+    other joints do not.
+  - joints 2, 4 and 6 only: left j4 +2.8/+4.0°, j6 +2.1/+2.8°; right j4 −2.9/−4.0°, j6
+    −2.1/−3.7°. These agree within 1σ and mirror between the arms. Training top_head error goes
+    from 20.0 to 15.3 px.
+  - each arm's root pose: the halves disagree by up to 5 cm.
+  - one dataset-level top_head mount: the halves disagree by 5 cm in y.
+- *Held-out* (n 27, without the 2 mismatch episodes; before: 17.0 px, top_head 15.6, hands
+  17.4 / 33.9, fisheyes 14.0):
+  - j2/4/6 offsets plus refitted hand mounts: 20.6 px, with top_head 18.9 and fisheyes 17.0.
+    Worse.
+  - dataset-level top_head mount: 17.3 px, top_head 16.9. No better.
+  - refitted hand mounts alone: hand_left 22.4 against 17.4. Worse.
+
+  None was adopted; the priors are unchanged.
+- *Why.* The top_head error is per episode, not per arm. Within an episode, clicks deviate
+  10.9 px (median) from that episode's mean error. The episode means spread 21.8 px (median).
+  The rig refinement of 8 episodes (`g1/rig10b.pt`) also gives a different top_head orientation
+  per episode, up to about 5° of yaw. At 256 px focal, that is 15-20 px. The remaining error is
+  in the per-episode head pose (calibration or head-joint offsets per session). Arm kinematics
+  do not explain it. A held dataset-level value cannot remove it; a per-episode automatic
+  solve could (not tried here).
+- *State/video-mismatch episodes, reported apart:* held-out 96635 and 23969, 5 clicks at
+  157 px median.
 - G2 wrist views of the other arm got worse on 2 clicks.
 - Piper (another agent's): the clicks put the real fingertips about +5 to +6 cm past the drawn
   ones. That is agilex-5b28 +6.2 cm (IQR 4.8-7.8) and agilex-real +5.3 cm (4.4-7.9), leaving

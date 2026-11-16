@@ -104,10 +104,16 @@ def episode_group(root: Path, episode: int) -> str | None:
 
 
 @functools.cache
-def _episode_priors(root: Path, group: str | None, station: str | None) -> DatasetPriors:
-    """The priors of an episode of `group` and `station` (parsed once per process)."""
+def _episode_priors(
+    root: Path,
+    group: str | None,
+    station: str | None,
+    camera_stations: tuple[tuple[str, str], ...] = (),
+) -> DatasetPriors:
+    """The priors of an episode of `group`, `station` and per-camera stations (camera,
+    station) (parsed once per process)."""
 
-    return _root(root).priors.for_episode(group, station)
+    return _root(root).priors.for_episode(group, station, dict(camera_stations))
 
 
 def episode_count(root: Path) -> int:
@@ -160,9 +166,12 @@ def load_episode(
     tables, robot = opened.tables, opened.robot
     record = load_episode_record(root, episode)
     # The episode's group (a dataset mixing robots), then its station's own mounts and bodies
-    # (priors `groups`, `stations`) on top of the dataset's
+    # (priors `groups`, `stations`) on top of the dataset's, then each camera's own station
     group = episode_group(root, episode)
-    priors = _episode_priors(root, group, None if record is None else record.station)
+    own = {} if record is None else record.camera_stations
+    priors = _episode_priors(
+        root, group, None if record is None else record.station, tuple(sorted(own.items()))
+    )
     keys = [
         key
         for key in tables.video_keys
@@ -218,6 +227,7 @@ def load_episode(
         cameras=tuple(cameras),
         priors=priors,
         station=None if record is None else record.station,
+        camera_stations=own,
         base_motion=base_motion,
     )
 

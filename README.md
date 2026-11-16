@@ -109,7 +109,8 @@ Each unknown has a **scope**: how often it may change.
 | frame | frame | a mobile base driving (from its odometry) |
 
 - **`r4r stations <dataset> <camera>`** finds setups from two thumbnails per episode (~30 ms
-  each, CPU); `--write` stores them as the `station` column of the episodes table.
+  each, CPU); `--write` stores them as the `station` column of the episodes table
+  (`--per-camera`: a key per camera, `station.<camera>`, when cameras are re-placed apart).
 - **`r4r station`** then calibrates each new setup's static camera from its calibrated
   neighbour, so hundreds of setups do not each need a full `r4r rig`.
 

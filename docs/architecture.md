@@ -182,6 +182,12 @@ stay free.
   column of the episodes table. **`r4r station`** then calibrates each new station's static
   camera from its calibrated neighbour (`rago/station.py`: neighbour's pose, PnP on wrist
   triangulations, transferred robot points, in that order, each checked), mostly on the CPU.
+- **Per-camera setups:** static cameras re-placed independently of each other (robomind2
+  dual-franka: side cameras moved between tasks, front and top on the rig) each get their own
+  key, the column `station.<camera>` (`r4r stations --per-camera --write`). That camera's values
+  come from its own `stations.<key>` block (only its entry), on top of the common `station`'s;
+  `r4r station` and the planner use the camera's key when the column exists, and `r4r rig`
+  refuses episodes of several keys of one camera.
 - **Output layout:** `out/<family>/<dataset>/shard-<k>.parquet`, one file per `--shard-size`
   episodes (default 1000) of the selection, one row per frame in the
   [output spec](output-spec.md)'s columns. The schema metadata `r4r.episodes` (JSON) gives per

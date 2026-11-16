@@ -112,6 +112,13 @@ matches keep the dataset-level priors. A group's other fields replace the datase
 (`cameras` and `bodies` entry by entry, as a station's); `stations` then apply on top
 (`for_episode`). Fitted values of a group's episodes are written into its block.
 
+`stations` hold values per setup: `{"s1": {"cameras": {...}, "bodies": {...}}}`, set on top of
+the dataset's (entry by entry) for the episodes whose `station` (episodes table) names them.
+Static cameras re-placed independently of each other have their own setup keys: an episode's
+`station.<camera>` (episodes table) names the block that camera's values come from, on top of
+its common `station`'s; only that camera's entry of the block is read (bodies come from the
+common station).
+
 Unknown keys are errors (a typo would otherwise be ignored silently), except records kept for
 people and never read: `notes`, `base_odometry_measured` (an alternative odometry record) and
 a camera's or body's `fitted` (provenance of a fit).
@@ -427,21 +434,38 @@ class DatasetPriors:
 
         return replace(_parsed(merged, f"group {group}"), group=group)
 
-    def for_episode(self, group: str | None, station: str | None) -> DatasetPriors:
-        """An episode's priors: its group's (if any), then its station's overrides."""
+    def for_episode(
+        self,
+        group: str | None,
+        station: str | None,
+        camera_stations: Mapping[str, str] | None = None,
+    ) -> DatasetPriors:
+        """An episode's priors: its group's (if any), then its station's overrides, then each
+        camera's own station (`camera_stations`: camera → station) for that camera."""
 
-        return self.for_group(group).for_station(station)
+        return self.for_group(group).for_station(station, camera_stations)
 
-    def for_station(self, station: str | None) -> DatasetPriors:
-        """These priors with a station's overrides (cameras, bodies) applied, if any."""
+    def for_station(
+        self, station: str | None, camera_stations: Mapping[str, str] | None = None
+    ) -> DatasetPriors:
+        """These priors with a station's overrides (cameras, bodies) applied, if any; then, for
+        each camera of `camera_stations`, that camera's entry of its own station."""
 
         override = self.stations.get(str(station)) if station is not None else None
-        if not override:
+        names = camera_stations or {}
+        own = {
+            camera: values
+            for camera, name in names.items()
+            if (values := self.stations.get(str(name), {}).get("cameras", {}).get(camera))
+        }
+        if not override and not own:
             return self
         from dataclasses import replace
 
-        where = f"station {station}"
+        override = override or {}
+        where = ", ".join([f"station {station}", *(f"{c} station {names[c]}" for c in own)])
         cameras = _merged(self.raw.get("cameras", {}), override.get("cameras", {}))
+        cameras = _merged(cameras, own)
         bodies = _merged(self.raw.get("bodies", {}), override.get("bodies", {}))
         return replace(self, cameras=_cameras(cameras, where), bodies=_bodies(bodies, where))
 
@@ -826,6 +850,8 @@ class EpisodeRecord:
     station: str | None
     intrinsics: dict[str, tuple[float, float, float, float]]
     poses: dict[str, tuple[float, ...]] = field(default_factory=dict)
+    # Cameras with their own setup key (`station.<camera>` columns): camera → station
+    camera_stations: dict[str, str] = field(default_factory=dict)
 
 
 def episode_table_path(root: Path) -> Path:
@@ -838,8 +864,9 @@ def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
     """One episode's known values; None when the dataset has no table or no row for it.
 
     The table has one row per (episode, camera): `episode, camera`, then `fx, fy, cx, cy`,
-    an optional `station` and optional pose columns `x, y, z, qw, qx, qy, qz`; null values
-    mean unknown (a row may carry only a pose, or only intrinsics).
+    an optional `station`, optional per-camera setup keys `station.<camera>` (episode-level,
+    like `station`) and optional pose columns `x, y, z, qw, qx, qy, qz`; null values mean
+    unknown (a row may carry only a pose, or only intrinsics).
     """
 
     path = episode_table_path(root)
@@ -853,7 +880,7 @@ def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
         return None
     table = table.slice(first, last - first)
     rows = table.to_pylist()
-    station = rows[0].get("station")
+    station = next((r["station"] for r in rows if r.get("station") is not None), None)
     pose = ("x", "y", "z", "qw", "qx", "qy", "qz")
     return EpisodeRecord(
         None if station is None else str(station),
@@ -867,7 +894,23 @@ def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:
             for r in rows
             if all(r.get(k) is not None for k in pose)
         },
+        camera_stations(rows),
     )
+
+
+STATION_PREFIX = "station."
+
+
+def camera_stations(rows: list[JsonObject]) -> dict[str, str]:
+    """Per-camera setup keys of one episode's table rows (`station.<camera>` columns, the
+    first non-null value of each): camera → station."""
+
+    out: dict[str, str] = {}
+    for row in rows:
+        for key, value in row.items():
+            if key.startswith(STATION_PREFIX) and value is not None:
+                out.setdefault(key.removeprefix(STATION_PREFIX), str(value))
+    return out
 
 
 @functools.lru_cache(maxsize=4)

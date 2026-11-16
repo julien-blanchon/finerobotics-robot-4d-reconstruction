@@ -1522,6 +1522,10 @@ class Station:
     samples: int = 3
     # Stop after this many stations (0: all)
     limit: int = 0
+    # Prior std of the camera's log focal around its start (0 holds the neighbour's focal: one
+    # camera model in every station, whose focal a full rig measured)
+    focal_std: float = 0.3
+    # Store each station's camera under `stations.<name>`
     write: bool = False
 
     def run(self) -> None:
@@ -1558,7 +1562,7 @@ class Station:
             : self.limit or None
         ]
         matcher = _matcher("cuda") if torch.cuda.is_available() else None
-        config = StationConfig()
+        config = StationConfig(focal_std=self.focal_std)
         # A dataset mixing robots: neighbours come from the station's own priors group
         group = {n: episode_group(root, min(runs[n])) for n in order}
         for name in todo:

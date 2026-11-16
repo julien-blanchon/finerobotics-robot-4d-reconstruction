@@ -83,8 +83,12 @@ to a constant `offset` (x, y, z of the record's origin in the description's base
 episode's pose is the robust median over its frames, on the camera's link when it moves
 (AgiBot's jittering hand extrinsics); `start` and `order` (`matrix` or `rotation_translation`)
 pick a camera's 12 values out of a feature shared by several cameras. An episodes
-table pose takes precedence. `ignore` leaves a camera out (one that rides on no robot body,
-e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
+table pose takes precedence. `crop` (x, y, width, height in the delivered video's pixels) makes
+a camera of part of a video, e.g. one eye of a side-by-side stereo video, and `size` (width,
+height) resizes it (a 4K video read at 512 px): focal, principal point and every pixel are then
+at the camera's own resolution. `role` (`wrist`, `scene`, ...) replaces the feature info's
+`camera.role` (validation picks wrist and scene views by it). `ignore` leaves a camera out (one
+that rides on no robot body, e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
 absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...],
 "time_offset_frames": 1.0}`, encoder offsets of hinges / slides (only `joints`, if given) and a
 video/joint time offset on top of `state_shift`; `offsets` (joint name → rad or m) and
@@ -256,6 +260,26 @@ class CameraPrior:
     # ranges (one value for all episodes) instead of held: a by-eye mount that the mount search
     # cannot find (a wrist filled by its own hand) but other held cameras pin
     refine: bool = False
+    # The camera's part of the delivered video, (x, y, width, height) in its pixels (one eye of
+    # a side-by-side stereo video), then resized to `size` (width, height): every pixel,
+    # intrinsic and image size of the camera is at the resulting resolution. None: as delivered
+    crop: tuple[int, int, int, int] | None = None
+    size: tuple[int, int] | None = None
+    # The camera's role (`wrist`, `scene`, ...) when its feature info gives none or a wrong one
+    role: str | None = None
+
+    def image_size(self, delivered: tuple[int, int]) -> tuple[int, int]:
+        """The camera's (height, width) for a delivered video of (height, width) `delivered`."""
+
+        if self.size is not None:
+            return self.size[1], self.size[0]
+        return delivered if self.crop is None else (self.crop[3], self.crop[2])
+
+    @property
+    def cropped(self) -> bool:
+        """Whether the camera's frames are a crop or a resize of the delivered video."""
+
+        return self.crop is not None or self.size is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -798,11 +822,22 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
             pose=_pose_column(c.get("pose"), f"{where}: cameras.{name}"),
             ignore=bool(c.get("ignore", False)),
             refine=bool(c.get("refine", False)),
+            crop=tuple(int(v) for v in c["crop"]) if c.get("crop") else None,
+            size=tuple(int(v) for v in c["size"]) if c.get("size") else None,
+            role=c.get("role"),
         )
         for name, c in raw.items()
     }
     for name, camera in cameras.items():
         _check_lens(camera, f"{where}: cameras.{name}")
+        crop, size = camera.crop, camera.size
+        if (crop is not None and (len(crop) != 4 or min(crop[2:]) <= 0 or min(crop[:2]) < 0)) or (
+            size is not None and (len(size) != 2 or min(size) <= 0)
+        ):
+            raise ValueError(
+                f"{where}: cameras.{name}: `crop` is [x, y, width, height] and `size` [width,"
+                " height], positive pixels"
+            )
     return cameras
 
 

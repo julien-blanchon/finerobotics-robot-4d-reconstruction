@@ -93,7 +93,9 @@ def inspect_episode(episode: Episode[int, int], root: Path) -> Report:
     cameras = tuple(
         CameraReport(
             name=c.name,
-            size=tuple(features[video_key(list(features), c.name)]["shape"][:2]),
+            size=c.prior.image_size(
+                tuple(features[video_key(list(features), c.name)]["shape"][:2])
+            ),
             role=c.role,
             side=c.side,
             moving=c.moving,

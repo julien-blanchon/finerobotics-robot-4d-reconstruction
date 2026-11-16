@@ -107,6 +107,41 @@ the frame geometry, the projection, the timing nor the scorer explains them. The
   description's jaw meshes end 0-1 cm past each preset's TCP, so a fingertip click is
   compared with the drawn fingertip to within about 1 cm.
 
+**Gripper lengths fixed (2026-11-16).** These rows are re-scored on the same clicks. Each
+dataset's episodes were reconstructed again with corrected descriptions, using
+`python -m r4r.viz.clicks redraw SHARD CLICKS.json OUT.json`, then `score`. No camera was
+re-solved: G1 and openneodata hold their cameras, and the others keep their priors.
+
+| gripper (datasets) | real hardware | change | dataset: median px before → after |
+|---|---|---|---|
+| AgiBot G1 OmniPicker (g1-cohort-04; also robocoin lane06/lane10, interndata-a1-real a2d) | OmniPicker, 153 mm mount face to closed tips (vendor manual; the description's gripper ends at ~153 mm too). A ~10 cm black wrist section between link7 and the gripper: AgiBot lists six-axis wrist force sensors on both arms. The hand camera sits on it. | `descriptions/agibot__g1/G1_omnipicker_wrist_ft.urdf`: fixed body `gripper_[lr]_flange_link` where the gripper base was, gripper base 10 cm further out; hand cameras moved onto the flange link (their mounts unchanged) | g1-cohort-04: 71.1 → 27.6 (top_head 71.1 → 19.3, hands 98 → 64, fisheyes 25 → 18) |
+| AgiBot G2 (g2-cohort-01/02/03, rw-rl g2 ×7) | long black jaws; wrist stack not identified | `descriptions/agibot__g2/G2_omnipicker_real_wrist.urdf` (the simulated G2 keeps `G2_omnipicker_fixed_dual.urdf`): spacer `arm_[lr]_end_spacer_link`, gripper base 7 cm out; hand cameras on the spacer | 02: 20.0 → 8.3 (top_head 24.3 → 5.7, but wrist views of the other arm 19.7 → 44.5, n 2); 03: 12.8 → 7.4; 01: 29.6 → 26.4 (top_head 41 → 34: the per-episode cart error remains) |
+| openneodata Flexiv Rizon 4s | OpenNeoData's own long black gripper with gel visuotactile fingers (upstream README). No published dimensions. | `descriptions/flexiv__rizon4/Rizon4_openneodata_gripper.urdf`: the stand-in Robotiq 10 cm out from the flange | flexiv-rizon4: 50.4 → 11.6 (p90 70 → 13.5) |
+| openneodata UR5e | the same gel-finger gripper | `descriptions/ur__ur5e/ur5e_openneodata_gripper.urdf`: Robotiq 5 cm out from tool0 | ur5e (stack-cups-reversely-A): 34.5 → 10.3 (p90 47 → 29) |
+| RoboMIND UR5e Robotiq 2F-85 (ur5e-real; also failure-ur-4rgb) | Robotiq 2F-85 on its coupling (silver ring, Robotiq knuckles in the wrist view). The description mounts it on tool0 with no coupling. tool0 to the grasp centre is about 174 mm with the coupling; the description's TCP is 149 mm. | `descriptions/ur__ur5e/ur5e_robotiq_coupling.urdf`: Robotiq 2.5 cm out from tool0 (the coupling). The clicks' best is +4 cm: 15.4 px median, but p90 36. | ur5e-real: 19.4 → 15.6 (p90 27.6 → 27.8) |
+
+After the fix, the clicks' best extra shift is 0 to +2 cm everywhere: no gripper is left short.
+The flange-to-tip lengths come from the clicks. For the OmniPicker and the Robotiq, the vendor
+dimensions confirm the gripper itself (no change) and leave the spacer or coupling as the
+missing part. The G1 overlay (episode 118657, top_head) draws the gripper body on the real one
+past the black wrist section, and the jaws on the real jaws. In the G2 hand view, the drawn
+jaws now sit on the real ones instead of at the image edges. On flexiv, the Robotiq stand-in's
+tips are on the real gel fingertips. None of these descriptions is used by a simulated dataset:
+genie-1, g2a-simulation and xrobotwin keep their own. Their ground-truth checks are unchanged.
+
+**Still open:**
+- G1 hand cameras: 55-212 px. In the a2d preview, the hand views draw their own gripper in the
+  middle of the image while the real jaws are at the bottom edges, so the hand mount needs a
+  look.
+- G2 wrist views of the other arm got worse on 2 clicks.
+- Piper (another agent's): the clicks put the real fingertips about +5 to +6 cm past the drawn
+  ones. That is agilex-5b28 +6.2 cm (IQR 4.8-7.8) and agilex-real +5.3 cm (4.4-7.9), leaving
+  38-42 px. The `piper` preset TCP is 0.1358 m.
+
+**Hours at ~15 px after the fix:** g2-cohort-02 (198 h, 8.3 px), flexiv's calibrated station
+(~9 h, 11.6 px) and openneodata ur5e's station (~1 h, 10.3 px) join lane103 (62 h) and
+g2-cohort-03 (6 h, 7.4 px): about 276 h. robomind ur5e-real is at the line (15.6 px).
+
 
 ## Method
 

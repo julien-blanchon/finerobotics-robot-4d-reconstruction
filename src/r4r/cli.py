@@ -664,7 +664,7 @@ def _write_kinematics(fit: RigFit, rig: _RigInputs, stride: int, episodes: tuple
             offsets[name] = round(offsets.get(name, 0.0) + value, 6)
     path = priors_path(rig.root)
     raw = json.loads(path.read_text())
-    target = kinematics_target(raw, rig.loaded[0].priors.group)
+    target = kinematics_target(raw, rig.loaded[0].priors.group, station_of(rig.loaded))
     target["kinematics"] |= {
         "offsets": offsets,
         "time_offset": round(spec.time_offset + fit.time_offset * stride, 4),
@@ -674,11 +674,16 @@ def _write_kinematics(fit: RigFit, rig: _RigInputs, stride: int, episodes: tuple
     print(f"wrote {path}")
 
 
-def kinematics_target(raw: JsonObject, group: str | None) -> JsonObject:
-    """The raw priors block whose `kinematics` a rig's fit goes into: the dataset's, or a
-    priors group's (a dataset mixing robots), started from the dataset's when the group has
-    none (either may be absent)."""
+def kinematics_target(raw: JsonObject, group: str | None, station: str | None = None) -> JsonObject:
+    """The raw priors block whose `kinematics` a rig's fit goes into: the episodes' station's
+    when the priors have `stations` (only the fitted `offsets` and `time_offset`, set on top of
+    the dataset's stds), else the dataset's, or a priors group's (a dataset mixing robots),
+    started from the dataset's when the group has none (either may be absent)."""
 
+    if station is not None and "stations" in raw:
+        target = raw["stations"].setdefault(str(station), {})
+        target.setdefault("kinematics", {})
+        return target
     if group is None:
         raw.setdefault("kinematics", {})
         return raw

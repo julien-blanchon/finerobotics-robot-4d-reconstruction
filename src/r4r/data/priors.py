@@ -112,8 +112,10 @@ matches keep the dataset-level priors. A group's other fields replace the datase
 (`cameras` and `bodies` entry by entry, as a station's); `stations` then apply on top
 (`for_episode`). Fitted values of a group's episodes are written into its block.
 
-`stations` hold values per setup: `{"s1": {"cameras": {...}, "bodies": {...}}}`, set on top of
-the dataset's (entry by entry) for the episodes whose `station` (episodes table) names them.
+`stations` hold values per setup: `{"s1": {"cameras": {...}, "bodies": {...}, "kinematics":
+{...}}}`, set on top of the dataset's (entry by entry; `kinematics` field by field: a station's
+fitted `offsets` and `time_offset`, which `r4r rig --write` puts there for a station's episodes)
+for the episodes whose `station` (episodes table) names them.
 Static cameras re-placed independently of each other have their own setup keys: an episode's
 `station.<camera>` (episodes table) names the block that camera's values come from, on top of
 its common `station`'s; only that camera's entry of the block is read (bodies come from the
@@ -448,8 +450,9 @@ class DatasetPriors:
     def for_station(
         self, station: str | None, camera_stations: Mapping[str, str] | None = None
     ) -> DatasetPriors:
-        """These priors with a station's overrides (cameras, bodies) applied, if any; then, for
-        each camera of `camera_stations`, that camera's entry of its own station."""
+        """These priors with a station's overrides (cameras, bodies, kinematics) applied, if
+        any; then, for each camera of `camera_stations`, that camera's entry of its own
+        station."""
 
         override = self.stations.get(str(station)) if station is not None else None
         names = camera_stations or {}
@@ -467,7 +470,16 @@ class DatasetPriors:
         cameras = _merged(self.raw.get("cameras", {}), override.get("cameras", {}))
         cameras = _merged(cameras, own)
         bodies = _merged(self.raw.get("bodies", {}), override.get("bodies", {}))
-        return replace(self, cameras=_cameras(cameras, where), bodies=_bodies(bodies, where))
+        kinematics = self.kinematics
+        if "kinematics" in override:  # the station's own fitted joint / time offsets
+            merged = {**self.raw.get("kinematics", {}), **override["kinematics"]}
+            kinematics = _kinematics(merged, where)
+        return replace(
+            self,
+            cameras=_cameras(cameras, where),
+            bodies=_bodies(bodies, where),
+            kinematics=kinematics,
+        )
 
 
 def _conditions(match: JsonObject | list[JsonObject]) -> list[JsonObject]:
@@ -575,7 +587,7 @@ def _keys(cls: type) -> frozenset[str]:
 
 TOP_KEYS = _keys(DatasetPriors) - {"raw", "group"} | {"base_odometry_measured"}
 JOINT_KEYS = frozenset({"index", "urdf_joint", "sign", "from", "to"})
-STATION_KEYS = frozenset({"cameras", "bodies"})
+STATION_KEYS = frozenset({"cameras", "bodies", "kinematics"})
 # What a group may set (the robot and its cameras; not stations, odometry or other groups)
 GROUP_KEYS = frozenset(
     {

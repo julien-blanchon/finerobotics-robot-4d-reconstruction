@@ -96,6 +96,16 @@ in the state's columns, when its feature info does not say so.
 0.105]}}`, metres in the body's frame) for picks, pixels clicked on them (`read_picks`, `r4r rig
 --picks`, `r4r.rago.keypoints`); every body's origin is also a point, named after the body.
 
+`groups` give a dataset that mixes robots (one description per group of episodes, e.g.
+RoboMIND2 agilex: Piper and ARX X5 arms under one label) its own priors per group: `{"arx":
+{"match": {"stat": "observation.state/q99", "columns": [2, 8], "above": 0.1}, "description":
+"...", "joints": [...], "cameras": {...}}}`. `match` picks the group's episodes from their
+statistics in `meta/episodes` (`stats/<stat>`): an episode belongs to the first group where the
+largest of `columns`' values exceeds `above` and/or the smallest lies below `below`; episodes no
+group matches keep the dataset-level priors. A group's other fields replace the dataset's
+(`cameras` and `bodies` entry by entry, as a station's); `stations` then apply on top
+(`for_episode`). Fitted values of a group's episodes are written into its block.
+
 Unknown keys are errors (a typo would otherwise be ignored silently), except records kept for
 people and never read: `notes`, `base_odometry_measured` (an alternative odometry record) and
 a camera's or body's `fitted` (provenance of a fit).
@@ -156,6 +166,31 @@ class PoseColumn:
     start: int = 0
     order: Literal["matrix", "rotation_translation"] = "matrix"
     offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+@dataclass(frozen=True, slots=True)
+class GroupMatch:
+    """Which episodes form a group (see the module doc): those whose `meta/episodes` statistic
+    `stats/<stat>` has, over `columns`, a largest value above `above` and/or a smallest value
+    below `below`."""
+
+    stat: str
+    columns: tuple[int, ...]
+    above: float | None = None
+    below: float | None = None
+
+    def matches(self, values: np.ndarray) -> np.ndarray:
+        """Per episode, whether its statistic `values` `[E, n]` puts it in the group."""
+
+        import numpy as np
+
+        picked = values[:, list(self.columns)]
+        inside = np.ones(len(values), dtype=bool)
+        if self.above is not None:
+            inside &= picked.max(axis=1) > self.above
+        if self.below is not None:
+            inside &= picked.min(axis=1) < self.below
+        return inside
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +358,10 @@ class DatasetPriors:
     # Per-station overrides (raw priors fields `cameras`, `bodies`, set on top of the
     # dataset's, entry by entry): {station: {"cameras": {...}, "bodies": {...}}}
     stations: dict[str, JsonObject] = field(default_factory=dict)
+    # Per-group priors of a dataset mixing robots (raw fields, each with its `match`), and the
+    # group these priors are for (None: the dataset level)
+    groups: dict[str, JsonObject] = field(default_factory=dict)
+    group: str | None = None
     # The camera on a known link that ties cameras recorded in a world frame (pose `layout`
     # world_*) to the robot's base, per episode (`r4r.data.recorded`)
     world_anchor: str | None = None
@@ -330,7 +369,7 @@ class DatasetPriors:
     ee: dict[str, EffectorPrior] = field(default_factory=dict)
     # `joint_absolute`: the action is an absolute joint target in the state's columns
     action: Literal["joint_absolute"] | None = None
-    # The raw dataset-level `cameras` and `bodies` (for merging station overrides)
+    # The raw fields these priors were parsed from (for merging group and station overrides)
     raw: JsonObject = field(default_factory=dict, repr=False, compare=False)
     notes: str = ""
 
@@ -344,6 +383,37 @@ class DatasetPriors:
         """The dataset's joint mapping with these priors applied."""
 
         return tuple(j for j in metadata if j.name not in self.replaced) + self.joints
+
+    def group_matches(self) -> dict[str, GroupMatch]:
+        """Each group's `match`, in file order (the first matching group takes an episode)."""
+
+        return {
+            name: GroupMatch(
+                block["match"]["stat"],
+                tuple(block["match"]["columns"]),
+                block["match"].get("above"),
+                block["match"].get("below"),
+            )
+            for name, block in self.groups.items()
+        }
+
+    def for_group(self, group: str | None) -> DatasetPriors:
+        """These priors with a group's fields applied (the module doc), if any."""
+
+        block = self.groups.get(group) if group is not None else None
+        if block is None:
+            return self
+        merged = {**self.raw, **{k: v for k, v in block.items() if k != "match"}}
+        for kind in ("cameras", "bodies"):
+            merged[kind] = _merged(self.raw.get(kind, {}), block.get(kind, {}))
+        from dataclasses import replace
+
+        return replace(_parsed(merged, f"group {group}"), group=group)
+
+    def for_episode(self, group: str | None, station: str | None) -> DatasetPriors:
+        """An episode's priors: its group's (if any), then its station's overrides."""
+
+        return self.for_group(group).for_station(station)
 
     def for_station(self, station: str | None) -> DatasetPriors:
         """These priors with a station's overrides (cameras, bodies) applied, if any."""
@@ -372,6 +442,21 @@ def load_priors(root: Path) -> DatasetPriors:
     if not path.exists():
         return DatasetPriors()
     raw = _checked(json.loads(path.read_text()), TOP_KEYS, str(path))
+    for group, block in raw.get("groups", {}).items():
+        _checked(block, GROUP_KEYS, f"{path}: groups.{group}")
+        _checked(block.get("match", {}), MATCH_KEYS, f"{path}: groups.{group}.match")
+        if "stat" not in block.get("match", {}) or "columns" not in block["match"]:
+            raise ValueError(f"{path}: groups.{group} needs a `match` with `stat` and `columns`")
+    priors = _parsed(raw, str(path))
+    for group in priors.groups:  # each group's fields parse
+        priors.for_group(group)
+    return priors
+
+
+def _parsed(raw: JsonObject, path: str) -> DatasetPriors:
+    """Priors from a priors file's (or a merged group's) raw fields; `path` names them in
+    errors."""
+
     joints = tuple(
         JointMap(
             j["urdf_joint"],
@@ -415,10 +500,11 @@ def load_priors(root: Path) -> DatasetPriors:
         kinematics=_kinematics(raw.get("kinematics"), str(path)),
         robot_points=_robot_points(raw.get("robot_points", {}), str(path)),
         stations=raw.get("stations", {}),
+        groups=raw.get("groups", {}),
         world_anchor=raw.get("world_anchor"),
         ee=_effectors(raw.get("ee", {}), str(path)),
         action=raw.get("action"),
-        raw={"cameras": raw.get("cameras", {}), "bodies": raw.get("bodies", {})},
+        raw=raw,
         notes=raw.get("notes", ""),
     )
 
@@ -437,9 +523,28 @@ def _keys(cls: type) -> frozenset[str]:
     return frozenset(f.name for f in fields(cls))
 
 
-TOP_KEYS = _keys(DatasetPriors) - {"raw"} | {"base_odometry_measured"}
+TOP_KEYS = _keys(DatasetPriors) - {"raw", "group"} | {"base_odometry_measured"}
 JOINT_KEYS = frozenset({"index", "urdf_joint", "sign", "from", "to"})
 STATION_KEYS = frozenset({"cameras", "bodies"})
+# What a group may set (the robot and its cameras; not stations, odometry or other groups)
+GROUP_KEYS = frozenset(
+    {
+        "match",
+        "description",
+        "joints",
+        "removed_joints",
+        "state_shift",
+        "state_feature",
+        "cameras",
+        "bodies",
+        "kinematics",
+        "robot_points",
+        "ee",
+        "action",
+        "notes",
+    }
+)
+MATCH_KEYS = _keys(GroupMatch)
 CAMERA_KEYS = _keys(CameraPrior) | {"fitted"}
 BODY_KEYS = _keys(BodyPrior) | {"fitted"}
 POSE_KEYS = frozenset({"position", "orientation"})
@@ -751,12 +856,16 @@ def _episode_table(path: Path, modified: int) -> tuple[pa.Table, np.ndarray]:
 
 
 def write_camera(
-    root: Path, camera: str, values: Mapping[str, object], station: str | None = None
+    root: Path,
+    camera: str,
+    values: Mapping[str, object],
+    station: str | None = None,
+    group: str | None = None,
 ) -> Path:
     """Set fields of one camera's priors (e.g. a fitted mount), keeping everything else; under
-    `stations.<station>` when a station is given."""
+    `stations.<station>` when a station is given, else under `groups.<group>` when a group is."""
 
-    return _write(root, "cameras", camera, values, station)
+    return _write(root, "cameras", camera, values, station, group)
 
 
 def write_odometry_correction(root: Path, values: Mapping[str, object]) -> Path:
@@ -770,19 +879,33 @@ def write_odometry_correction(root: Path, values: Mapping[str, object]) -> Path:
 
 
 def write_body(
-    root: Path, body: str, values: Mapping[str, object], station: str | None = None
+    root: Path,
+    body: str,
+    values: Mapping[str, object],
+    station: str | None = None,
+    group: str | None = None,
 ) -> Path:
-    """Set fields of one free body's priors (e.g. a fitted correction), keeping the rest."""
+    """Set fields of one free body's priors (e.g. a fitted correction), keeping the rest; where
+    as `write_camera`."""
 
-    return _write(root, "bodies", body, values, station)
+    return _write(root, "bodies", body, values, station, group)
 
 
 def _write(
-    root: Path, kind: str, name: str, values: Mapping[str, object], station: str | None
+    root: Path,
+    kind: str,
+    name: str,
+    values: Mapping[str, object],
+    station: str | None,
+    group: str | None,
 ) -> Path:
     path = priors_path(root)
     raw = json.loads(path.read_text()) if path.exists() else {}
-    target = raw if station is None else raw.setdefault("stations", {}).setdefault(station, {})
+    target = raw
+    if station is not None:
+        target = raw.setdefault("stations", {}).setdefault(station, {})
+    elif group is not None:
+        target = raw["groups"][group]
     target.setdefault(kind, {}).setdefault(name, {}).update(values)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(raw, indent=2) + "\n")

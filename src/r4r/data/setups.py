@@ -24,6 +24,7 @@ Each run between breaks is one setup.
 
 from __future__ import annotations
 
+import bisect
 import itertools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -32,7 +33,7 @@ import cv2
 import numpy as np
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
 # Thumbnail size (width, height); the later moment, as a fraction of the episode; blocks
@@ -190,22 +191,29 @@ def setups(found: Thumbnails, config: SetupConfig) -> list[tuple[int, int]]:
 
 
 def labelled(
-    runs: Sequence[tuple[int, int]], known: dict[int, str]
+    runs: Sequence[tuple[int, int]], known: dict[int, str], episodes: Iterable[int] | None = None
 ) -> tuple[dict[int, str], list[int]]:
     """A station per episode of `runs`: each label of `known` (labelled episodes) goes to the
     run holding most of its episodes, the other runs are `auto-<first episode>`; and the
-    labelled episodes whose run says otherwise."""
+    labelled episodes whose run says otherwise. With `episodes` (the thumbnailed ones, e.g. one
+    priors group's) a run spans only those of them between its first and last episode."""
 
+    def members(first: int, last: int) -> Iterable[int]:
+        if chosen is None:
+            return range(first, last + 1)
+        return chosen[bisect.bisect_left(chosen, first) : bisect.bisect_right(chosen, last)]
+
+    chosen = None if episodes is None else sorted(episodes)
     count: dict[str, list[int]] = {}
     for i, (first, last) in enumerate(runs):
-        for e in range(first, last + 1):
+        for e in members(first, last):
             if e in known:
                 count.setdefault(known[e], [0] * len(runs))[i] += 1
     owner = {max(range(len(runs)), key=c.__getitem__): label for label, c in count.items()}
     stations, relabelled = {}, []
     for i, (first, last) in enumerate(runs):
         name = owner.get(i, f"auto-{first}")
-        for e in range(first, last + 1):
+        for e in members(first, last):
             stations[e] = name
             if e in known and known[e] != name:
                 relabelled.append(e)

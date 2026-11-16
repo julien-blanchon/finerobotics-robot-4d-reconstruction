@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Callable, Collection, Sequence
     from pathlib import Path
 
     from r4r.data.priors import DatasetPriors
@@ -206,7 +206,7 @@ def dataset_plan(
     """Count the routes of `episodes` (default: all) of a dataset root from its priors and its
     episodes table (stations, recorded poses and intrinsics), and cost them (module doc)."""
 
-    from r4r.data.lerobot import camera_names, simulated
+    from r4r.data.lerobot import camera_names, episode_group, simulated
     from r4r.data.priors import episode_table_path, load_priors
     from r4r.data.tables import LeRobotTables
 
@@ -214,19 +214,20 @@ def dataset_plan(
     priors = load_priors(root)
     names, moving = camera_names(root)
     selection = range(tables.total_episodes) if episodes is None else episodes
-    groups = _record_groups(episode_table_path(root), selection)
+    groups = _record_groups(episode_table_path(root), selection, lambda e: episode_group(root, e))
     frames = tables.info.get("total_frames", 0) / max(tables.total_episodes, 1)
     seconds = frames / tables.fps
     real = simulated(root) is False
     routes, reasons = Counter(), Counter()
     sizes: Counter[str | None] = Counter()
-    for (station, _, _), count in groups.items():
+    for (_, station, _, _), count in groups.items():
         sizes[station] += count
     stations, lone, neighbours = set(), set(), set()
     checked = odd = 0
     cpu = gpu = 0.0
-    for (station, poses, intrinsics), count in groups.items():
-        unknowns = episode_unknowns(priors.for_station(station), names, moving, poses, intrinsics)
+    for (group, station, poses, intrinsics), count in groups.items():
+        episode_priors = priors.for_episode(group, station)
+        unknowns = episode_unknowns(episode_priors, names, moving, poses, intrinsics)
         if unknowns.setup and station is not None and sizes[station] < MIN_SETUP:
             odd += count
         elif unknowns.setup and all(r.endswith(LONE) for r in unknowns.setup):
@@ -273,18 +274,23 @@ def dataset_plan(
     )
 
 
+type RecordKey = tuple[str | None, str | None, frozenset[str], frozenset[str]]
+
+
 def _record_groups(
-    path: Path, episodes: Sequence[int] | range
-) -> Counter[tuple[str | None, frozenset[str], frozenset[str]]]:
-    """How many of `episodes` share each (station, cameras with a recorded pose, cameras with
-    recorded intrinsics) of the episodes table (episodes without a row: none recorded)."""
+    path: Path, episodes: Sequence[int] | range, group_of: Callable[[int], str | None]
+) -> Counter[RecordKey]:
+    """How many of `episodes` share each (priors group, station, cameras with a recorded pose,
+    cameras with recorded intrinsics) of the episodes table (episodes without a row: none
+    recorded); `group_of` gives an episode's priors group."""
 
     import numpy as np
 
     wanted = np.asarray(episodes, dtype=np.int64)
-    groups: Counter[tuple[str | None, frozenset[str], frozenset[str]]] = Counter()
+    groups: Counter[RecordKey] = Counter()
     if not path.exists():
-        groups[None, frozenset(), frozenset()] = len(wanted)
+        for e in wanted.tolist():
+            groups[group_of(e), None, frozenset(), frozenset()] += 1
         return groups
     import pyarrow.parquet as pq
 
@@ -305,9 +311,11 @@ def _record_groups(
             entry[1].add(camera[i])
         if camera[i] is not None and focal[i]:
             entry[2].add(camera[i])
-    for station_name, poses, intrinsics in record.values():
-        groups[station_name, frozenset(poses), frozenset(intrinsics)] += 1
-    groups[None, frozenset(), frozenset()] += len(wanted) - len(record)
+    for e, (station_name, poses, intrinsics) in record.items():
+        groups[group_of(e), station_name, frozenset(poses), frozenset(intrinsics)] += 1
+    for e in wanted.tolist():
+        if e not in record:
+            groups[group_of(e), None, frozenset(), frozenset()] += 1
     return +groups
 
 

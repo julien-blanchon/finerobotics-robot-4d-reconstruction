@@ -295,6 +295,24 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   setup; it can differ. Then free the sub-frame part (`kinematics.time_offset_frames`).
 - **Measure the lag from the video, not from shipped camera poses:** interndata's shipped poses
   matched the state, yet the video lagged by one frame.
+- **Check that the state belongs to the video, per episode** (AgiBot World g1-cohort-04,
+  2026-11-16). In some episodes the drawn arms do not follow the real ones at all: in every
+  camera, at any lag (episodes 96635 and 23969, 100-290 px). The delivered extrinsics are
+  forward kinematics of the same state, so they cannot reveal it.
+  - *Method:* decode a wrist camera every 3rd frame at 1/8 resolution and take the mean
+    absolute grey-level difference between consecutive samples (image motion). Correlate it
+    with the norm of that arm's joint-state change over the same frames. Scan offsets ±60
+    frames and time scales 0.9-1.1.
+  - *In sync:* correlation 0.6-0.85 at offset 0, scale 1.
+  - *Mismatched:* below 0 (−0.03 to −0.39) for the arm that moves, and no offset or scale
+    brings it above about 0.3.
+  - *Pitfall:* use the arm that moves. A resting arm gives a near-zero correlation in good
+    episodes too; compute both wrists and keep the one with the larger joint motion.
+  - *How common:* 4-5 of 40 random g1-cohort-04 episodes (about 10-15 %), plus 2 of the 10
+    held-out ones. The top_head overlay confirmed one of the 40 (106399), and 48741 was a false
+    alarm on the resting arm. The two held-out episodes were confirmed by overlay too.
+  - *Cost:* about 10-20 s of CPU per episode, no GPU. Script:
+    `r4r-cache/onboarding/mobile-wheeled/scratch/g1_sync.py`.
 - **Solve joint offsets and the time offset together:** with the time offset held, joint
   offsets absorb the timing error and come out wrong.
 

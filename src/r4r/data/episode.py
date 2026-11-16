@@ -26,7 +26,9 @@ class JointMap:
     `q = t0 + (sign · x − s0) · (t1 − t0) / (s1 − s0)`, `source = (s0, s1)`, `target = (t0, t1)`.
 
     Maps a column range onto the joint range (e.g. a gripper command in [0, 1] onto finger
-    travel in metres); without a range, `q = sign · x`.
+    travel in metres); without a range, `q = sign · x`. `clip = (lo, hi)` then holds `q` within
+    `[lo, hi]` (e.g. a gripper motor that keeps closing past finger contact on a spring: the
+    fingers stop at contact).
     """
 
     name: str
@@ -34,6 +36,7 @@ class JointMap:
     sign: float = 1.0
     source: tuple[float, float] | None = None
     target: tuple[float, float] | None = None
+    clip: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)

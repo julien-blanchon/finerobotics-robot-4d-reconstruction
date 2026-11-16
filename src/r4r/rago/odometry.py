@@ -3,7 +3,8 @@ trajectory for its per-frame pose (`bundle_adjust(..., bodies_at=...)`).
 
 Three kinds of record, declared per dataset in the priors (`base_odometry`):
 
-- `pose`: planar x, y, θ of the base in some world frame (odometry or a simulator's state);
+- `pose`: planar x, y, θ of the base in some world frame (odometry or a simulator's state),
+  or a full pose (x, y, z with a quaternion or roll, pitch, yaw);
 - `velocity`: the body-frame planar velocity vx, vy, ω (commanded or measured);
 - `caster`: wheel encoder angles of a differential-drive pair, optionally on a steered unit
   whose axis is `offset` ahead of the wheels (an active caster, e.g. Toyota HSR; a plain
@@ -66,6 +67,22 @@ def from_poses_3d[T: IntVar](
     `M_t = P_0⁻¹ P_t` as in `from_poses`."""
 
     rotation = se3.quaternion_to_matrix(quaternion / quaternion.norm(dim=-1, keepdim=True))
+    pose = se3.from_rotation_translation(rotation, position)
+    return se3.inverse(pose[:1]) @ pose
+
+
+def from_poses_rpy[T: IntVar](
+    position: Tensor[[T, *XYZ]], rpy: Tensor[[T, *XYZ]]
+) -> Tensor[[T, *Mat4x4]]:
+    """Base motion from full poses given as position and roll, pitch, yaw (radians,
+    `R = R_z(yaw) R_y(pitch) R_x(roll)`, e.g. a simulator's root body), as `from_poses_3d`."""
+
+    zero = torch.zeros_like(rpy[:, 0])
+    rotation = torch.eye(3, dtype=rpy.dtype, device=rpy.device)
+    for axis in (2, 1, 0):  # R_z · R_y · R_x
+        omega = [zero, zero, zero]
+        omega[axis] = rpy[:, axis]
+        rotation = rotation @ se3.so3_exp(torch.stack(omega, -1))
     pose = se3.from_rotation_translation(rotation, position)
     return se3.inverse(pose[:1]) @ pose
 

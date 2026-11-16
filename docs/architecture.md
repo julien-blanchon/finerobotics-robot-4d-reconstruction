@@ -179,7 +179,9 @@ stay free.
   never calibrated as NaN instead of running the full route.
 - **`r4r stations`:** runs of episodes with one placement of a camera that is not on the robot,
   from two thumbnails per episode (~30 ms per episode); `--write` stores them as the `station`
-  column of the episodes table. **`r4r station`** then calibrates each new station's static
+  column of the episodes table. `--compare A B …` instead prints the static background's
+  pixel shift between episodes (`data/placements.py`): a diagnostic for "do these setups share
+  the camera?", not a detector. **`r4r station`** then calibrates each new station's static
   camera from its calibrated neighbour (`rago/station.py`: neighbour's pose, PnP on wrist
   triangulations, transferred robot points, in that order, each checked), mostly on the CPU.
 - **Per-camera setups:** static cameras re-placed independently of each other (robomind2
@@ -196,6 +198,18 @@ stay free.
   [output spec](output-spec.md)'s columns. The schema metadata `r4r.episodes` (JSON) gives per
   episode its route, fit check, each camera's source and errors, or the error that stopped it;
   `r4r.layout` holds the feature info.
+- **Checks against the video (`r4r check`, `src/r4r/checks/`):** after reconstruct, each
+  episode is compared with its own frames on the CPU, independently of the solve. It samples
+  16 frame pairs and draws the robot's silhouette from the description's meshes
+  (`checks/render.py`, shared with overlays). It computes **sync**: the rank correlation
+  between the image change and the motion the state predicts. That motion is the robot
+  silhouette's change for a still camera, or the camera's own motion for a moving one. An
+  episode with a low mean is flagged. For scene cameras it also computes the 2D shift that best
+  fits the drawn robot to the Canny edges (chamfer) and to the image change. This shift is an
+  error estimate, reported but not a flag. Results go to `checks.parquet` beside the shards,
+  then to `meta/r4r.json` at merge. The fit check (epipolar distance on the light bursts) is
+  unchanged. `r4r.checks.eval` scores any check against clicked fingertips or synthetic
+  perturbations ([verification](verification.md#automatic-per-episode-checks-2026-11-16)).
 - **Resumable:** a shard is written once, atomically; shards already written are skipped.
 - **Spread over processes:** `--shard i/n` takes the shards `k` with `k mod n = i`, e.g. a
   Slurm array: `--shard $SLURM_ARRAY_TASK_ID/$SLURM_ARRAY_TASK_COUNT`.

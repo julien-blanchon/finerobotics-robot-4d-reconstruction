@@ -285,6 +285,14 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   The arm joints became a side table (57k episodes fetched into memory in ~1 h, 1.8 GB in 58
   parquet files, no per-episode files) checked per episode against the delivered end-effector
   pose (0.000 mm). The simulator then gives ground truth for every camera.
+- **A MuJoCo joint equality drives `joint1` from `joint2`, and r4r follows it.** FetchMan's
+  MJCF couples the Dex1 jaws with `joint1 = recorded jaw, joint2 = other jaw`, so the recorded
+  value was overwritten by the unrecorded one (0) and the jaws were drawn 4-7 cm off in the
+  wrist view. Reverse the equality so the recorded joint is `joint2`.
+- **A simulator may record a projection that pins its jittered camera.** FetchMan randomises
+  its head camera per episode without recording it, but `observation.target_point` is the
+  target object projected through that camera: a per-episode fit to it gives the camera to
+  0.05 px. Look for such columns (target points, keypoints, visibility pixels) before solving.
 - **States may be commanded, not measured** (xrobotwin). Or absent: many Open X-Embodiment
   sets record only the end-effector pose. With no joint states there is no FK, so blocked.
 
@@ -295,6 +303,24 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   setup; it can differ. Then free the sub-frame part (`kinematics.time_offset_frames`).
 - **Measure the lag from the video, not from shipped camera poses:** interndata's shipped poses
   matched the state, yet the video lagged by one frame.
+- **Check that the state belongs to the video, per episode** (AgiBot World g1-cohort-04,
+  2026-11-16). In some episodes the drawn arms do not follow the real ones at all: in every
+  camera, at any lag (episodes 96635 and 23969, 100-290 px). The delivered extrinsics are
+  forward kinematics of the same state, so they cannot reveal it.
+  - *Method:* decode a wrist camera every 3rd frame at 1/8 resolution and take the mean
+    absolute grey-level difference between consecutive samples (image motion). Correlate it
+    with the norm of that arm's joint-state change over the same frames. Scan offsets ±60
+    frames and time scales 0.9-1.1.
+  - *In sync:* correlation 0.6-0.85 at offset 0, scale 1.
+  - *Mismatched:* below 0 (−0.03 to −0.39) for the arm that moves, and no offset or scale
+    brings it above about 0.3.
+  - *Pitfall:* use the arm that moves. A resting arm gives a near-zero correlation in good
+    episodes too; compute both wrists and keep the one with the larger joint motion.
+  - *How common:* 4-5 of 40 random g1-cohort-04 episodes (about 10-15 %), plus 2 of the 10
+    held-out ones. The top_head overlay confirmed one of the 40 (106399), and 48741 was a false
+    alarm on the resting arm. The two held-out episodes were confirmed by overlay too.
+  - *Cost:* about 10-20 s of CPU per episode, no GPU. Script:
+    `r4r-cache/onboarding/mobile-wheeled/scratch/g1_sync.py`.
 - **Solve joint offsets and the time offset together:** with the time offset held, joint
   offsets absorb the timing error and come out wrong.
 

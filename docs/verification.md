@@ -33,8 +33,8 @@ Clicks, targets and drawn points, one JSON per dataset:
 
 | dataset | h | n (skipped) | median / p90 / max px | image | % width | TCP shift → median | verdict | pattern |
 |---|---|---|---|---|---|---|---|---|
-| airoa-moma-5k (HSR) | 5025 | 8 (1) | 36.9 / 70.8 / 108 | 512×384 | 7.2 | −2 cm → 27.4 | fail | head off per episode, ahead of or beside the fingers |
-| agibot-world g1-cohort-04 | 2620 | 23 (7) | 71.1 / 122 / 146 | 512×384 (fisheyes 512×410) | 13.9 | +10 cm (scan edge) → 27.6 | fail | top_head 71 px, drawn 1.3-1.6× farther from the image centre than the real grippers (the gripper is longer than described, not the focal: +10 cm → 19 px); hands seeing the other arm 98 px; fisheyes 20-46 px; jaw points at the jaw roots (TCP short); lag ±45 frames ruled out |
+| airoa-moma-5k (HSR) | 5025 | 8 (1) | 36.9 / 70.8 / 108 → 21.7 / 37.6 / 39.8 (fingertips) | 512×384 | 4.2 | −2 cm → 27.4 (before) | fail | the jaw model drew open fingers 4.7 cm too far (fixed: fingertips); the rest is one head camera per HSR unit (50 units, 1-4°) |
+| agibot-world g1-cohort-04 | 2620 | 23 (7) | 71.1 / 122 / 146 | 512×384 (fisheyes 512×410) | 13.9 | +10 cm (scan edge) → 27.6 | fail (20.4 px after the hand fix) | top_head 71 px, drawn 1.3-1.6× farther from the image centre than the real grippers (the gripper is longer than described, not the focal: +10 cm → 19 px); hands seeing the other arm 98 px; fisheyes 20-46 px; jaw points at the jaw roots (TCP short); lag ±45 frames ruled out. After the wrist-section and hand-mount fixes (2026-11-16, n 32 with 2 re-clicks and 9 added hand clicks): 20.4 px, 17.0 without the 2 episodes whose state does not match the video; still fails, mainly on the hand views of the other arm (below) |
 | abc-130k abc-640x480 | 1752 | 21 (19) | 17.4 / 42.0 / 54.0 | 512×384 | 3.4 | +1 cm → 17.5 | fail | top 16.4 px (n 14), wrists 26.9 (left 38). Per station (top / wrist): 2: 17; 8: 16; 9: 54; 18: 17; 19: 21, 16 / 17; 22: 7 / 14; 24: 10; 26: wrist 42; 27: 15 / 34; 29: 8 / 26; 30: 10 / 27; 31: 20; 35: 24 / 47; 37: 41 |
 | abc-130k abc-848x480 | 723 | 19 (11) | 17.0 / 49.4 / 54.8 | 512×290 | 3.3 | +3 cm → 15.7 | fail | top 14.1 px (n 12, holds); wrists 46.5 (left 47.8): the wrist mounts |
 | molmoact2-yam bimanual-yam | 704 | 10 (10) | 35.6 / 113 / 115 | 512×288 | 7.0 | −5 cm → 31.7 | fail | top 25.2 px (per-episode light solve), wrist views of the other arm 114 px |
@@ -129,10 +129,89 @@ jaws now sit on the real ones instead of at the image edges. On flexiv, the Robo
 tips are on the real gel fingertips. None of these descriptions is used by a simulated dataset:
 genie-1, g2a-simulation and xrobotwin keep their own. Their ground-truth checks are unchanged.
 
-**Still open:**
-- G1 hand cameras: 55-212 px. In the a2d preview, the hand views draw their own gripper in the
-  middle of the image while the real jaws are at the bottom edges, so the hand mount needs a
-  look.
+**HSR (airoa-moma-5k), 2026-11-16.** Two causes, found with 42 fingertip clicks on 27 other
+episodes (`priors/onboarding/toyota__hsr.md`, "Held-out diagnosis"):
+- HSR's fingers swing on arcs, so the parallel-jaw points `TCP ± y·w/2` put open fingertips
+  4.7 cm past the real ones. The `hsr` preset now gives `fingertips` (the scorer uses them), and
+  the priors clip the hand motor to [0, 1.24] (past contact it squeezes its springs and the
+  description's fingers crossed). Same clicks: 36.9 → 21.7 px median.
+- The rest is per HSR unit (`source/hsr_id`, 50 units). No dataset-level head, tilt, focal, lag,
+  lift or arm-joint parameter improves the held-out clicks, while a head-mount rotation fitted on
+  one episode of a unit fixes another episode of that unit (hsrb55 22 → 8 px, hsrb045 34 → 4 px).
+  Needed: a head-camera mount per unit (stations by `hsr_id`, now in an episodes table), solved
+  automatically per unit. `r4r rig` with the head mount refined (focal held) does not agree with
+  the clicks on the two check robots (hsrb045 33 → 28 px, hsrb55 20 → 25 px; 1.1-1.6 px rig
+  residuals), so it was not run on all 50.
+  Two of the 8 held-out clicks are not on a fingertip (a held bottle's top, a dark blob).
+
+**G1 hand cameras (2026-11-16).**
+- *Cause.* The delivered hand extrinsics are forward kinematics of the delivered description
+  times a per-episode mount. That frame is the old gripper base, which is
+  `gripper_[lr]_flange_link` now. The wrist-section fix did not double-count anything. The
+  records themselves are wrong, though. Between calibration families they move the camera by up
+  to 6 cm on the gripper (episodes 31457 and 120091 against 0 and 56976), but the own jaws sit at
+  the same pixels in every episode. The real camera is about 3 cm further out along the gripper
+  and 2 cm further off its axis than the records say. It rides on the gripper housing (the grey
+  D405 box).
+- *Fix.* Each hand camera gets one dataset-level mount on `gripper_[lr]_base_link`, fitted once
+  from clicks on 20 episodes that are not held out: 42 own-jaw tips and 28 other-arm jaw tips,
+  with 6 degrees of freedom. The fit leaves own jaws at 4-7 px and other-arm tips at 10-12 px
+  (`r4r-cache/onboarding/mobile-wheeled/scratch/g1_handfit.py`, clicks in
+  `verify/clicks/calib/agibot-world__g1-cohort-04.hands.json`). The hand rows were dropped
+  from `g1-cohort-04.episodes.parquet`. The per-episode top_head rows stay: a dataset-level
+  top_head scores 29.5 px against 15.9. robocoin lane06/lane10 and interndata-a1-real a2d take
+  the same mounts. In the a2d preview, the hand views now draw the own jaws on the real ones at
+  the bottom edges.
+- *Held-out clicks.* Two misclicks were corrected: 118657 top_head was on the remote's far end
+  and 119164 top_head on the jar. The old values are kept as `click_old`. Nine other-arm clicks
+  were added from the episodes' second hand camera, so n is 32. Before → after on the same
+  clicks: hands 48.4 / 54.1 → 17.8 / 35.3 px (left / right); the first 5 hand clicks 64 → 17.
+  All: 21.8 → 20.4 px. Scene: 16.4 (top_head 15.9). Excluding 96635 and 23969 (below), the
+  median is 17.0 px (n 27): scene 15.2, hands 30.5 (n 12). **Still fails.**
+- *What is left.* (1) The hand views see the other arm at 0.3-0.5 m, so a 3-4 cm error of the
+  two arms' kinematics comes out at 25-50 px there. That is the same 3D error the head views
+  show at about 15 px. The errors point in no common direction, so no single mount removes them.
+  (2) In episodes 96635 and 23969, the arm state does not match the video at all; the cameras
+  are not the cause. The hand-camera image motion against the own arm's joint speed has a
+  correlation of 0.6-0.85 in normal episodes. Here it is below 0 for the arm that moves, at any
+  offset or time scale. In 40 random episodes, 4-5 show the same pattern (about 10-15 %,
+  inferred). A check like this could flag those episodes.
+- Video: `r4r-cache/verify/g1-cohort-04_57991_handfix.mp4` (held-out episode 57991, priors only). Read at t 100 and 330: in both hand views the own jaws
+  are drawn on the real ones along the bottom edges, and the other arm on the real arm. In
+  top_head, the arms and grippers are drawn on the real ones.
+
+**G1 arm kinematics from clicks (2026-11-16): nothing to correct at the dataset level.**
+- *Clicks (not held out).* 44 new random episodes (`verify/g1hand/kin_episodes.txt`) were added.
+  The state/video check flags 4 of them (28325, 46303, 88082, 169413); those and 13647 (an
+  ambiguous arm) were left out. That leaves 98 top_head jaw tips on 42 episodes, plus the 70
+  hand clicks of the hand-mount fit (`verify/clicks/calib/agibot-world__g1-cohort-04.top_head.json`).
+- *Fit.* The script is `scratch/g1_kinfit.py`: Gauss-Newton on pixel errors with a Huber loss,
+  and the camera poses held per episode as reconstructed. It fits the hand mounts jointly with
+  one of the following, each fitted on even and odd episodes separately:
+  - 7 joint offsets per arm: left j2/j4/j6 and right j2/j4/j6 agree between the halves, the
+    other joints do not.
+  - joints 2, 4 and 6 only: left j4 +2.8/+4.0°, j6 +2.1/+2.8°; right j4 −2.9/−4.0°, j6
+    −2.1/−3.7°. These agree within 1σ and mirror between the arms. Training top_head error goes
+    from 20.0 to 15.3 px.
+  - each arm's root pose: the halves disagree by up to 5 cm.
+  - one dataset-level top_head mount: the halves disagree by 5 cm in y.
+- *Held-out* (n 27, without the 2 mismatch episodes; before: 17.0 px, top_head 15.6, hands
+  17.4 / 33.9, fisheyes 14.0):
+  - j2/4/6 offsets plus refitted hand mounts: 20.6 px, with top_head 18.9 and fisheyes 17.0.
+    Worse.
+  - dataset-level top_head mount: 17.3 px, top_head 16.9. No better.
+  - refitted hand mounts alone: hand_left 22.4 against 17.4. Worse.
+
+  None was adopted; the priors are unchanged.
+- *Why.* The top_head error is per episode, not per arm. Within an episode, clicks deviate
+  10.9 px (median) from that episode's mean error. The episode means spread 21.8 px (median).
+  The rig refinement of 8 episodes (`g1/rig10b.pt`) also gives a different top_head orientation
+  per episode, up to about 5° of yaw. At 256 px focal, that is 15-20 px. The remaining error is
+  in the per-episode head pose (calibration or head-joint offsets per session). Arm kinematics
+  do not explain it. A held dataset-level value cannot remove it; a per-episode automatic
+  solve could (not tried here).
+- *State/video-mismatch episodes, reported apart:* held-out 96635 and 23969, 5 clicks at
+  157 px median.
 - G2 wrist views of the other arm got worse on 2 clicks.
 - Piper (another agent's): the clicks put the real fingertips about +5 to +6 cm past the drawn
   ones. That is agilex-5b28 +6.2 cm (IQR 4.8-7.8) and agilex-real +5.3 cm (4.4-7.9), leaving
@@ -142,6 +221,162 @@ genie-1, g2a-simulation and xrobotwin keep their own. Their ground-truth checks 
 (~9 h, 11.6 px) and openneodata ur5e's station (~1 h, 10.3 px) join lane103 (62 h) and
 g2-cohort-03 (6 h, 7.4 px): about 276 h. robomind ur5e-real is at the line (15.6 px).
 
+## Automatic per-episode checks from DINO features (2026-11-16): not adopted
+
+Two image checks were tested, independent of the solve, against the held-out clicks. Neither
+meets the bar on real data, so neither runs in `r4r reconstruct`. The shared feature helper
+(`src/r4r/checks/features.py`: DINOv2 ViT-S/14 with registers, through `timm`) stays for other
+checks.
+
+**Data.** There are 372 clicked (episode, camera) targets of 27 real click sets (the click sets
+above plus the onboarding sets of robocoin lane02/21/103/104, agilex-5b28 and robomind2
+dual-franka). Each target's episode was reconstructed again on the current priors
+(`--uncalibrated nan`), and its click error recomputed. There are also 72 targets of 6
+simulated datasets (molmobot franka and rby1, interndata-a1-sim franka, genie and aloha,
+nvidia-kitchen), where the truth is exact. Each target has its click frame plus 7 frames where
+an end effector is in view. Every target is also scored with its camera moved by 13 known
+amounts: rotations of 0.5–4°, translations of 2–20 cm, focal ±10 %, and combinations. The
+truth is the click error after the move (simulated: the projected TCP displacement).
+
+**1. Fingertips by descriptor matching.** The bank holds the DINO descriptors at the clicked
+fingertips of the other episodes of the same dataset, from the same kind of view. The search
+covers ±20 % of the image width around the drawn jaw points, on features upsampled ×2 at 448 px.
+The detected fingertip lies a median 32 px from the click, and within 10 px for only 16 %.
+Its error estimate has AUC 0.75 for "click error > 15 px" (ρ 0.48), with |estimate − click
+error| at a median 14 px. Grippers are 10-30 px wide, and 16-px patches cannot tell a
+fingertip from the rest of the gripper, the other gripper or held objects.
+
+**2. Robot parts by feature classes (robot-feature check and part keypoints).** A linear softmax
+classifier maps the patch features to the robot's bodies plus background. It is trained,
+leaving the episode out, on the body maps drawn from the reconstruction (convex hull per geom,
+painted far to near) of the dataset's other episodes. Each body's drawn silhouette is shifted
+to best fit that body's probability map (±15 % of the width, sub-cell peak). The weighted
+median of the body shifts near the target end effector (within 25 cm), over the 8 frames,
+estimates the pixel error. A Huber Gauss-Newton fit of the camera pose to those part offsets
+(body centroid ↔ its shifted pixel) proposes the correction.
+
+| data | rows | bad (>15 px) | AUC | Spearman | median \|estimate − truth\| | truth before → after correction (median) | correction worse by >5 px |
+|---|---|---|---|---|---|---|---|
+| simulated, 6 datasets | 1547 | 423 | 0.87 | 0.61 | 4.8 px | 6.7 → 4.6 px | 13 % |
+| nvidia-kitchen (sim) | 312 | 62 | 0.97 | 0.88 | 2.3 px | 6.8 → 2.3 px | 0 % |
+| real, 27 click sets | 4836 | 3529 | 0.64 | 0.38 | 18.3 px | 27.8 → 21.3 px | 17 % |
+| real, reconstructed cameras only | 372 | 230 | 0.57 | 0.22 | 15.7 px | 21.1 → 18.7 px | 17 % |
+| real, scene views / wrist views | 3406 / 741 | | 0.70 / 0.47 | 0.49 / 0.23 | 15.3 / 29.4 px | 28.0 → 21.3 / 51.6 → 43.9 | 18 / 24 % |
+
+The best real datasets are droid (AUC 0.91, 8 px), flexiv-rizon4 (0.83), agilex-real (0.82) and
+rdt (0.81). The worst are g2-cohort-01 (0.41), agilex-5b28 (0.36), rw-rl (0.45) and every
+wrist view. In the shared table (`python -m r4r.checks.eval`, method `dino-parts`, by kind), the
+AUC is 0.80 for single arms, 0.68 bimanual, 0.59 humanoid and 0.54 fisheye.
+
+**Why not on real data:** the classifier learns from the reconstruction's own drawn bodies. On
+the real datasets these carry the error being measured (10-60 px medians). Moving each
+training frame's maps by its own estimated offset (one round of self-training) did not help
+(lane103: AUC 0.74 → 0.73). Part of a click error is the TCP depth or gripper geometry, which
+the body silhouettes do not see. The descriptions' meshes also differ from the real arms
+(cables, covers, grippers). On the simulated datasets, where the drawn bodies are exact, the
+same code reaches 2-5 px.
+
+**Where the part correction does help: G1 top_head, a per-episode head rotation.** The
+remaining top_head error of g1-cohort-04 is a head orientation that changes per episode (G1
+arm kinematics, above). The test used 35 episodes: 27 with the training jaw-tip clicks (98
+tips) and 8 with held-out clicks, leaving out the six state/video-mismatch episodes and 13647.
+The DINO part check used 12 frames per episode and no click. Its pose fit was run in two
+forms: rotation only (translation held to 2 mm) and all 6 DoF.
+
+| clicks | episodes | before: median / p90 / ≤ 15 px | rotation only | 6 DoF |
+|---|---|---|---|---|
+| training tips (not used by the check) | 27 (98 tips) | 15.6 / 35.8 / 47 % | 12.7 / 26.3 / 62 % | 11.8 / 26.5 / 69 % |
+| held-out | 8 | 15.6 / 23.8 / 38 % | 6.1 / 20.0 / 75 % | 10.5 / 22.8 / 62 % |
+
+Per episode, the rotation fit lowers the median by more than 5 px on 16 of 35 episodes and
+raises it by more than 5 px on 1 (158531, 27.6 → 31.3). Its rotations are 2.6° (median) and
+5.4° at most, about the yaw spread the rig refinement found. The error *estimate* does not sort
+these episodes (AUC 0.53), so the correction can't be gated on it. It would run on every
+episode of such a dataset. On HSR (airoa-moma-5k, 8 held-out heads, 6 DoF), it fixed 3
+episodes (16 → 10, 22 → 4, 20 → 8 px), left 4 unchanged and made 1 worse (39 → 52); the
+median stayed at ~37 px. Script: `code/g1gather.py` and `code/g1corr.py` (results
+`res/g1corr.parquet`).
+
+**Cost** (if it were used): DINOv2-S features cost 0.3 ms per frame on a GH200 (batch 64, 448
+px; 0.6 ms at 644 px). 100k episodes × 2 cameras × 8 frames come to about 8 GPU-minutes. The
+CPU side costs ~0.3 s per camera and episode for 8 body maps and shifts, plus the frame decode.
+
+Scripts, the per-target scenes and the result tables (not in the repo):
+`/e/scratch/reformo/blanchon1/r4r-cache/dinochecks/` (`code/gather.py` builds the scenes,
+`code/pert2.py` runs the part check, `code/kp.py` the fingertip check, `res/v1/*.parquet` and
+`res/dino_parts_rows.parquet` hold the results in the shared eval schema).
+
+
+## Automatic per-episode checks (2026-11-16)
+
+The question was whether some cheap CPU check, independent of the solve, can replace clicking
+fingertips on held-out episodes. Code is in `src/r4r/checks/`, and `r4r check` runs it.
+
+**Ground truth.**
+- *Clicks:* the 26 click sets above, re-reconstructed with the current main (G1 hand mount and
+  HSR fingertips included) and redrawn. The truth per (episode, camera) is the median click
+  error; a camera is bad above 15 px. This gives 207 scene-camera and 67 wrist-camera rows,
+  123 / 54 bad.
+- *Synthetic:* 6 episodes each of molmobot rby1-pick-10, interndata-a1-sim arx-lift-2 and
+  agilex-split-aloha, nvidia-kitchen panda-omron-mobile (exact cameras), robomind agilex-real,
+  g2-cohort-02 and dual-franka-real (cameras that pass). Each camera is moved by 1, 2, 5, 10
+  and 20 cm, by 1, 2, 5, 10 and 20°, and its focal by ±10%. The truth is the median
+  displacement of the robot's surface points (`r4r.checks.perturb`).
+- *State/video mismatch:* the same episodes with their state taken 1 s and 3 s late, plus G1
+  episodes 96635 and 23969, which the G1 agent found out of sync (their hand-camera motion does
+  not follow the arm).
+
+Results are in `/e/scratch/reformo/blanchon1/r4r-cache/checks/results/` (parquet per dataset,
+in the shared table of `r4r.checks.eval`). Run `python -m r4r.checks.eval RESULTS… --clicks
+CLICKS… --by kind` to reproduce the tables.
+
+| idea | what | clicks: AUC >15 px / >30 px, Spearman ρ (scene cameras) | synthetic (scene cameras): AUC, ρ, \|estimate − truth\| | CPU per episode | correction (median click px before → after) | verdict |
+|---|---|---|---|---|---|---|
+| 1 motion agreement | 2D shift maximising the overlap of the drawn robot's silhouette change with the frame difference (still camera, 8 pairs 0.3 s apart) | 0.70 / 0.79, 0.45; with gain ≥ 0.1 (64% of rows) 0.78 / 0.86, 0.62 | 0.84, 0.69, 5.6 px | 0.5–1.2 s per scene camera (3 s on 7-camera G1) | 18.2 → 16.8; 51 of 204 worse by >5 px | estimate kept, not a flag |
+| 2 edge alignment | 2D shift minimising the truncated chamfer distance from the drawn outline to Canny edges (8 frames) | 0.67 / 0.76, 0.39 | 0.83, 0.67, 5.4 px | 0.3–0.7 s per scene camera | 18.1 → 18.5; 61 of 207 worse | estimate kept, not a flag |
+| 1+2 | motion shift when its gain ≥ 0.1, else edge (`r4r check`'s `error_px`) | 0.71 / 0.83, 0.49 | — | as above | not applied | reported |
+| 1b sync | rank correlation of image change and the motion the state predicts (silhouette change, or the camera's own motion), 16 pairs | — (measures timing, not pose: DROID 29119 with its camera 87 px off reads ρ 0.8) | 1 s / 3 s state lag, per episode: AUC 0.94 / 0.98; flag at mean ρ < 0.35: 3.4% of episodes, 62% / 88% of lagged ones; G1 96635 (ρ −0.17) and 23969 (0.31) flagged | 0.1–2 s | — | **integrated: the `sync_flagged` episode flag** |
+| 3 rest template | first frames of episodes with the same starting pose: measured image shift vs the drawn robots' shift, per episode relative to the others | scored only 21 of 359 camera rows (4 datasets: aloha, yam, flexiv, HSR): random held-out episodes rarely start within 3 cm of each other. On those, AUC 1.00 (n 18, 9 bad), ρ 0.81 | — | ~0.1 s | 14.5 → 13.3, 4 of 18 worse | promising where episodes start at one rest pose; too little coverage to integrate (a per-setup reference episode is needed, as HABIT's period scan has) |
+| 4 setup screening | the shift's distance from its (dataset, camera) median | 0.65 / 0.73 (motion); with the absolute shift 0.72 / 0.82 | — | free | — | no gain over the absolute shift |
+| distal | 1 and 2 restricted to the end-effector bodies (what the clicks measure) | motion 0.61, edge 0.54 | — | +0.5 s | worse (19.9 / 25.6) | dropped |
+
+**By dataset kind** (motion, scene cameras, AUC >15 px / ρ): arm 0.68 / 0.39, bimanual
+0.72 / 0.62, fisheye 0.85 / 0.70, humanoid 0.79 / 0.61, mobile 0.57 / −0.20. On DROID alone it
+is 1.00 (the bad per-episode extrinsics 29119 and 74644 are found). The sync check per kind
+(scene cameras, 1 s lag): fixed arms and bimanual rigs 0.96–1.00 (abc, droid, aloha, arx5,
+flexiv, ur5e, xvla, yam, agilex, dual-franka, the franka sims); humanoid and mobile heads
+0.57–0.94 (G2 0.71–0.73, HSR 0.68, hiw-500 0.84, r1-lite 0.83). Wrist cameras: 0.85 overall.
+
+**Why the camera estimates are not green.**
+- *The clicks measure more than the camera.* On ur5e, xvla, abc and molmoact2 the drawn
+  silhouette sits on the real robot (both checks find shifts under 5 px) while the clicked
+  fingertip is 20–35 px off. The rest of the error is in the end effector: jaw model, TCP depth
+  or the opening. No body-silhouette check can see it, and restricting the checks to the
+  distal bodies made them noisier, not better.
+- *A 2D shift is the wrong model for large errors.* It does not fit a focal error (±10% gives
+  14 px of truth but 2–25 px of shift) or a camera 10–20 cm off. The search radius is 35% of
+  the width, so errors beyond it read as random shifts.
+- *Wrist cameras.* The drawn gripper stays in place in the image. Where the real gripper
+  differs from the description (YAM, OmniPicker), the outline matches nothing, and the motion
+  check rarely finds still pairs. Wrist rows give AUC ~0.6, so `r4r check` gives no shift
+  estimate for wrists.
+- *Corrections do not hold.* Applying the proposed shift lowers the median click error a
+  little on scene cameras (18.2 → 16.8 px, motion), but makes a quarter of them worse by more
+  than 5 px. It is never applied.
+
+**State/video mismatch (sync) is green and integrated.** Static views separate cleanly, and
+moving heads are weaker. The lowest in-sync scores are not noise:
+- g2-cohort-01 10102 and 26517 are the cart episodes of problem 8 below, with the arms
+  drifting off over time. Their ρ of −0.21 and −0.08 says their state does not drive their
+  video: a record problem, not a camera.
+- realsource-world 20401 has its per-episode hand record wrong (above).
+- Not read yet: g2-cohort-02 1050 and airoa-moma-5k 844104 (both 0.08).
+- One sim false positive, arx-lift-2 79000 (0.17).
+
+`r4r check` writes `checks.parquet` beside the shards, and `r4r merge` copies it into
+`meta/r4r.json` (`checks`: `sync_rho`, `sync_flagged`, per camera `sync_rho`, `error_px`). The
+fit check of `r4r reconstruct` is unchanged: the image checks decode 32 frames per camera, and
+on the fast route (13–40 ms, no video) that would be most of the cost.
 
 ## Per-setup static cameras from silhouettes (2026-11-16)
 
@@ -390,3 +625,6 @@ says `not calibrated` or the camera is ignored (`camera.calibrated: false`).
    something the record does not capture in these sessions, such as the arms deflecting while
    pushing the cart. A per-episode solve of the head cameras (light route, scope `episode`)
    moves top_head by 7 cm / 3° in 1696 but cannot follow a change within the episode.
+   The sync check (`r4r check`, [above](#automatic-per-episode-checks-2026-11-16)) puts
+   10102 and 26517 at mean ρ −0.21 and −0.08. Their image motion does not follow their state,
+   which points at the record (or its timing) rather than the camera.

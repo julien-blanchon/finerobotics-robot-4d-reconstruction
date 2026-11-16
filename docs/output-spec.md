@@ -44,13 +44,14 @@ LeRobot v3 dataset (`r4r merge`). Code: `src/r4r/output.py` (columns), `src/r4r/
 | `observation.ee.<arm>.pose` | 7 | the `ee` frame in the episode frame, by forward kinematics with r4r's corrected kinematics |
 | `observation.ee.<arm>.gripper` | 1 | two-jaw grippers with pads (parallel, linkage or a single moving jaw): jaw opening in metres |
 | `observation.ee.<arm>.aperture` | 1 | jaw opening (parallel gripper, equal to `.gripper`), thumb–index fingertip distance (hand); absent for suction cups and tools |
-| `observation.ee.<arm>.fingertips` | F × 3 | hands and multi-finger grippers: fingertip positions in the episode frame |
+| `observation.ee.<arm>.fingertips` | F × 3 | hands, multi-finger grippers and grippers whose fingers swing on arcs (HSR): fingertip positions in the episode frame |
 | `observation.ee.<arm>.actuation` | 1 | optional: a suction cup's or a tool's recorded actuation |
 | `observation.base.pose` | 7 | robot base in the episode frame; identity for static robots; NaN in every frame for a mobile base whose motion is not recorded (feature info `available: false`) |
 | `observation.state_aligned` | J | joint state in the description's convention (below) |
 | `action_aligned` | J | only for absolute joint-target actions (below) |
 
-`<cam>` is the video key's suffix (`observation.images.<cam>`). `<arm>` comes from the priors'
+`<cam>` is the video key's suffix (`observation.images.<cam>`, or `observation.<cam>` for roots
+that keep their videos there, e.g. FetchMan). `<arm>` comes from the priors'
 `ee` block, or from the presets when the priors have none (`arm` for one end effector,
 `left`/`right` from the body names).
 
@@ -142,7 +143,7 @@ the body's name, else from its nearest ancestor naming a side.
 | `rby1` | `ee_left`, `ee_right` | 0.1328 m along −z | `finger_*1` / `finger_*2` inner faces |
 | `omnipicker` | `gripper_[lr]_base_link` (under `arm_*_link7`, AgiBot G1) | 0.14308 m along z | jaw plates `*_link4` near the tips, on the base's y; 0 to 0.129 m |
 | `omnipicker_g2` | `gripper_[lr]_base_link` (under `arm_*_end_link`, AgiBot G2, corrected description) | 0.14308 m along z | the same, jaws on the base's x |
-| `hsr` | `hand_palm_link` (Toyota HSR) | 0.093 m along z (closed fingertips) | `hand_[rl]_finger_tip_frame`, 4.4 mm apart at q = 0; 0 to 0.132 m |
+| `hsr` | `hand_palm_link` (Toyota HSR) | 0.093 m along z (closed fingertips) | `hand_[rl]_finger_tip_frame`, 4.4 mm apart at q = 0; 0 to 0.132 m; fingertips `left`/`right` at each distal finger's pad tip (fully open 0.046 m along z: the fingers swing) |
 | `yam` | `left_gripper`, `right_gripper`, `gripper` (I2RT YAM) | 0.1468 m along −z | `tip_right` / `tip_left` inner faces; 0 to 0.094 m |
 | `z1` | `gripperStator` (Unitree Z1) | 0.1489 m along x, on the fixed jaw's face | `gripperMover` / `gripperStator`, closing along the stator's z |
 | `rs02_tool` | `[lr]tool_base_link` (RealSource RS-02) | 0.229 m along z, closing along x | `tool_Right_Pad_Link` / `tool_Left_Pad_Link`; 0 to 0.103 m |
@@ -191,11 +192,16 @@ Quality and provenance, not features. The file can be dropped later.
   `source_episode_index`, `route` (`fast` | `light` | `full`), `median_px`, `track_share`,
   `flagged` (fit check), and `cameras`: per camera `recorded`, `held calibration`,
   `light solve`, `full solve` or `not calibrated`.
+- **Per episode, `checks`** (`null` unless `r4r check` ran before the merge): `sync_rho` (mean
+  over the cameras of the correlation between image change and the motion the state
+  predicts), `sync_flagged` (`sync_rho` < 0.35: the state does not drive the video), and `cameras`: per camera its `sync_rho` and, for scene cameras, `error_px` (the
+  estimated camera error in pixels; an indication, not a verdict).
 
 ## Packaging (`r4r merge`)
 
 ```bash
 r4r reconstruct <dataset> out/ [--shard i/n] [--uncalibrated nan]   # sharded parquet, resumable
+r4r check <dataset> out/                  # optional: checks.parquet beside the shards
 r4r merge <dataset> out/ dest/            # twin: dest/<dataset>--r4r
 r4r merge <dataset> out/ dest/ --full     # merged copy: dest/<dataset>
 ```

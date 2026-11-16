@@ -85,7 +85,7 @@ def merge(root: Path, reconstruction: Path, dest: Path, config: MergeConfig) -> 
         (partial / "meta" / "robot").symlink_to((root / "meta" / "robot").resolve())
     if (root / "videos").exists():
         (partial / "videos").symlink_to((root / "videos").resolve())
-    _write_side_file(partial, root, layout, records, done)
+    _write_side_file(partial, root, layout, records, done, _checks(shards[0].parent))
     partial.rename(target)
     return target
 
@@ -96,6 +96,36 @@ def _shards(root: Path, reconstruction: Path) -> list[Path]:
     if not found:
         raise FileNotFoundError(f"{reconstruction}: no shard-*.parquet for {root.name}")
     return found
+
+
+def _checks(directory: Path) -> dict[int, JsonObject]:
+    """Per source episode, the `r4r check` results in `directory/checks.parquet` (none when
+    the checks were not run): the mean sync ρ and its flag, and per camera its sync ρ and
+    estimated pixel error (`r4r.checks.episode`)."""
+
+    from r4r.checks.episode import CheckConfig, episode_sync
+
+    path = directory / "checks.parquet"
+    if not path.exists():
+        return {}
+    rows: dict[int, list[dict]] = {}
+    for row in pq.read_table(path).to_pylist():
+        rows.setdefault(int(row["episode"]), []).append(row)
+
+    def value(x: float) -> float | None:
+        return None if not np.isfinite(x) else round(float(x), 3)
+
+    out: dict[int, JsonObject] = {}
+    for episode, found in rows.items():
+        rho, flagged = episode_sync(found, CheckConfig())
+        cameras: dict[str, dict[str, float | None]] = {}
+        for r in found:
+            if r["method"] == "sync":
+                cameras.setdefault(r["camera"], {})["sync_rho"] = value(1.0 - r["score"])
+            elif r["method"] == "camera":
+                cameras.setdefault(r["camera"], {})["error_px"] = value(r["estimate_px"])
+        out[episode] = {"sync_rho": value(rho), "sync_flagged": flagged, "cameras": cameras}
+    return out
 
 
 def _summaries(shards: list[Path]) -> tuple[JsonObject, dict[int, JsonObject]]:
@@ -285,9 +315,12 @@ def _features(info: dict, layout: dict, full: bool) -> dict[str, dict]:
         else {k: v for k, v in main.items() if k in INDEX_COLUMNS or v["dtype"] == "video"}
     )
     features = {k: dict(v) for k, v in keep.items()}
-    for key, extra in layout["cameras"].items():
-        if key in features:
-            features[key]["info"] = {**features[key].get("info", {}), **extra}
+    from r4r.data.lerobot import camera_name
+
+    extras = {camera_name(k): v for k, v in layout["cameras"].items()}
+    for key, feature in features.items():
+        if feature.get("dtype") == "video" and camera_name(key) in extras:
+            feature["info"] = {**feature.get("info", {}), **extras[camera_name(key)]}
     return features | layout["features"]
 
 
@@ -341,7 +374,12 @@ def _numbers(column: pa.ChunkedArray) -> np.ndarray:
 
 
 def _write_side_file(
-    target: Path, root: Path, layout: dict, records: dict[int, JsonObject], done: list[int]
+    target: Path,
+    root: Path,
+    layout: dict,
+    records: dict[int, JsonObject],
+    done: list[int],
+    checks: dict[int, JsonObject],
 ) -> None:
     """`meta/r4r.json`: per dataset, provenance (r4r commit, priors hash, date), the state
     mapping and the action's treatment; per episode, quality (route, median px, track share,
@@ -362,6 +400,7 @@ def _write_side_file(
             "track_share": r.get("inliers"),
             "flagged": bool(r.get("flagged", False)),
             "cameras": r.get("cameras"),
+            "checks": checks.get(source),
         }
 
     episodes = [quality(n, s) for n, s in enumerate(done)]

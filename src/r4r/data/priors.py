@@ -513,6 +513,7 @@ def _parsed(raw: JsonObject, path: str) -> DatasetPriors:
             float(j.get("sign", 1.0)),
             tuple(j["from"]) if j.get("from") else None,
             tuple(j["to"]) if j.get("to") else None,
+            tuple(j["clip"]) if j.get("clip") else None,
         )
         for j in (_checked(j, JOINT_KEYS, f"{path}: joints") for j in raw.get("joints", []))
     )
@@ -574,7 +575,7 @@ def _keys(cls: type) -> frozenset[str]:
 
 
 TOP_KEYS = _keys(DatasetPriors) - {"raw", "group"} | {"base_odometry_measured"}
-JOINT_KEYS = frozenset({"index", "urdf_joint", "sign", "from", "to"})
+JOINT_KEYS = frozenset({"index", "urdf_joint", "sign", "from", "to", "clip"})
 STATION_KEYS = frozenset({"cameras", "bodies"})
 # What a group may set (the robot and its cameras; not stations, odometry or other groups)
 GROUP_KEYS = frozenset(

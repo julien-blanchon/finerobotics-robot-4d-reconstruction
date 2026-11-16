@@ -97,6 +97,7 @@ cameras need clicks is not solved for those cameras.
 | per-episode intrinsics or poses | several stations, per-unit calibrations, a dataset's own extrinsics | `<dataset>.episodes.parquet` (below) |
 | lens | pinhole or fisheye, recorded coefficients | `lens`, `distortion`, `distortion_range` |
 | scope | bolted (dataset), re-placed (episode), driving (frame) | `scope` on cameras and bodies |
+| robots | one dataset mixing robots (RoboMIND2 agilex: Piper and ARX arms): per-episode statistics tell them apart (`meta/episodes` `stats/observation.state/q99`) | `groups`: a `match` on a statistic and the group's own description, joints, cameras (`r4r.data.priors`); `r4r stations … --group` per group |
 | setups | sessions where a static camera stays put: `r4r stations <dataset> <camera> --write` | `station` column of the episodes table; values per station in `stations` |
 | odometry gain | `r4r rig --write` on driving episodes fits `base_odometry.correction` | then reconstruct holds the base on its record |
 | second arm | its base placement is usually a guess | `bodies.<base>`: ranges, scope |

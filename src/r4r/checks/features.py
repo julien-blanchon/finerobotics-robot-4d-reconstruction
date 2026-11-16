@@ -104,7 +104,9 @@ def sample[S: IntVar, N: IntVar](
     return F.normalize(rearrange(out[..., 0], "s d n -> s n d"), dim=-1)
 
 
-def upsampled[S: IntVar](features: Features[S, int, int], factor: int) -> Tensor[[S, int, int, 384]]:
+def upsampled[S: IntVar](
+    features: Features[S, int, int], factor: int
+) -> Tensor[[S, int, int, 384]]:
     """Patch descriptors bilinearly upsampled by `factor` per axis and renormalised: a finer
     grid for locating parts below the patch size."""
 

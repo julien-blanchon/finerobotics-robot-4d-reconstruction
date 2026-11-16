@@ -69,8 +69,9 @@ camera of the dataset has its columns, so users see it exists and is not calibra
 ### Feature info
 
 - **Video feature** `observation.images.<cam>`: `camera.lens` (`pinhole` | `fisheye`),
-  `camera.extrinsics_frame: episode`, `camera.mount` (`static` | `moving`), `camera.role`,
-  `camera.depth_key`.
+  `camera.extrinsics_frame: episode`, `camera.mount` (`static` | `moving` | `per station`: the
+  stream is a static view in some setups and a wrist camera in others, robomind2 ark),
+  `camera.role`, `camera.depth_key`.
 - **`observation.ee.<arm>.pose`:** `ee.type` (`parallel` | `multi_finger` | `dexterous` |
   `suction` | `tool` | `none`), `ee.description_body` (the body the frame hangs on), `ee.preset`,
   `ee.state_indices` and `ee.state_names` (the end effector's own joints within

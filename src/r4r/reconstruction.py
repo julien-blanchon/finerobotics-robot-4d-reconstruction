@@ -232,6 +232,23 @@ def read_summary(path: Path) -> list[dict[str, object]]:
     return json.loads(metadata.get(EPISODES_KEY, b"[]"))
 
 
+def _mount(root: Path, name: str, moving: bool) -> str:
+    """`static` or `moving`, or `per station` when the priors' stations give the stream another
+    mount than the dataset level (streams swapped between setups, e.g. robomind2 ark)."""
+
+    from r4r.data.priors import load_priors
+
+    priors = load_priors(root)
+    own = priors.raw.get("cameras", {}).get(name, {}).get("mount")
+    mounts = {own} | {
+        s.get("cameras", {}).get(name, {}).get("mount") for s in priors.stations.values()
+    }
+    mounts.discard(None)
+    if len(mounts) > 1:
+        return "per station"
+    return "moving" if moving else "static"
+
+
 def dataset_layout(
     root: Path,
     robot: Robot[int, int, int],
@@ -248,8 +265,7 @@ def dataset_layout(
     names = aligned_joints(robot.joint_names, joints)
     fitted = priors.kinematics
     cameras = tuple(
-        CameraInfo(s.name, s.prior.lens, "moving" if s.moving else "static", s.role)
-        for s in streams
+        CameraInfo(s.name, s.prior.lens, _mount(root, s.name, s.moving), s.role) for s in streams
     )
     return Layout(
         cameras=cameras,

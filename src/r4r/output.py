@@ -85,6 +85,9 @@ class Layout:
     # Cameras the priors ignore (worn by a person, not placeable): their columns are written,
     # NaN in every frame, so every camera of the dataset is present (`camera.calibrated` false)
     ignored: tuple[CameraInfo, ...] = ()
+    # False for a mobile base whose motion is not recorded: `observation.base.pose` is NaN in
+    # every frame (the episode frame is then the base at each frame, cameras on the robot)
+    base_pose: bool = True
 
     def features(self) -> dict[str, dict[str, object]]:
         """LeRobot feature entries (`dtype`, `shape`, `names`, `info`) of the r4r columns."""
@@ -123,7 +126,9 @@ class Layout:
                 )
             if e.actuation is not None:
                 out[f"{prefix}.actuation"] = entry([1], ["actuation"])
-        out["observation.base.pose"] = entry([7], list(POSE_NAMES), {"frame": "episode"})
+        out["observation.base.pose"] = entry(
+            [7], list(POSE_NAMES), {"frame": "episode", "available": self.base_pose}
+        )
         joint_info: dict[str, object] = {"unit": "rad or m (description joints)"}
         out["observation.state_aligned"] = entry([len(self.joints)], list(self.joints), joint_info)
         if self.action:
@@ -155,7 +160,7 @@ class Layout:
                 "state_mapping": list(self.mapping),
                 "lag_frames": self.lag,
                 "action_aligned": self.action,
-                "robot": {"mobile": self.mobile},
+                "robot": {"mobile": self.mobile, "base_pose": self.base_pose},
             }
         )
 
@@ -267,7 +272,9 @@ def frame_table(layout: Layout, out: EpisodeOutput) -> pa.Table:
         if e.actuation is not None:
             columns[f"{prefix}.actuation"] = _scalars(out.actuation[e.arm])
     base = eye.expand(steps, 4, 4) if out.base is None else world[:, out.base]
-    columns["observation.base.pose"] = pose(base)
+    columns["observation.base.pose"] = (
+        pose(base) if layout.base_pose else _vectors(torch.full((steps, 7), math.nan))
+    )
     columns["observation.state_aligned"] = _vectors(out.state)
     if layout.action:
         assert out.action is not None

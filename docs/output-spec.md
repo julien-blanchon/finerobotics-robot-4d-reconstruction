@@ -46,7 +46,7 @@ LeRobot v3 dataset (`r4r merge`). Code: `src/r4r/output.py` (columns), `src/r4r/
 | `observation.ee.<arm>.aperture` | 1 | jaw opening (parallel gripper, equal to `.gripper`), thumb–index fingertip distance (hand); absent for suction cups and tools |
 | `observation.ee.<arm>.fingertips` | F × 3 | hands and multi-finger grippers: fingertip positions in the episode frame |
 | `observation.ee.<arm>.actuation` | 1 | optional: a suction cup's or a tool's recorded actuation |
-| `observation.base.pose` | 7 | robot base in the episode frame; identity for static robots |
+| `observation.base.pose` | 7 | robot base in the episode frame; identity for static robots; NaN in every frame for a mobile base whose motion is not recorded (feature info `available: false`) |
 | `observation.state_aligned` | J | joint state in the description's convention (below) |
 | `action_aligned` | J | only for absolute joint-target actions (below) |
 
@@ -78,7 +78,8 @@ camera of the dataset has its columns, so users see it exists and is not calibra
 - **`observation.ee.<arm>.fingertips`:** `names: {fingers: [thumb, index, middle, ring,
   little], axes: [x, y, z]}` where applicable.
 - **`observation.state_aligned`:** `names` are the description's joint names.
-- **`info.json`:** `robot.mobile: true | false`.
+- **`info.json`:** `robot.mobile: true | false`; `robot.base_pose: false` when a mobile base's motion
+  is not recorded (camera and end-effector poses are then in the base frame at each frame).
 
 ### Reserved, not computed yet
 

@@ -221,6 +221,9 @@ def _targets(
                 if arm not in points:
                     continue
                 pts, metric, axis = points[arm]
+                k = _column(part, f"observation.camera.{camera}.intrinsics")
+                if not np.isfinite(k).any():  # written NaN in this episode (uncalibrated)
+                    continue
                 uv, depth = _project(part, camera, cams[camera]["camera.lens"], pts)
                 mid, z = np.nanmean(uv, 1), np.nanmean(depth, 1)
                 w, h = _size(part, camera)

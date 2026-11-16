@@ -1759,14 +1759,16 @@ class Station:
 @dataclass(frozen=True, slots=True)
 class Silhouette:
     """Calibrate one static camera per setup from the robot's silhouette
-    (`r4r.rago.silhouette`, CPU, ~40 s per setup): for a camera re-placed between setups that
+    (`r4r.rago.silhouette`, CPU, 10-50 s per setup): for a camera re-placed between setups that
     scene matches and neighbour seeds cannot place. Per setup of the episodes table (the
     camera's own key `station.<camera>` when present, else `station`), `samples` episodes fit
-    the camera's pose (the focal is held when the priors give one) to background-subtraction
-    masks, from the setup's own prior and up to `seeds` calibrated setups; `held` other
-    episodes score it. A setup whose score is under the config's pass values is flagged and
-    written as a start only (no ranges: `--uncalibrated nan` leaves it NaN). `--write` stores
-    the camera alone under `stations.<name>`."""
+    the camera's pose (the focal held when the priors give one) to robot masks, from the
+    setup's own prior and up to `seeds` calibrated setups; `held` other episodes score it.
+    Masks: SAM 3 (`--select` writes the frames, `python -m r4r.rago.segment` masks them on a
+    GPU, `--masks` reads them), else background subtraction. A setup under the config's pass
+    values (IoU, precision, two arms seen or one spread across the image) is flagged and
+    written as a start only (orientation range 180°: `--uncalibrated nan` leaves it NaN).
+    `--write` stores the camera alone under `stations.<name>`."""
 
     dataset: tyro.conf.Positional[str]
     camera: tyro.conf.Positional[str]

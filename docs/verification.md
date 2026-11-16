@@ -441,6 +441,13 @@ median click error over the setup's clicks:
   0.5-0.6). Per-setup accuracy is bounded by how well the setup is defined.
 - **The arm gate** catches 5b28 auto-2534 (one arm, 226 px at IoU 0.60) and auto-8697. It
   also flags auto-2493 and auto-17353 (14 and 19 px).
+- **A second score from image edges does not help.** The edge chamfer's best 2D shift of the
+  drawn outline (`r4r.checks.edges`) was tried as a second score:
+  - 5b28: 30-90 px on the good setups (cluttered scenes).
+  - lane02: 1.6-5 px on three bad setups (auto-5201 72 px, auto-4235 66 px, auto-7989 128 px).
+
+  This matches the checks' own finding that the edge estimate is reported, not flagged. Not
+  adopted.
 - **Focal.** It is held at the rigs' value (lane02 461/463 px, 5b28 419 px). Freed per setup,
   it scatters 444-552 px (lane02) and 359-555 px (5b28) with no gain on clicks (labelled arm:
   lane02 26.6 vs 22.9 px held, 5b28 23.2 vs 22.4). The ~20 px floor is not a focal pattern.

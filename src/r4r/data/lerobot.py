@@ -63,9 +63,14 @@ class _Root:
 
 @functools.cache
 def _root(root: Path) -> _Root:
-    """A dataset root opened once per process (episodes of a run reuse its reads)."""
+    """A dataset root opened once per process (episodes of a run reuse its reads).
 
-    robot = json.loads((root / "meta" / "robot.json").read_text())
+    A root without `meta/robot.json` (kai0) gets an empty one: its priors then name the
+    description and every joint.
+    """
+
+    path = root / "meta" / "robot.json"
+    robot = json.loads(path.read_text()) if path.exists() else {}
     priors = load_priors(root)
     return _Root(LeRobotTables(root, side=priors.side_directory), robot, priors)
 
@@ -178,7 +183,7 @@ def load_episode(
         if not tables.features[key].get("info", {}).get("is_depth_map", False)
         and not priors.cameras.get(key.removeprefix(IMAGE_PREFIX), CameraPrior()).ignore
     ]
-    feature = priors.state_feature or robot["state"]["feature"]
+    feature = priors.state_feature or _state_feature(robot)
     every = tables.rows(episode, _needed(keys, feature, priors, record))
     timestamps = cast("Tensor", every["timestamp"])[::stride].tolist()
 
@@ -443,7 +448,15 @@ def _description(root: Path, robot: JsonObject, priors: DatasetPriors) -> Path:
 
     if priors.description:
         return PRIORS / priors.description
+    if "urdf" not in robot:
+        raise ValueError(f"{root}: no meta/robot.json description: the priors must name one")
     return root / "meta" / robot["urdf"]
+
+
+def _state_feature(robot: JsonObject) -> str:
+    """The joint-state feature `robot.json` names (`observation.state` without one)."""
+
+    return robot.get("state", {}).get("feature", "observation.state")
 
 
 def _columns(rows: Mapping[str, Tensor], feature: str | tuple[str, ...]) -> Tensor[[int, int]]:
@@ -529,28 +542,30 @@ def _camera(
 def _joints(robot: JsonObject, replaced: frozenset[str] = frozenset()) -> tuple[JointMap, ...]:
     """Arm joints and gripper joints of every arm in `robot.json`, in the description's units.
 
-    A joint's `joint_ranges` entry (column range → joint range) applies to any joint; without
-    one, degrees are converted to radians. `normalised_percent` has no fixed mapping (it
-    depends on each robot's calibration): such joints need a mapping in the dataset's priors.
-    Joints in `replaced` (set by the priors) are skipped.
+    Two layouts: `state.arms` (arm joints, then `gripper` entries with their own range) and
+    `state.slices` (each joint with its `role`, `unit` and optional `sign`). A joint's
+    `joint_ranges` entry (column range → joint range) applies to any joint; without one,
+    degrees are converted to radians, radians and metres pass through. `normalised_percent`
+    has no fixed mapping (it depends on each robot's calibration): such joints need a mapping
+    in the dataset's priors. Joints in `replaced` (set by the priors) are skipped.
     """
 
-    state = robot["state"]
+    state = robot.get("state", {})
     signs = state.get("joint_signs", {})
     ranges = state.get("joint_ranges", {})
     joints = []
-    for arm in state["arms"]:
+    for arm in state.get("arms", state.get("slices", [])):
         for joint in arm["joints"]:
             name = joint["urdf_joint"]
             if name in replaced:
                 continue
-            sign = float(signs.get(name, 1.0))
+            sign = float(joint.get("sign", signs.get(name, 1.0)))
             unit = joint.get("unit", state.get("joint_unit", "rad"))
             if name in ranges:
                 source, target = tuple(ranges[name]["from"]), tuple(ranges[name]["to"])
             elif unit == "deg":
                 source, target = (0.0, 180.0), (0.0, math.pi)
-            elif unit == "rad":
+            elif unit in ("rad", "m"):
                 source = target = None
             else:
                 raise ValueError(f"{name}: state unit {unit!r} needs a mapping in the priors")
@@ -560,6 +575,13 @@ def _joints(robot: JsonObject, replaced: frozenset[str] = frozenset()) -> tuple[
             source, target = (tuple(gripper[k]) if gripper[k] else None for k in ("from", "to"))
             joints.append(JointMap(gripper["urdf_joint"], gripper["index"], 1.0, source, target))
     return tuple(joints)
+
+
+def state_feature(root: Path) -> str | tuple[str, ...]:
+    """The joint-state feature of a root: the priors' `state_feature`, else robot.json's."""
+
+    opened = _root(root)
+    return opened.priors.state_feature or _state_feature(opened.robot)
 
 
 def episode_columns(
@@ -585,7 +607,7 @@ def joint_action(root: Path) -> bool:
     if opened.priors.action == "joint_absolute":
         return True
     features = opened.tables.features
-    state = opened.priors.state_feature or opened.robot["state"]["feature"]
+    state = opened.priors.state_feature or _state_feature(opened.robot)
     action = features.get("action")
     if action is None or not isinstance(state, str) or state not in features:
         return False

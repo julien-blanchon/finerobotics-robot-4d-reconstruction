@@ -1766,8 +1766,15 @@ class Silhouette:
     # Fit again the setups a previous run flagged
     retry: bool = False
     write: bool = False
+    # Write the frames a segmentation model should mask, per setup and episode, to this JSON
+    # and stop (`python -m r4r.rago.segment` masks them on a GPU)
+    select: Path | None = None
+    # Robot masks of a segmentation model: `<setup>.npz` files in this folder
+    # (`r4r.rago.segment`), used instead of background subtraction
+    masks: Path | None = None
 
     def run(self) -> None:
+        import json
         import time
 
         import pyarrow.parquet as pq
@@ -1775,7 +1782,7 @@ class Silhouette:
         from r4r.data.lerobot import _root
         from r4r.data.priors import episode_table_path
         from r4r.plan import MIN_SETUP
-        from r4r.rago import silhouette
+        from r4r.rago import segment, silhouette
         from r4r.rago.station import distinct, samples
 
         root = dataset_root(self.dataset)
@@ -1805,13 +1812,28 @@ class Silhouette:
             or (n not in done and len(runs[n]) >= MIN_SETUP and (self.retry or n not in tried))
         ][: self.limit or None]
         config = silhouette.SilhouetteConfig()
+        chosen: dict[str, dict[str, list[int]]] = {}
         for name in todo:
             start = time.perf_counter()
             numbers = samples(sorted(runs[name]), self.samples + self.held)
             held = numbers[1::3][: self.held] if len(numbers) > self.samples else []
-            loaded = [silhouette.load(root, e, self.camera, config) for e in numbers]
-            fitting = [x for e, x in zip(numbers, loaded, strict=True) if x and e not in held]
-            scoring = [x for e, x in zip(numbers, loaded, strict=True) if x and e in held]
+            if self.select is not None:
+                chosen[name] = {
+                    str(e): frames
+                    for e in numbers
+                    if (frames := silhouette.segment_frames(root, e, config))
+                }
+                self.select.write_text(json.dumps(chosen))
+                print(f"{name}: frames selected")
+                continue
+            masks = {} if self.masks is None else segment.read(self.masks / f"{name}.npz")
+            loaded = {
+                e: silhouette.load(root, e, self.camera, config, masks.get(e))
+                for e in numbers
+                if self.masks is None or e in masks
+            }
+            fitting = [x for e, x in loaded.items() if x and x.frames.masks and e not in held]
+            scoring = [x for e, x in loaded.items() if x and x.frames.masks and e in held]
             if not fitting:
                 print(f"{name}: no usable episode, skipped")
                 continue

@@ -42,7 +42,7 @@ from einops import einsum, rearrange, repeat
 from r4r.geometry import se3
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     import mujoco
@@ -59,6 +59,8 @@ MOVED_SHARE = 0.2
 MAX_AREA = 0.4
 # A point explains mask pixels when its weight (moved share × finger weight) exceeds this
 EXPLAINS = 0.05
+# A robot mask covering less of the image than this is empty (segmentation)
+MIN_ROBOT = 0.005
 # Joint values beyond this (rad or m) are corrupt state rows (robomind2 agilex: −292.66)
 CORRUPT = 10.0
 
@@ -91,6 +93,11 @@ class SilhouetteConfig:
     lr_rotation: float = 0.01
     lr_position: float = 0.01
     lr_focal: float = 0.01
+    # Gaussian prior on the camera's departure from its seed (m, degrees) and its weight
+    # against the bounded loss (module doc, step 5)
+    prior_position: float = 0.3
+    prior_orientation_deg: float = 20.0
+    prior_weight: float = 0.05
     # Starts per seed: perturbations of the seed's orientation (degrees) and position (m)
     turn_deg: float = 10.0
     shift: float = 0.1
@@ -208,15 +215,22 @@ def views(
     finger: Tensor[[int]],
     masks: Sequence[np.ndarray],
     config: SilhouetteConfig,
+    segmented: bool = False,
 ) -> Views:
-    """`Views` from posed points now and at rest and each frame's mask."""
+    """`Views` from posed points now and at rest and each frame's mask. `segmented`: the masks
+    show the robot itself (a segmentation model), not what changed: every point must be on
+    them, moved or not."""
 
     moved = torch.linalg.norm(now - rest, dim=-1) / config.moved
+    if segmented:
+        moved = torch.ones_like(moved)
     weight = moved.clamp(max=1.0) * torch.where(finger, config.finger_weight, 1.0)
     distance, samples = [], []
     rng = np.random.default_rng(0)
     for mask in masks:
-        distance.append(cv2.distanceTransform(255 - mask, cv2.DIST_L2, 5))
+        # An empty mask has no zero to measure from (OpenCV returns ~1e38): cap at the image
+        far = float(max(mask.shape))
+        distance.append(np.minimum(cv2.distanceTransform(255 - mask, cv2.DIST_L2, 5), far))
         ys, xs = np.nonzero(mask)
         if len(xs) == 0:
             samples.append(np.full((config.samples, 2), np.nan))
@@ -308,23 +322,31 @@ def loss(
 
 def starts(
     seeds: Sequence[tuple[Tensor[[*Mat4x4]], float]], config: SilhouetteConfig
-) -> tuple[Tensor[[int, 3, 3]], Tensor[[int, *XYZ]], Tensor[[int]]]:
+) -> tuple[Tensor[[int, 3, 3]], Tensor[[int, *XYZ]], Tensor[[int]], Tensor[[int]]]:
     """Each seed (pose, focal) and its perturbations: turned by ±`turn_deg` about the camera's
-    x and y axes, moved by ±`shift` along its optical axis."""
+    x and y axes, moved by ±`shift` along its optical axis; and each start's seed (the index of
+    its unperturbed start)."""
 
-    rotations, centres, focals = [], [], []
+    rotations, centres, focals, seed = [], [], [], []
     turn = math.radians(config.turn_deg)
     offsets = [(0.0, 0.0, 0.0)] + [
         (sx * turn, sy * turn, 0.0) for sx in (-1, 0, 1) for sy in (-1, 0, 1) if sx or sy
     ]
     for pose, focal in seeds:
+        first = len(rotations)
         for ox, oy, _ in offsets:
             for depth in (0.0, -config.shift, config.shift) if ox == oy == 0 else (0.0,):
                 turned = pose[:3, :3] @ se3.so3_exp(torch.tensor([ox, oy, 0.0], dtype=pose.dtype))
                 rotations.append(turned)
                 centres.append(pose[:3, 3] + depth * pose[:3, 2])
                 focals.append(focal)
-    return torch.stack(rotations), torch.stack(centres), torch.tensor(focals, dtype=torch.float64)
+                seed.append(first)
+    return (
+        torch.stack(rotations),
+        torch.stack(centres),
+        torch.tensor(focals, dtype=torch.float64),
+        torch.tensor(seed),
+    )
 
 
 def fit(
@@ -336,14 +358,23 @@ def fit(
     """The camera from every start at once through the coarse scales, then the `keep` best
     through the fine ones (module doc, step 5)."""
 
-    rotation, centre, focal = (x.to(data.now) for x in starts(seeds, config))
+    rotation, centre, focal, seed = starts(seeds, config)
+    rotation, centre, focal = rotation.to(data.now), centre.to(data.now), focal.to(data.now)
+    anchor = (rotation[seed], centre[seed])  # each start's unperturbed seed
     coarse, fine = config.sigmas[: config.coarse], config.sigmas[config.coarse :]
     rotation, centre, focal, losses = _descend(
-        data, rotation, centre, focal, coarse, free_focal, config
+        data, rotation, centre, focal, anchor, coarse, free_focal, config
     )
     best = torch.argsort(losses)[: config.keep]
     rotation, centre, focal, losses = _descend(
-        data, rotation[best], centre[best], focal[best], fine, free_focal, config
+        data,
+        rotation[best],
+        centre[best],
+        focal[best],
+        (anchor[0][best], anchor[1][best]),
+        fine,
+        free_focal,
+        config,
     )
     winner = int(losses.argmin())
     pose = se3.from_rotation_translation(rotation[winner], centre[winner]).double()
@@ -355,6 +386,7 @@ def _descend(
     rotation0: Tensor[[int, 3, 3]],
     centre0: Tensor[[int, *XYZ]],
     focal0: Tensor[[int]],
+    anchor: tuple[Tensor[[int, 3, 3]], Tensor[[int, *XYZ]]],
     sigmas: Sequence[float],
     free_focal: bool,
     config: SilhouetteConfig,
@@ -370,7 +402,9 @@ def _descend(
     """
 
     with torch.no_grad():
-        local = einsum(rotation0, data.now[None] - centre0[:, None, None], "s j i, s f n j -> s f n i")
+        local = einsum(
+            rotation0, data.now[None] - centre0[:, None, None], "s j i, s f n j -> s f n i"
+        )
         depth = local[..., 2].flatten(1).median(1).values.clamp(min=0.1)
     pivot = torch.zeros_like(centre0)
     pivot[:, 2] = depth
@@ -394,10 +428,20 @@ def _descend(
         )
         return rotation, centre, focal0 * torch.exp(zoom)
 
+    def prior(rotation: Tensor, centre: Tensor) -> Tensor:
+        """`w · (|Δc|² / r² + |Δθ|² / a²)` from each start's seed: a bimanual robot seen with
+        one arm in view fits a mirrored camera (the other arm on it) as well as the right one."""
+
+        turned = se3.so3_log(anchor[0].mT @ rotation).norm(dim=-1)
+        moved = torch.linalg.norm(centre - anchor[1], dim=-1)
+        spread = (moved / config.prior_position) ** 2
+        spread = spread + (turned / math.radians(config.prior_orientation_deg)) ** 2
+        return config.prior_weight * spread
+
     for sigma in sigmas:
         for _ in range(config.steps):
             optimiser.zero_grad()
-            loss(data, *camera(), sigma, config).sum().backward()
+            (loss(data, *camera(), sigma, config) + prior(*camera()[:2])).sum().backward()
             optimiser.step()
     with torch.no_grad():
         rotation, centre, focal = camera()
@@ -484,6 +528,8 @@ class EpisodeFrames:
     world: Tensor[[int, int, *Mat4x4]]
     world_rest: Tensor[[int, *Mat4x4]]
     frames: list[int]
+    # Masks of the robot itself (segmentation) rather than of change (module doc, step 2)
+    segmented: bool = False
 
 
 def episode_frames(
@@ -526,6 +572,43 @@ def episode_frames(
     )
 
 
+def spread_frames(qpos: Tensor[[int, int]], count: int) -> list[int]:
+    """`count` of an episode's candidate frames far apart in joint space, starting with the one
+    farthest from the median pose: the frames a segmentation model masks (chosen before any
+    image is read, so the GPU job and the fit pick the same ones)."""
+
+    chosen = [int((qpos - qpos.median(0).values).abs().sum(-1).argmax())]
+    while len(chosen) < min(count, len(qpos)):
+        gap = torch.cdist(qpos, qpos[chosen]).min(1).values
+        chosen.append(int(gap.argmax()))
+    return sorted(chosen)
+
+
+def segmented_frames(
+    masks: Sequence[np.ndarray],
+    world: Tensor[[int, int, *Mat4x4]],
+    frames: Sequence[int],
+    model: tuple[Tensor[[int]], Tensor[[int, *XYZ]], Tensor[[int]]],
+) -> EpisodeFrames:
+    """`EpisodeFrames` from robot masks (a segmentation model) at `frames`, the bodies posed
+    there by `world`."""
+
+    body, local, finger = model
+    # A frame where the model found no robot (out of view, or missed) says nothing
+    seen = [i for i, m in enumerate(masks) if (m > 0).mean() > MIN_ROBOT]
+    now = posed(world[seen], body, local)
+    return EpisodeFrames(
+        now,
+        now,
+        finger,
+        [masks[i] for i in seen],
+        world[seen],
+        world[0],
+        [frames[i] for i in seen],
+        True,
+    )
+
+
 def stacked(episodes: Sequence[EpisodeFrames], config: SilhouetteConfig) -> Views:
     """`Views` of several episodes' kept frames together."""
 
@@ -535,6 +618,7 @@ def stacked(episodes: Sequence[EpisodeFrames], config: SilhouetteConfig) -> View
         episodes[0].finger,
         [m for e in episodes for m in e.masks],
         config,
+        all(e.segmented for e in episodes),
     )
 
 
@@ -554,7 +638,7 @@ def scored(
         for k, mask in enumerate(episode.masks):
             size = mask.shape[:2]
             now = render(episode.world[k].double().numpy(), camera, focal, size, geoms)
-            both = now | render(rest, camera, focal, size, geoms)
+            both = now if episode.segmented else now | render(rest, camera, focal, size, geoms)
             # Decimated meshes leave pinholes
             drawn.append(cv2.morphologyEx(both, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)))
     return score(stacked(episodes, config), pose, focal, drawn, config)
@@ -571,10 +655,17 @@ class Loaded:
     geoms: list[tuple[int, np.ndarray, np.ndarray]]
 
 
-def load(root: Path, number: int, camera: str, config: SilhouetteConfig) -> Loaded | None:
+def load(
+    root: Path,
+    number: int,
+    camera: str,
+    config: SilhouetteConfig,
+    masks: Mapping[int, np.ndarray] | None = None,
+) -> Loaded | None:
     """Episode `number` of the dataset `root` prepared for `camera` (module doc, steps 1-3):
     `frames` frames decoded alone, the description posed by the priors' corrected kinematics.
-    None when its state holds corrupt values (|q| > 10)."""
+    `masks`: robot masks from a segmentation model per frame index (`segment_frames`), used
+    instead of background subtraction. None when its state holds corrupt values (|q| > 10)."""
 
     from r4r.data.lerobot import keyframes, load_episode
 
@@ -593,10 +684,15 @@ def load(root: Path, number: int, camera: str, config: SilhouetteConfig) -> Load
         qpos = corrected_qpos(robot, qpos, fitted.offsets, fitted.time_offset)
     if bool((qpos.abs() > CORRUPT).any()):
         return None
-    frames = np.linspace(0, len(qpos) - 1, config.frames).round().astype(int).tolist()
-    images = keyframes(root, number, frames, [camera])[camera]
-    world = forward_kinematics(robot, qpos[frames])
-    kept = episode_frames(images, world, qpos[frames], frames, model, config)
+    if masks is not None:
+        frames = sorted(masks)
+        world = forward_kinematics(robot, qpos[frames])
+        kept = segmented_frames([masks[f] for f in frames], world, frames, model)
+    else:
+        frames = candidates(len(qpos), config)
+        images = keyframes(root, number, frames, [camera])[camera]
+        world = forward_kinematics(robot, qpos[frames])
+        kept = episode_frames(images, world, qpos[frames], frames, model, config)
     prior = next(c.prior for c in episode.cameras if c.name == camera)
     pose = None
     if prior.position is not None and prior.orientation is not None:
@@ -605,6 +701,36 @@ def load(root: Path, number: int, camera: str, config: SilhouetteConfig) -> Load
             rotation, torch.tensor(prior.position, dtype=torch.float64)
         )
     return Loaded(kept, (pose, prior.focal, prior.focal_range), geoms)
+
+
+def candidates(steps: int, config: SilhouetteConfig) -> list[int]:
+    """The `frames` evenly spaced frame indices of an episode of `steps` frames."""
+
+    return np.linspace(0, steps - 1, config.frames).round().astype(int).tolist()
+
+
+def segment_frames(root: Path, number: int, config: SilhouetteConfig) -> list[int] | None:
+    """The frame indices of episode `number` a segmentation model masks for `load`: `kept` of
+    the `candidates` spread in joint space (`spread_frames`). None for a corrupt state."""
+
+    from r4r.data.lerobot import load_episode
+
+    from .kinematics import corrected_qpos
+    from .robot import CameraMount, body_mounts, qpos_from_state
+
+    episode = load_episode(root, number, decode=())
+    mounts = tuple(
+        CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in episode.cameras
+    )
+    robot, _, _ = _model(episode.robot, mounts, body_mounts(episode.priors), config.points)
+    qpos = qpos_from_state(robot, episode.state.to(torch.float64), episode.joints)
+    fitted = episode.priors.kinematics
+    if fitted is not None:
+        qpos = corrected_qpos(robot, qpos, fitted.offsets, fitted.time_offset)
+    if bool((qpos.abs() > CORRUPT).any()):
+        return None
+    frames = candidates(len(qpos), config)
+    return [frames[i] for i in spread_frames(qpos[frames], config.kept)]
 
 
 @functools.cache

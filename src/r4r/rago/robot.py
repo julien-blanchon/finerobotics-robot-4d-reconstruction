@@ -441,8 +441,8 @@ def qpos_from_state[T: IntVar, NState: IntVar](
     """MuJoCo `qpos [T, nq]` from a dataset state trajectory; unmapped joints stay at 0.
 
     Each mapped joint: `q = σ s`, or with a range map `q = t0 + (σ s − s0)(t1 − t0)/(s1 − s0)`
-    (σ: `sign`, s: the state column), then held within `clip` when given. Mimic joints are filled later by forward
-    kinematics (`apply_couplings`).
+    (σ: `sign`, s: the state column), then held within `clip` when given. Mimic joints are
+    filled later by forward kinematics (`apply_couplings`).
     """
 
     qpos = state.new_zeros(len(state), robot.nq)

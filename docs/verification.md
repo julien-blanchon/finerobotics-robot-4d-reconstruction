@@ -34,7 +34,7 @@ Clicks, targets and drawn points, one JSON per dataset:
 | dataset | h | n (skipped) | median / p90 / max px | image | % width | TCP shift → median | verdict | pattern |
 |---|---|---|---|---|---|---|---|---|
 | airoa-moma-5k (HSR) | 5025 | 8 (1) | 36.9 / 70.8 / 108 → 21.7 / 37.6 / 39.8 (fingertips) | 512×384 | 4.2 | −2 cm → 27.4 (before) | fail | the jaw model drew open fingers 4.7 cm too far (fixed: fingertips); the rest is one head camera per HSR unit (50 units, 1-4°) |
-| agibot-world g1-cohort-04 | 2620 | 23 (7) | 71.1 / 122 / 146 | 512×384 (fisheyes 512×410) | 13.9 | +10 cm (scan edge) → 27.6 | fail | top_head 71 px, drawn 1.3-1.6× farther from the image centre than the real grippers (the gripper is longer than described, not the focal: +10 cm → 19 px); hands seeing the other arm 98 px; fisheyes 20-46 px; jaw points at the jaw roots (TCP short); lag ±45 frames ruled out |
+| agibot-world g1-cohort-04 | 2620 | 23 (7) | 71.1 / 122 / 146 | 512×384 (fisheyes 512×410) | 13.9 | +10 cm (scan edge) → 27.6 | fail (20.4 px after the hand fix) | top_head 71 px, drawn 1.3-1.6× farther from the image centre than the real grippers (the gripper is longer than described, not the focal: +10 cm → 19 px); hands seeing the other arm 98 px; fisheyes 20-46 px; jaw points at the jaw roots (TCP short); lag ±45 frames ruled out. After the wrist-section and hand-mount fixes (2026-11-16, n 32 with 2 re-clicks and 9 added hand clicks): 20.4 px, 17.0 without the 2 episodes whose state does not match the video; still fails, mainly on the hand views of the other arm (below) |
 | abc-130k abc-640x480 | 1752 | 21 (19) | 17.4 / 42.0 / 54.0 | 512×384 | 3.4 | +1 cm → 17.5 | fail | top 16.4 px (n 14), wrists 26.9 (left 38). Per station (top / wrist): 2: 17; 8: 16; 9: 54; 18: 17; 19: 21, 16 / 17; 22: 7 / 14; 24: 10; 26: wrist 42; 27: 15 / 34; 29: 8 / 26; 30: 10 / 27; 31: 20; 35: 24 / 47; 37: 41 |
 | abc-130k abc-848x480 | 723 | 19 (11) | 17.0 / 49.4 / 54.8 | 512×290 | 3.3 | +3 cm → 15.7 | fail | top 14.1 px (n 12, holds); wrists 46.5 (left 47.8): the wrist mounts |
 | molmoact2-yam bimanual-yam | 704 | 10 (10) | 35.6 / 113 / 115 | 512×288 | 7.0 | −5 cm → 31.7 | fail | top 25.2 px (per-episode light solve), wrist views of the other arm 114 px |
@@ -141,10 +141,41 @@ episodes (`priors/onboarding/toyota__hsr.md`, "Held-out diagnosis"):
   Needed: a head-camera mount per unit (stations by `hsr_id`), solved automatically per unit.
   Two of the 8 held-out clicks are not on a fingertip (a held bottle's top, a dark blob).
 
-**Still open:**
-- G1 hand cameras: 55-212 px. In the a2d preview, the hand views draw their own gripper in the
-  middle of the image while the real jaws are at the bottom edges, so the hand mount needs a
-  look.
+**G1 hand cameras (2026-11-16).**
+- *Cause.* The delivered hand extrinsics are forward kinematics of the delivered description
+  times a per-episode mount. That frame is the old gripper base, which is
+  `gripper_[lr]_flange_link` now. The wrist-section fix did not double-count anything. The
+  records themselves are wrong, though. Between calibration families they move the camera by up
+  to 6 cm on the gripper (episodes 31457 and 120091 against 0 and 56976), but the own jaws sit at
+  the same pixels in every episode. The real camera is about 3 cm further out along the gripper
+  and 2 cm further off its axis than the records say. It rides on the gripper housing (the grey
+  D405 box).
+- *Fix.* Each hand camera gets one dataset-level mount on `gripper_[lr]_base_link`, fitted once
+  from clicks on 20 episodes that are not held out: 42 own-jaw tips and 28 other-arm jaw tips,
+  with 6 degrees of freedom. The fit leaves own jaws at 4-7 px and other-arm tips at 10-12 px
+  (`r4r-cache/onboarding/mobile-wheeled/scratch/g1_handfit.py`, clicks in
+  `verify/clicks/calib/agibot-world__g1-cohort-04.hands.json`). The hand rows were dropped
+  from `g1-cohort-04.episodes.parquet`. The per-episode top_head rows stay: a dataset-level
+  top_head scores 29.5 px against 15.9. robocoin lane06/lane10 and interndata-a1-real a2d take
+  the same mounts. In the a2d preview, the hand views now draw the own jaws on the real ones at
+  the bottom edges.
+- *Held-out clicks.* Two misclicks were corrected: 118657 top_head was on the remote's far end
+  and 119164 top_head on the jar. The old values are kept as `click_old`. Nine other-arm clicks
+  were added from the episodes' second hand camera, so n is 32. Before → after on the same
+  clicks: hands 48.4 / 54.1 → 17.8 / 35.3 px (left / right); the first 5 hand clicks 64 → 17.
+  All: 21.8 → 20.4 px. Scene: 16.4 (top_head 15.9). Excluding 96635 and 23969 (below), the
+  median is 17.0 px (n 27): scene 15.2, hands 30.5 (n 12). **Still fails.**
+- *What is left.* (1) The hand views see the other arm at 0.3-0.5 m, so a 3-4 cm error of the
+  two arms' kinematics comes out at 25-50 px there. That is the same 3D error the head views
+  show at about 15 px. The errors point in no common direction, so no single mount removes them.
+  (2) In episodes 96635 and 23969, the arm state does not match the video at all; the cameras
+  are not the cause. The hand-camera image motion against the own arm's joint speed has a
+  correlation of 0.6-0.85 in normal episodes. Here it is below 0 for the arm that moves, at any
+  offset or time scale. In 40 random episodes, 4-5 show the same pattern (about 10-15 %,
+  inferred). A check like this could flag those episodes.
+- Video: `r4r-cache/verify/g1-cohort-04_57991_handfix.mp4` (held-out episode 57991, priors only). Read at t 100 and 330: in both hand views the own jaws
+  are drawn on the real ones along the bottom edges, and the other arm on the real arm. In
+  top_head, the arms and grippers are drawn on the real ones.
 - G2 wrist views of the other arm got worse on 2 clicks.
 - Piper (another agent's): the clicks put the real fingertips about +5 to +6 cm past the drawn
   ones. That is agilex-5b28 +6.2 cm (IQR 4.8-7.8) and agilex-real +5.3 cm (4.4-7.9), leaving

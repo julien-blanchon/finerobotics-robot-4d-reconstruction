@@ -56,6 +56,10 @@ class IkConfig:
     max_step: float = 0.2
     # Weighted error (m) under which a frame needs no further iterations
     tolerance: float = 1e-5
+    # At most this many extra iterations; a frame stops once its error shrinks by less than
+    # `stall` (relative) in one
+    extra_iterations: int = 30
+    stall: float = 0.01
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,14 +114,19 @@ def solve_ik[B: IntVar, T: IntVar, J: IntVar](
             # The last iterations only meet the target (the pull would hold it back a little)
             gain = config.null_gain if i < steps - config.polish else 0.0
             q = torch.where(active, _step(q, error, jacobian, chain, config, gain), q)
-        # Frames still off the target (a long move between frames) get more iterations
-        for _ in range(config.first_iterations):
+        # Frames still off the target (a long move between frames) get more iterations, each
+        # until its error stops shrinking (an unreachable frame must not hold the batch)
+        moving = active
+        previous = torch.full_like(q[:, :1], torch.inf)
+        for _ in range(config.extra_iterations):
             target = world_from_target[:, t]
             error, jacobian = _error_jacobian(robot, chain, base, q, target, config)
-            behind = active & (error.norm(dim=1, keepdim=True) > config.tolerance)
-            if not behind.any():
+            size = error.norm(dim=1, keepdim=True)
+            moving = moving & (size > config.tolerance) & (size < (1 - config.stall) * previous)
+            if not moving.any():
                 break
-            q = torch.where(behind, _step(q, error, jacobian, chain, config, 0.0), q)
+            previous = size
+            q = torch.where(moving, _step(q, error, jacobian, chain, config, 0.0), q)
         error, _ = _error_jacobian(robot, chain, base, q, world_from_target[:, t], config)
         out[:, t] = q
         position_error[:, t] = error[:, :3].norm(dim=1)

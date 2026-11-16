@@ -161,7 +161,9 @@ genie-1, g2a-simulation and xrobotwin keep their own. Their ground-truth checks 
   correlation of 0.6-0.85 in normal episodes. Here it is below 0 for the arm that moves, at any
   offset or time scale. In 40 random episodes, 4-5 show the same pattern (about 10-15 %,
   inferred). A check like this could flag those episodes.
-- Video: `r4r-cache/verify/g1-cohort-04_57991_handfix.mp4` (held-out episode 57991, priors only).
+- Video: `r4r-cache/verify/g1-cohort-04_57991_handfix.mp4` (held-out episode 57991, priors only). Read at t 100 and 330: in both hand views the own jaws
+  are drawn on the real ones along the bottom edges, and the other arm on the real arm. In
+  top_head, the arms and grippers are drawn on the real ones.
 - G2 wrist views of the other arm got worse on 2 clicks.
 - Piper (another agent's): the clicks put the real fingertips about +5 to +6 cm past the drawn
   ones. That is agilex-5b28 +6.2 cm (IQR 4.8-7.8) and agilex-real +5.3 cm (4.4-7.9), leaving

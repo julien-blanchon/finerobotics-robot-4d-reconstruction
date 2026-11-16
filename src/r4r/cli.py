@@ -1855,12 +1855,20 @@ class Silhouette:
             found = silhouette.scored(
                 [x.frames for x in checked], fit.pose, fit.focal, checked[0].geoms, config
             )
-            flagged = found.precision < config.pass_precision or found.iou < config.pass_iou
+            arms, spread = silhouette.arms_seen(
+                [x.frames for x in fitting + scoring], fitting[0].arm, fit.pose, fit.focal, config
+            )
+            flagged = (
+                found.precision < config.pass_precision
+                or found.iou < config.pass_iou
+                or (arms < 2 and spread < config.pass_spread)
+            )
             took = time.perf_counter() - start
             print(
                 f"{name} ({len(runs[name])} episodes): precision {found.precision:.2f}, "
                 f"IoU {found.iou:.2f} on {found.frames} {'held-out' if scoring else 'fitted'} "
-                f"frames, focal {fit.focal:.0f} px, {took:.0f} s"
+                f"frames, {arms} arm(s) seen over {spread:.2f} of the diagonal, "
+                f"focal {fit.focal:.0f} px, {took:.0f} s"
                 + (" FLAGGED: read its overlay" if flagged else "")
             )
             values = {
@@ -1879,6 +1887,8 @@ class Silhouette:
                     "from": "r4r silhouette",
                     "precision": round(found.precision, 3),
                     "iou": round(found.iou, 3),
+                    "arms": arms,
+                    "spread": round(spread, 3),
                     "flagged": flagged,
                 },
             }

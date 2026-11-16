@@ -105,7 +105,12 @@ class SilhouetteConfig:
     # with at least these held-out precision and IoU
     inside_px: float = 3.0
     pass_precision: float = 0.7
-    pass_iou: float = 0.3
+    pass_iou: float = 0.5
+    # An arm is seen in a frame when this share of its finger points lands on the mask; a setup
+    # passes only if its frames show two arms, or one arm spread over this share of the
+    # image diagonal
+    arm_visible: float = 0.5
+    pass_spread: float = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,8 +137,12 @@ class SilhouetteFit:
     start: int
 
 
+# Bodies whose names match are fingers (down-weighted, and what `arms_seen` counts)
+FINGERS = r"link7$|link8$|finger"
+
+
 def surface_points(
-    model: mujoco.MjModel, count: int, fingers: str = r"link7$|link8$|finger"
+    model: mujoco.MjModel, count: int, fingers: str = FINGERS
 ) -> tuple[Tensor[[int]], Tensor[[int, *XYZ]], Tensor[[int]]]:
     """`count` points per body on its drawn surfaces (`viz.overlay.surfaces`), area-weighted:
     each point's body, its position in the body frame and whether the body is a finger."""
@@ -653,6 +662,8 @@ class Loaded:
     frames: EpisodeFrames
     prior: tuple[Tensor[[*Mat4x4]] | None, float | None, float | None]
     geoms: list[tuple[int, np.ndarray, np.ndarray]]
+    # Each surface point's arm (`arm_of_bodies`), for `arms_seen`
+    arm: Tensor[[int]]
 
 
 def load(
@@ -677,7 +688,7 @@ def load(
         CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in episode.cameras
     )
     bodies = body_mounts(episode.priors)
-    robot, model, geoms = _model(episode.robot, mounts, bodies, config.points)
+    robot, model, geoms, arm = _model(episode.robot, mounts, bodies, config.points)
     qpos = qpos_from_state(robot, episode.state.to(torch.float64), episode.joints)
     fitted = episode.priors.kinematics
     if fitted is not None:
@@ -700,7 +711,7 @@ def load(
         pose = se3.from_rotation_translation(
             rotation, torch.tensor(prior.position, dtype=torch.float64)
         )
-    return Loaded(kept, (pose, prior.focal, prior.focal_range), geoms)
+    return Loaded(kept, (pose, prior.focal, prior.focal_range), geoms, arm)
 
 
 def candidates(steps: int, config: SilhouetteConfig) -> list[int]:
@@ -722,7 +733,7 @@ def segment_frames(root: Path, number: int, config: SilhouetteConfig) -> list[in
     mounts = tuple(
         CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in episode.cameras
     )
-    robot, _, _ = _model(episode.robot, mounts, body_mounts(episode.priors), config.points)
+    robot, *_ = _model(episode.robot, mounts, body_mounts(episode.priors), config.points)
     qpos = qpos_from_state(robot, episode.state.to(torch.float64), episode.joints)
     fitted = episode.priors.kinematics
     if fitted is not None:
@@ -736,8 +747,14 @@ def segment_frames(root: Path, number: int, config: SilhouetteConfig) -> list[in
 @functools.cache
 def _model(
     path: Path, mounts: tuple[CameraMount, ...], bodies: tuple[BodyMount, ...], points: int
-) -> tuple[Robot[int, int, int], tuple[Tensor[[int]], Tensor[[int, *XYZ]], Tensor[[int]]], list]:
-    """A description's kinematics, surface points and drawn surfaces, once per process."""
+) -> tuple[
+    Robot[int, int, int],
+    tuple[Tensor[[int]], Tensor[[int, *XYZ]], Tensor[[int]]],
+    list,
+    Tensor[[int]],
+]:
+    """A description's kinematics, surface points, drawn surfaces and each point's arm, once
+    per process."""
 
     from r4r.viz.overlay import surfaces
 
@@ -745,4 +762,79 @@ def _model(
 
     robot = load_robot(path, cameras=mounts, bodies=bodies).to("cpu", torch.float64)
     model = compile_model(path, None, mounts, bodies, visual=True)
-    return robot, surface_points(model, points), surfaces(model)
+    sampled = surface_points(model, points)
+    arm = torch.tensor(arm_of_bodies(model))[sampled[0]]
+    return robot, sampled, surfaces(model), arm
+
+
+def arm_of_bodies(model: mujoco.MjModel) -> list[int]:
+    """Per body, its arm: which child subtree of the branching body holds it. The branching
+    body is the deepest one whose children lead to fingers (`FINGERS`) along more than one
+    branch, e.g. a bimanual robot's rig base. Bodies above it get -1. With one arm, all 0."""
+
+    import re
+
+    parent = [int(p) for p in model.body_parentid]
+
+    def chain(body: int) -> list[int]:  # root first
+        out = [body]
+        while out[-1] != 0:
+            out.append(parent[out[-1]])
+        return out[::-1]
+
+    fingers = [chain(b) for b in range(model.nbody) if re.search(FINGERS, model.body(b).name)]
+    depth = 0
+    while fingers and all(len(c) > depth + 1 for c in fingers):
+        heads = sorted({c[depth + 1] for c in fingers})
+        if len(heads) > 1:
+            return [
+                next((heads.index(h) for h in heads if h in chain(b)), -1)
+                for b in range(model.nbody)
+            ]
+        depth += 1
+    return [0] * model.nbody
+
+
+def arms_seen(
+    episodes: Sequence[EpisodeFrames],
+    arm: Tensor[[int]],
+    pose: Tensor[[*Mat4x4]],
+    focal: float,
+    config: SilhouetteConfig,
+) -> tuple[int, float]:
+    """Which arms the frames show, under a camera: an arm counts in a frame when at least
+    `arm_visible` of its finger points project inside the image onto the mask. Returns the
+    number of arms seen in any frame, and the spread of the seen fingers' pixel centroids
+    (largest distance between two, / image diagonal). One arm in one place pins a camera
+    poorly: a camera that puts the other arm off-image fits as well."""
+
+    seen: set[int] = set()
+    centroids = []
+    camera = pose.to(episodes[0].now)
+    focal_t = torch.tensor([focal]).to(camera)
+    for episode in episodes:
+        for k, mask in enumerate(episode.masks):
+            height, width = mask.shape[:2]
+            uv, front = project(
+                camera[None, :3, :3],
+                camera[None, :3, 3],
+                focal_t,
+                (height, width),
+                episode.now[k : k + 1],
+            )
+            u, v = uv[0, 0, :, 0].round().long(), uv[0, 0, :, 1].round().long()
+            inside = front[0, 0] & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+            on = torch.zeros_like(inside)
+            on[inside] = torch.from_numpy(mask[v[inside].numpy(), u[inside].numpy()] > 0)
+            for a in arm.unique().tolist():
+                tips = episode.finger & (arm == a)
+                if a < 0 or not bool(tips.any()):
+                    continue
+                if float((on & tips).sum() / tips.sum()) >= config.arm_visible:
+                    seen.add(a)
+                    centroids.append(uv[0, 0, tips & on].mean(0))
+    if len(centroids) < 2:
+        return len(seen), 0.0
+    points = torch.stack(centroids)
+    height, width = episodes[0].masks[0].shape[:2]
+    return len(seen), float(torch.cdist(points, points).max()) / math.hypot(width, height)

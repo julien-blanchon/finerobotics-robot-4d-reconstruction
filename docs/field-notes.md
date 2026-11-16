@@ -195,6 +195,14 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   few hundred episodes. A sheet of all streams of one episode shows it; the open fingers at rest
   (fixed pixels in every wrist view) classify every episode in a minute. Write the layout as the
   `station` and swap the mounts in `stations` (output `camera.mount: per station`).
+- **Gripper units can change between batches, per arm:** robomind2 ark's gripper columns come
+  in three conventions (closed −32.3 / 0 / −0.4, open −7.1 / 5 / 24.9). Classify episodes by the
+  column's maximum in `meta/episodes` stats and map each with a priors `group` (a `match` list,
+  one condition per arm). A wrist view at rest and fully closed checks each mapping.
+- **A wrist's own fingertips calibrate its mount rotation:** clicks at rest and fully closed
+  (four points) gave every robomind2 ark / ark-mobile wrist a 5-7 deg correction at 1-3 px, and
+  showed the real opening 10-21 % wider than the description's finger limit. Fix this before
+  using a wrist to place the other arm.
 - **Merged roots mix setups:** community-v3 roots join many LeRobot repos, each with its own
   cameras and calibration (one root's overlay showed three rooms). Find the setup key first
   (`source/subtree` or `source/publisher_repo` in `meta/episodes`), write it as `station`, and

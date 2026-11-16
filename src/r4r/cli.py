@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from r4r.rago.lens import Lens
     from r4r.rago.rig import KinematicFreedom
     from r4r.rago.robot import BodyMount, CameraMount, Robot
-    from r4r.rago.stages import RigEpisode, RigFit
+    from r4r.rago.stages import RigConfig, RigEpisode, RigFit
     from r4r.rago.transfer import Reference
     from r4r.types import Mat3x3, Mat4x4
     from r4r.viz.overlay import SavedSolution, Solution
@@ -333,6 +333,31 @@ class _RigInputs:
     lens: Lens | None
 
 
+def rig_config(
+    every: int,
+    groups: int,
+    kinematic: KinematicFreedom | None,
+    ranges: tuple[float, ...] | None,
+    picks_weight: float = 10.0,
+) -> RigConfig:
+    """`r4r rig`'s stage settings: RoMa links every `every` timesteps, `groups` agreement
+    groups, the kinematic freedom and focal ranges, and the picks' weight in the bundles."""
+
+    from dataclasses import replace
+
+    from r4r.rago.stages import RigConfig
+
+    config = RigConfig()
+    return replace(
+        config,
+        link_every=every,
+        groups=groups,
+        kinematic=kinematic,
+        focal_ranges=ranges,
+        bundle=replace(config.bundle, keypoint_weight=picks_weight),
+    )
+
+
 def _prepare_rig(
     dataset: str,
     numbers: tuple[int, ...],
@@ -466,6 +491,9 @@ class Rig:
     # Robot points clicked in a few frames (`r4r.data.priors.read_picks`): they start and pin
     # cameras the scene cannot (a static-only rig, a head camera, a wrist seeing the other arm)
     picks: Path | None = None
+    # Weight of a pick relative to a track observation in the bundles: a handful of picks
+    # against ~10^5 track residuals barely moves the solve at the default (robomind2 ark)
+    picks_weight: float = 10.0
 
     def run(self) -> None:
         from dataclasses import replace
@@ -473,17 +501,20 @@ class Rig:
         import torch
 
         from r4r.matching import RoMaV2
-        from r4r.rago.stages import RigConfig, calibrate_rig, spread
+        from r4r.rago.stages import calibrate_rig, spread
 
         rig = _prepare_rig(self.dataset, self.episodes, self.stride, self.focal, picks=self.picks)
         loaded, streams, names, robot = rig.loaded, rig.streams, rig.names, rig.robot
         model = RoMaV2.from_checkpoint(device=rig.device)
         config = replace(
-            RigConfig(),
-            link_every=self.every,
-            groups=self.groups,
-            kinematic=kinematic_freedom(loaded[0].priors, robot, self.stride),
-            focal_ranges=focal_ranges(streams),
+            rig_config(
+                self.every,
+                self.groups,
+                kinematic_freedom(loaded[0].priors, robot, self.stride),
+                focal_ranges(streams),
+                self.picks_weight,
+            ),
+            refined=frozenset(c.name for c in streams if c.moving and c.prior.refine),
         )
         fit = calibrate_rig(
             robot,
@@ -571,6 +602,8 @@ def _write_rig(
                 # No per-group mounts to measure a spread from: the indicative ranges
                 **range_fields(*INDICATIVE_RANGES),
             }
+        elif stream.moving and stream.prior.refine:  # a known mount the bundles refined
+            values |= {"mount": "moving", **pose_fields(fit.mounts[c].cpu())}
         print(f"wrote {write_camera(rig.root, stream.name, values, *target)}")
     checked = len(fit.group_corrections) > 1
     for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
@@ -1090,7 +1123,7 @@ class Preview:
         import torch
 
         from r4r.data.lerobot import load_episode
-        from r4r.rago.kinematics import forward_kinematics
+        from r4r.rago.kinematics import corrected_qpos, forward_kinematics
         from r4r.rago.lens import lens_from_priors
         from r4r.rago.robot import (
             CameraMount,
@@ -1106,7 +1139,11 @@ class Preview:
         mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
         bodies = body_mounts(episode.priors)
         robot = load_robot(episode.robot, cameras=mounts, bodies=bodies).to("cpu", torch.float64)
+        # The priors' fitted kinematics (joint offsets, lag), as every solve applies them
+        fitted = episode.priors.kinematics
         qpos = qpos_from_state(robot, episode.state, episode.joints)
+        if fitted is not None:
+            qpos = corrected_qpos(robot, qpos, fitted.offsets, fitted.time_offset / self.stride)
         names = tuple(c.name for c in streams)
         index = [robot.camera(n) for n in names]
         k = []

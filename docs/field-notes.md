@@ -202,6 +202,14 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   few hundred episodes. A sheet of all streams of one episode shows it; the open fingers at rest
   (fixed pixels in every wrist view) classify every episode in a minute. Write the layout as the
   `station` and swap the mounts in `stations` (output `camera.mount: per station`).
+- **Gripper units can change between batches, per arm:** robomind2 ark's gripper columns come
+  in three conventions (closed −32.3 / 0 / −0.4, open −7.1 / 5 / 24.9). Classify episodes by the
+  column's maximum in `meta/episodes` stats and map each with a priors `group` (a `match` list,
+  one condition per arm). A wrist view at rest and fully closed checks each mapping.
+- **A wrist's own fingertips calibrate its mount rotation:** clicks at rest and fully closed
+  (four points) gave every robomind2 ark / ark-mobile wrist a 5-7 deg correction at 1-3 px, and
+  showed the real opening 10-21 % wider than the description's finger limit. Fix this before
+  using a wrist to place the other arm.
 - **Merged roots mix setups:** community-v3 roots join many LeRobot repos, each with its own
   cameras and calibration (one root's overlay showed three rooms). Find the setup key first
   (`source/subtree` or `source/publisher_repo` in `meta/episodes`), write it as `station`, and
@@ -368,6 +376,14 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   the description's camera mount held and only the head-pitch zero free, the rig found +20–22°
   (the recorded pitch reads 0) and the focal blind at 243–245 px, the upstream camera_info
   value. Free the joint the camera hangs on, not the camera.
+- **Validate a held camera on held-out clicks, and test any correction across lanes:** Kuavo's
+  rig residual was ~2 px, yet clicked fingertips in unseen episodes were 17–26 px off. Head or
+  arm corrections fitted to one lane's clicks (down to 8–12 px) got worse on the other lane's
+  (21–53 px): the error was per episode, not a fixable offset. Click only open hands when the
+  description's hand mesh is a static open hand.
+- **Free mounts do not pin a wrist that sees mostly its own hand,** even with the head held:
+  Kuavo's per-episode wrist mounts wandered 2–12 cm / 4–29°, and one refined mount (`refine`)
+  on two disjoint episode sets disagreed by 6 cm / 15°.
 - **Humanoids:** a leg-joint range above 0.1 rad per episode separates standing from walking
   episodes (13–100% walking by dataset): calibrate on standing ones first. A head that never
   moves while standing anchors nothing: the head mount comes by eye and is held.

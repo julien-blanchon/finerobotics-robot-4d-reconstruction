@@ -86,6 +86,7 @@ What exists to get each quantity, what it costs, and where it is known to fail (
 | 7 | **overlay** | `r4r overlay sol.pt check.png`, `… episode.mp4 --episode 0` | robot on the real one, every camera, several episodes |
 | 8 | write | `r4r rig … --write`, `r4r export <dataset> robot.xml` | priors and record committed; metadata bugs in `priors/ISSUES.md` |
 | 9 | every episode | `r4r reconstruct <dataset> --plan`, then `r4r reconstruct <dataset> out/ [--shard i/n]` | the plan says fast/light for (nearly) every episode; one parquet per shard, route and check per episode in its metadata |
+| 10 | check against the video | `r4r check <dataset> out/ [--episodes …]`, then `r4r merge` | few episodes flagged out of sync; read the overlay of each flagged one and of the highest camera error estimates ([below](#automatic-checks-r4r-check)) |
 
 ### Draft priors
 
@@ -150,6 +151,27 @@ cameras need clicks is not solved for those cameras.
 | second arm | its base placement is usually a guess | `bodies.<base>`: ranges, scope |
 | mobile base | does it move within episodes? where is its motion recorded? | `bodies.<root>` at frame scope, `base_odometry` |
 | anchor | keep one fixed arm or known camera | nothing free on it |
+
+### Toolbox: do two setups share a camera placement? (`r4r stations --compare`)
+
+`r4r stations <dataset> <camera> --compare A B C …` prints, for each pair of the episodes, how
+far the static background moved between their first frames: SIFT matches on pixels that do not
+change during the episode, a RANSAC homography, the median displacement of its inliers in px at
+512 width, and the inlier count (`r4r.data.placements`, CPU, ~0.2 s per episode). Under ~1 px:
+the camera did not move. A few px: a small re-placement. `inf`: no shared background. Use it to
+decide whether two stations or runs can share one camera pose, for example robomind2
+dual-franka camera_right: rig_c dates 0827 and 0829 at 0.4 px (one placement), 0410 and 0515
+(the 4 cm move) at 18.8 px. Thumbnail distances could not separate these (0.73–1.0 for every pair).
+
+Diagnostic only: it reads two episodes and writes nothing. It is not a setup detector. On known
+setups (2026-11-16), grouping by it was not clearly better than `r4r stations`' thumbnail runs.
+It was perfect on dual-franka camera_left A/B/C and somewhat better on abc-640 stations (ARI
+0.82 against 0.76 for thumbnail clustering), but worse on HABIT. Known failures:
+- **Cameras on the robot frame whose room changes** (HABIT front_view): the background changes
+  while the camera stays put on the robot, so the result is `inf` or a false move. Compare the
+  resting robot instead (field notes, "Mount periods from the robot at rest").
+- **Plain walls and tables** (robocoin lane02 cam_high): too few background keypoints. It
+  abstains (`inf`) on most pairs; `inf` with few inliers means "unknown", not "moved".
 
 ### Focal: look for a recorded calibration first
 
@@ -358,6 +380,26 @@ episodes.
 
 ⬜ `r4r report`: per-camera residuals, inlier share, agreement across episodes, held-out
 episodes, with the overlay.
+
+### Automatic checks: `r4r check`
+
+After `r4r reconstruct`, `r4r check <dataset> out/` compares every episode with its own video,
+independently of the solve (CPU, ~0.2–2 s per episode; `src/r4r/checks/`). It writes
+`checks.parquet` beside the shards, and `r4r merge` copies it into `meta/r4r.json`.
+
+- **Sync** (flag). For 16 frame pairs, it compares how much the image changes with how much the
+  state says the robot (static camera) or the camera itself (wrist, head) moves. `ρ` is the
+  rank correlation of the two. An episode whose mean `ρ` over its cameras is below 0.35 is flagged: its state does
+  not drive its video. This happens with a state from another episode, streams out of step, or
+  a wrong lag. Static cameras on fixed arms separate cleanly; head cameras on humanoids and
+  mobile bases less so.
+- **Camera error estimate** (reported, not a flag). It is the 2D shift that best puts the drawn
+  robot's outline on the image's edges, or its moving silhouette on the image change. It finds
+  a camera 30+ px off with AUC ~0.85 against clicked fingertips. It misses errors that sit only
+  in the end effector (gripper length, jaw model). Use it to rank episodes for a look, not as
+  a verdict, and never as a correction: the shift does not reduce held-out click error.
+
+Numbers and what failed: [verification](verification.md#automatic-per-episode-checks-2026-11-16).
 
 ## Lessons so far
 

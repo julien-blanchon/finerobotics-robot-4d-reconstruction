@@ -107,6 +107,18 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **A static camera solved far away with a long focal at a low median is a bad start,** not a
   good fit: read the overlay and start it on the right side of the robot (openneodata arx5's
   third view faces the robot at some stations, sits behind the arms at others).
+- **Test an arm-side cause with many clicks, not ten:** a camera fitted to ~10 fingertip clicks
+  near the image centre is ill-conditioned (roll and distance free), so two such sets gave
+  cameras 25-74° apart on robocoin lane21 and looked like "no camera fits". Clicks spread over
+  the image on both arms (3 frames per episode, 30-50 clicks) with a leave-episodes-out test
+  separate the cases: on AgileX, one camera fitted two independent click sets of agilex-real to
+  12.8 px (the rig had it 15° off), while free joint-2/3 offsets came out unrelated between lanes
+  and arms and did not help held-out clicks. Check a joint offset the clicks suggest against
+  the table test (lowest fingertip per episode, from the joint states): agilex-real's +8°
+  shoulder offset tilted a flat table by −5°.
+- **A rig whose sample episodes rarely show the arms in a static view can land 15-20° off at
+  ~2 px** (agilex-real, rdt, robocoin lane02 station B): validate a static camera with clicks on
+  held-out episodes before writing it.
 - **Clicked points don't move a camera that feature matches already settled** (aist dcam_low):
   weight them up or start from them.
 - **A recorded end-effector pose can follow its own convention:** openneodata aloha's recorded

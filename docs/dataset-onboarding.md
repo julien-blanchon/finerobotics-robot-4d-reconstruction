@@ -94,7 +94,7 @@ cameras need clicks is not solved for those cameras.
 | timing | video/state lag (`r4r fit --shifts`); sub-frame part refined later | `state_shift`, `kinematics.time_offset_frames` |
 | encoder offsets | small remaining errors, refined in every `r4r rig` bundle | `kinematics`: `joint_offset_deg`, `joint_offset_mm` |
 | camera link | metadata often wrong; `r4r links` gives still share and rotation residual per body | `cameras.<name>.mount`, `link` |
-| focal | recorded first (below), estimated last | `focal`, `focal_range` (0 by default) |
+| focal | recorded first (below), estimated last | `focal`, `focal_range` (0 by default); `principal` (cx, cy) for an off-centre principal point |
 | per-episode intrinsics or poses | several stations, per-unit calibrations, a dataset's own extrinsics | `<dataset>.episodes.parquet` (below) |
 | lens | pinhole or fisheye, recorded coefficients | `lens`, `distortion`, `distortion_range` |
 | scope | bolted (dataset), re-placed (episode), driving (frame) | `scope` on cameras and bodies |
@@ -261,7 +261,7 @@ on the video resolution. Other models (rational, Double Sphere, FOV) must be con
 
   | kind | recorded as |
   |---|---|
-  | `pose` | planar x, y, θ columns (simulators, odometry) |
+  | `pose` | planar x, y, θ columns (simulators, odometry); or a full pose: x, y, z with a quaternion (w, x, y, z) or roll, pitch, yaw |
   | `velocity` | body-frame vx, vy, ω |
   | `caster` | wheel angles left, right[, steering], with radius, half track, steering offset |
 

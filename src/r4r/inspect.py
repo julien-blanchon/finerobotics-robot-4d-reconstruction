@@ -87,7 +87,7 @@ class Report:
 def inspect_episode(episode: Episode[int, int], root: Path) -> Report:
     """The report of one episode (loaded with any `decode`, frames are not used)."""
 
-    from r4r.data.lerobot import dataset_features, robot_record, video_key
+    from r4r.data.lerobot import dataset_features, state_feature, video_key
 
     features = dataset_features(root)
     cameras = tuple(
@@ -110,9 +110,9 @@ def inspect_episode(episode: Episode[int, int], root: Path) -> Report:
 
     # State columns that vary but drive nothing
     mapped = {j.index for j in episode.joints}
-    state_feature = episode.priors.state_feature or robot_record(root)["state"]["feature"]
+    state = state_feature(root)
     names = []
-    for f in (state_feature,) if isinstance(state_feature, str) else state_feature:
+    for f in (state,) if isinstance(state, str) else state:
         n = features[f].get("names")
         n = next(iter(n.values())) if isinstance(n, dict) else n
         width = features[f]["shape"][-1]

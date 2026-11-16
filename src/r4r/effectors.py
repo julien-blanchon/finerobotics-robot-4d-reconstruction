@@ -133,6 +133,20 @@ PRESETS: dict[str, EffectorPrior] = {
         pads=(RobotPoint("link7$"), RobotPoint("link8$")),
         closed=0.0498,
     ),
+    # Trossen WXAI (Stationary AI, Solo): the gripper points along link_6's x, the carriages
+    # slide along its y; fingertips at x = 0.1561 (`ee_gripper_link`), the inner faces of the
+    # finger tips touching at q = 0 (opening = 2q, 0.088 m at the 0.044 m limit)
+    "trossen_wxai": EffectorPrior(
+        type="parallel",
+        body="(^|_)link_6$",
+        position=(0.156062, 0.0, 0.0),
+        orientation=_orientation((0, 0, -1), (0, 1, 0), (1, 0, 0)),
+        pads=(
+            RobotPoint("_gripper_left$", (0.0656, -0.023, 0.0)),
+            RobotPoint("_gripper_right$", (0.0656, 0.023, 0.0)),
+        ),
+        closed=0.0,
+    ),
     # Rainbow RB-Y1: the gripper points along the end body's −z, fingers slide along its x;
     # fingertips 0.1328 m out, inner faces at x = −0.003 in each finger, touching at q = 0
     "rby1": EffectorPrior(

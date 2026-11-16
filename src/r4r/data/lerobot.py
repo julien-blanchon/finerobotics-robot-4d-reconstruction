@@ -34,7 +34,7 @@ from .priors import (
     load_episode_record,
     load_priors,
 )
-from .tables import Column, LeRobotTables
+from .tables import Column, EpisodeFiles, LeRobotTables
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -90,7 +90,11 @@ def robot_record(root: Path) -> JsonObject:
 
 @functools.cache
 def _root(root: Path) -> _Root:
-    """A dataset root opened once per process (episodes of a run reuse its reads)."""
+    """A dataset root opened once per process (episodes of a run reuse its reads).
+
+    A root without `meta/robot.json` (kai0, robocasa365, robotwin-unified) gets the default
+    record of `robot_record`: its priors then name the description and every joint.
+    """
 
     robot = robot_record(root)
     priors = load_priors(root)
@@ -113,7 +117,7 @@ def _groups(root: Path) -> tuple[np.ndarray, list[str | None]]:
     episodes = next(iter(statistics.values()))[0]
     names = np.full(len(episodes), None, dtype=object)
     for name, conditions in matches.items():  # file order: the first matching group takes it
-        inside = np.equal(names, None)
+        inside = np.array([n is None for n in names], dtype=bool)
         for match in conditions:
             inside &= match.matches(statistics[match.stat][1])
         names[inside] = name
@@ -207,7 +211,7 @@ def load_episode(
         if not tables.features[key].get("info", {}).get("is_depth_map", False)
         and not priors.cameras.get(camera_name(key), CameraPrior()).ignore
     ]
-    feature = priors.state_feature or robot["state"]["feature"]
+    feature = priors.state_feature or _state_feature(robot)
     every = tables.rows(episode, _needed(keys, feature, priors, record))
     timestamps = cast("Tensor", every["timestamp"])[::stride].tolist()
 
@@ -222,12 +226,12 @@ def load_episode(
         frames = torch.empty(0, 3, 0, 0)
         if decode is None or name in decode:
             assert files is not None
-            path, start = files.videos[key]
             if prior.cropped:  # frame by frame: whole 4K frames of an episode do not fit
-                times = [start + t for t in timestamps]
-                frames = seek_frames(path, times, 0.5 / tables.fps, view=prior)
+                times = files.times(key, timestamps)
+                tolerance = 0.5 * files.rates.get(key, 1.0) / tables.fps
+                frames = seek_frames(files.videos[key][0], times, tolerance, view=prior)
             else:
-                frames = _decode(path, start, timestamps, tables.fps)
+                frames = _decode(files, key, timestamps, tables.fps)
             height, width = frames.shape[-2:]
         stream = _camera(key, info, links.get(key), prior, frames, (height, width))
         if record is not None and name in record.intrinsics:
@@ -326,15 +330,16 @@ def _world_cameras(
 
 
 def _decode(
-    path: Path, start: float, timestamps: list[float], fps: float
+    files: EpisodeFiles, key: str, timestamps: list[float], fps: float
 ) -> Tensor[[int, *RGB, int, int]]:
-    """uint8 frames of a video file at `start + t` for each episode timestamp `t` (seconds),
-    each within half a frame period."""
+    """uint8 frames of video `key` at each episode timestamp `t` (seconds), each within half a
+    frame period (at the video's own rate, `EpisodeFiles.rates`)."""
 
     from lerobot.datasets.video_utils import decode_video_frames
 
-    times = [start + t for t in timestamps]
-    return decode_video_frames(path, times, 1 / fps / 2, "pyav", return_uint8=True)
+    tolerance = files.rates.get(key, 1.0) / fps / 2
+    times = files.times(key, timestamps)
+    return decode_video_frames(files.videos[key][0], times, tolerance, "pyav", return_uint8=True)
 
 
 def keyframes(
@@ -349,11 +354,12 @@ def keyframes(
     timestamps = cast("Tensor", tables.rows(episode, ["timestamp"])["timestamp"])
     out = {}
     for name in cameras:
-        path, start = files.videos[video_key(list(files.videos), name)]
-        times = [start + float(timestamps[f]) for f in frames]
+        key = video_key(list(files.videos), name)
+        times = files.times(key, [float(timestamps[f]) for f in frames])
+        tolerance = 0.5 * files.rates.get(key, 1.0) / tables.fps
         # A camera's crop and size are dataset-level (not per group or station)
         view = opened.priors.cameras.get(name)
-        out[name] = seek_frames(path, times, 0.5 / tables.fps, view=view)
+        out[name] = seek_frames(files.videos[key][0], times, tolerance, view=view)
     return out
 
 
@@ -508,7 +514,15 @@ def _description(root: Path, robot: JsonObject, priors: DatasetPriors) -> Path:
 
     if priors.description:
         return PRIORS / priors.description
+    if "urdf" not in robot:
+        raise ValueError(f"{root}: no meta/robot.json description: the priors must name one")
     return root / "meta" / robot["urdf"]
+
+
+def _state_feature(robot: JsonObject) -> str:
+    """The joint-state feature `robot.json` names (`observation.state` without one)."""
+
+    return robot.get("state", {}).get("feature", "observation.state")
 
 
 def _columns(rows: Mapping[str, Tensor], feature: str | tuple[str, ...]) -> Tensor[[int, int]]:
@@ -596,28 +610,30 @@ def _camera(
 def _joints(robot: JsonObject, replaced: frozenset[str] = frozenset()) -> tuple[JointMap, ...]:
     """Arm joints and gripper joints of every arm in `robot.json`, in the description's units.
 
-    A joint's `joint_ranges` entry (column range → joint range) applies to any joint; without
-    one, degrees are converted to radians. `normalised_percent` has no fixed mapping (it
-    depends on each robot's calibration): such joints need a mapping in the dataset's priors.
-    Joints in `replaced` (set by the priors) are skipped.
+    Two layouts: `state.arms` (arm joints, then `gripper` entries with their own range) and
+    `state.slices` (each joint with its `role`, `unit` and optional `sign`). A joint's
+    `joint_ranges` entry (column range → joint range) applies to any joint; without one,
+    degrees are converted to radians, radians and metres pass through. `normalised_percent`
+    has no fixed mapping (it depends on each robot's calibration): such joints need a mapping
+    in the dataset's priors. Joints in `replaced` (set by the priors) are skipped.
     """
 
-    state = robot["state"]
+    state = robot.get("state", {})
     signs = state.get("joint_signs", {})
     ranges = state.get("joint_ranges", {})
     joints = []
-    for arm in state["arms"]:
+    for arm in state.get("arms", state.get("slices", [])):
         for joint in arm["joints"]:
             name = joint["urdf_joint"]
             if name in replaced:
                 continue
-            sign = float(signs.get(name, 1.0))
+            sign = float(joint.get("sign", signs.get(name, 1.0)))
             unit = joint.get("unit", state.get("joint_unit", "rad"))
             if name in ranges:
                 source, target = tuple(ranges[name]["from"]), tuple(ranges[name]["to"])
             elif unit == "deg":
                 source, target = (0.0, 180.0), (0.0, math.pi)
-            elif unit == "rad":
+            elif unit in ("rad", "m"):
                 source = target = None
             else:
                 raise ValueError(f"{name}: state unit {unit!r} needs a mapping in the priors")
@@ -627,6 +643,13 @@ def _joints(robot: JsonObject, replaced: frozenset[str] = frozenset()) -> tuple[
             source, target = (tuple(gripper[k]) if gripper[k] else None for k in ("from", "to"))
             joints.append(JointMap(gripper["urdf_joint"], gripper["index"], 1.0, source, target))
     return tuple(joints)
+
+
+def state_feature(root: Path) -> str | tuple[str, ...]:
+    """The joint-state feature of a root: the priors' `state_feature`, else robot.json's."""
+
+    opened = _root(root)
+    return opened.priors.state_feature or _state_feature(opened.robot)
 
 
 def episode_columns(
@@ -652,7 +675,7 @@ def joint_action(root: Path) -> bool:
     if opened.priors.action == "joint_absolute":
         return True
     features = opened.tables.features
-    state = opened.priors.state_feature or opened.robot["state"]["feature"]
+    state = opened.priors.state_feature or _state_feature(opened.robot)
     action = features.get("action")
     if action is None or not isinstance(state, str) or state not in features:
         return False

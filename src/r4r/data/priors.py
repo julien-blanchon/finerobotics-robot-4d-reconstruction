@@ -88,9 +88,10 @@ a camera of part of a video, e.g. one eye of a side-by-side stereo video, and `s
 height) resizes it (a 4K video read at 512 px): focal, principal point and every pixel are then
 at the camera's own resolution. `role` (`wrist`, `scene`, ...) replaces the feature info's
 `camera.role` (validation picks wrist and scene views by it). `ignore` leaves a camera out (one
-that rides on no robot body, e.g. worn by a person). `kinematics` refines the robot's kinematics in `r4r rig` (prior stds;
-absent: held): `{"joint_offset_deg": 1.0, "joint_offset_mm": 2.0, "joints": [...],
-"time_offset_frames": 1.0}`, encoder offsets of hinges / slides (only `joints`, if given) and a
+that rides on no robot body, e.g. worn by a person). `kinematics` refines the robot's
+kinematics in `r4r rig` (prior stds; absent: held): `{"joint_offset_deg": 1.0,
+"joint_offset_mm": 2.0, "joints": [...], "time_offset_frames": 1.0}`, encoder offsets of hinges /
+slides (only `joints`, if given) and a
 video/joint time offset on top of `state_shift`; `offsets` (joint name → rad or m) and
 `time_offset` (frames) are the values `r4r rig --write` fitted, applied to the joint positions of
 every command (`r4r.rago.kinematics.corrected_qpos`).
@@ -143,7 +144,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from .episode import JointMap
 
@@ -265,7 +266,8 @@ class CameraPrior:
     # intrinsic and image size of the camera is at the resulting resolution. None: as delivered
     crop: tuple[int, int, int, int] | None = None
     size: tuple[int, int] | None = None
-    # The camera's role (`wrist`, `scene`, ...) when its feature info gives none or a wrong one
+    # The camera's role (`wrist`, `head`, `scene`, ...) when the feature info declares none or a
+    # wrong one (kai0, FineART): the output's `camera.role`, which `r4r.viz.clicks` reads
     role: str | None = None
 
     def image_size(self, delivered: tuple[int, int]) -> tuple[int, int]:
@@ -822,8 +824,12 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
             pose=_pose_column(c.get("pose"), f"{where}: cameras.{name}"),
             ignore=bool(c.get("ignore", False)),
             refine=bool(c.get("refine", False)),
-            crop=tuple(int(v) for v in c["crop"]) if c.get("crop") else None,
-            size=tuple(int(v) for v in c["size"]) if c.get("size") else None,
+            crop=cast("tuple[int, int, int, int]", tuple(int(v) for v in c["crop"]))
+            if c.get("crop")
+            else None,
+            size=cast("tuple[int, int]", tuple(int(v) for v in c["size"]))
+            if c.get("size")
+            else None,
             role=c.get("role"),
         )
         for name, c in raw.items()

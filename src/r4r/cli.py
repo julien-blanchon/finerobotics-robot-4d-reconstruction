@@ -1204,6 +1204,7 @@ class Reconstruct:
     stride: int = 1
     # RoMa links between cameras every this many (strided) timesteps (full path)
     every: int = 10
+    # Focal guess (× image width) for cameras the priors give none (full path)
     focal: float = 0.7
 
     def run(self) -> None:

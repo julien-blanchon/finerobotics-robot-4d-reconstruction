@@ -42,7 +42,7 @@ LeRobot v3 dataset (`r4r merge`). Code: `src/r4r/output.py` (columns), `src/r4r/
 | `observation.camera.<cam>.intrinsics` | 4 | `fx, fy, cx, cy` in pixels of the delivered video, OpenCV pixel centres (integer coordinates) |
 | `observation.camera.<cam>.distortion` | 4 | `pinhole`: OpenCV radial `k1, k2, k3, 0` (no tangential); `fisheye`: OpenCV fisheye (Kannala–Brandt) `k1..k4`; zeros when ideal |
 | `observation.ee.<arm>.pose` | 7 | the `ee` frame in the episode frame, by forward kinematics with r4r's corrected kinematics |
-| `observation.ee.<arm>.gripper` | 1 | parallel grippers only: jaw opening in metres |
+| `observation.ee.<arm>.gripper` | 1 | parallel grippers with two jaw pads only: jaw opening in metres (absent for a linkage gripper without pads, e.g. `omnipicker`) |
 | `observation.ee.<arm>.aperture` | 1 | jaw opening (parallel gripper, equal to `.gripper`), thumb–index fingertip distance (hand); absent for suction cups and tools |
 | `observation.ee.<arm>.fingertips` | F × 3 | hands and multi-finger grippers: fingertip positions in the episode frame |
 | `observation.ee.<arm>.actuation` | 1 | optional: a suction cup's or a tool's recorded actuation |

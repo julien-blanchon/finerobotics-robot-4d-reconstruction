@@ -86,7 +86,7 @@ cameras need clicks is not solved for those cameras.
 
 | area | check | where it goes in the priors |
 |---|---|---|
-| joint mapping | varying state columns that drive nothing → a missing joint | `joints`: index, URDF joint, `sign`, optional `from`/`to` |
+| joint mapping | varying state columns that drive nothing → a missing joint | `joints`: index, URDF joint, `sign`, optional `from`/`to`, optional `clip` [lo, hi] (a gripper motor closing past finger contact on a spring: HSR) |
 | signs, offsets | joints outside their limits → wrong sign, offset or unit | `sign`, a `from`/`to` range |
 | dropped features | joint states (or other columns) the delivery dropped but the upstream keeps: build a side table (sharded parquet, `episode_index`, `frame_index`, the feature; a row group per episode) outside the delivery | `side_table` (a directory), then `state_feature` lists the side feature after the delivered one and `joints` index the concatenation (nvidia-kitchen-demos: `priors/nvidia-kitchen-demos/build_side_table.py`) |
 | units | degrees converted automatically; `normalised_percent` needs a range per joint | `joints[].from/to` |

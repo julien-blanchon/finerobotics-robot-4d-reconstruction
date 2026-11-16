@@ -218,6 +218,80 @@ episodes (`priors/onboarding/toyota__hsr.md`, "Held-out diagnosis"):
 (~9 h, 11.6 px) and openneodata ur5e's station (~1 h, 10.3 px) join lane103 (62 h) and
 g2-cohort-03 (6 h, 7.4 px): about 276 h. robomind ur5e-real is at the line (15.6 px).
 
+## VLM pilot: overlay judge and auto-clicks (2026-11-16): not adopted
+
+Two off-the-shelf vision-language models were tested as replacements for the human checks,
+on the same 375 clicked targets (27 real click sets) as the DINO checks below. Neither meets
+its bar, so neither is in `r4r check` or `r4r.viz.clicks`.
+
+**Data.** Each target's click frame is taken from the DINO-check scenes (current priors,
+`--uncalibrated nan`). Frames are about 512 px wide. The truth is the click error.
+- *Overlay judge:* each target is shown with its camera as reconstructed and moved 7 ways
+  (rotation 1/2/4°, translation 5/10 cm, focal ±10 %). The truth is the click error of the
+  moved drawing. There are 3,000 real rows (2,139 bad) and 952 simulated rows (exact cameras,
+  truth = TCP displacement).
+- *Auto-clicks:* the model points at the fingertips, either on the whole frame or on the zoom
+  crop of the click sheets (centred on the drawn jaws, 448 px). The auto-click is the returned
+  point nearest the drawn jaws, as a human picks the drawn arm. Its error is then scored as a
+  click (`error`).
+
+**1. Overlay judge: `perplexity-ai/pplx-decider-flash-v1.3` (4B, Qwen3.5-4B base).** The
+repo is public. Its own code (`source/src`) runs in the SAM 3 overlay env (transformers 5.23,
+torch 2.14) without `flash-linear-attention`. Each request carries three images: the raw zoom
+crop, the same crop with the robot drawn (translucent green geom hulls, outline, red jaw dots),
+and the whole frame with the drawing. Each request asks three questions:
+- `noul`: is the drawing on the real robot, with the dots on the fingertips?
+- a 4-level alignment `score`;
+- `noul`: are the dots away from the fingertips in the crop?
+
+| data | rows | bad | AUC noul / score / crop-noul | Spearman (noul) |
+|---|---|---|---|---|
+| real, all | 3000 | 2139 | 0.74 / 0.66 / 0.68 | 0.50 |
+| real, cameras as reconstructed | 375 | 231 | 0.78 / 0.69 / 0.72 | 0.55 |
+| real scene / wrist | 2464 / 536 | | 0.73 / 0.70 (noul) | 0.47 / 0.42 |
+| simulated (exact cameras) | 952 | 180 | 0.74 / 0.71 / 0.68 | 0.29 |
+
+The best datasets are agilex-5b28 (0.92), droid (0.84), flexiv (0.85) and xvla (0.84). The
+worst are arx5 (0.56), robomind2 piper (0.47), robomind ur5e-real (0.56) and g2-cohort-03
+(0.53). On the simulated rows, where the truth is exact, the AUC is also 0.74. So the judge
+itself cannot tell a 15 px offset; the clicks' non-camera error is not what holds it back.
+This is the best automatic image score so far (motion 0.70, DINO parts 0.64), but it is far
+below the 0.9 bar. The 27B `pplx-decider-v1.3` was not tried.
+
+**2. Auto-clicks: `allenai/Molmo2-8B` (points) and `Qwen/Qwen3.5-9B` (grounding,
+`point_2d`).** Both run in plain transformers, batch 16, greedy decoding.
+
+| model, input | no point | auto ↔ human click: median / p90 | ≤ 5 px / ≤ 10 px / > 20 px (wrong part or arm) | auto vs human error: ρ, AUC for bad | dataset median error within 5 / 10 px of the human one |
+|---|---|---|---|---|---|
+| Molmo2-8B, frame | 35 % | 18.8 / 112 px | 11 / 24 / 48 % | 0.57, 0.79 | 10 / 14 of 26 |
+| Molmo2-8B, crop | 65 % ("There are none.") | 18.3 / 76 px | 16 / 32 / 48 % | 0.61, 0.84 | 8 / 16 of 23 |
+| Qwen3.5-9B, frame | 1 % | 25.2 / 120 px | 6 / 22 / 59 % | 0.51, 0.74 | 10 / 17 of 30 |
+| Qwen3.5-9B, crop | 1 % | 18.2 / 83 px | 12 / 29 / 48 % | 0.63, 0.82 | 18 / 24 of 30 |
+
+Per target, about half the auto-clicks land on another part, the other gripper, a held
+object or a jaw base, more than 20 px from the human click. On whole frames, Molmo often
+points at only one arm or at the nearest grippers of a humanoid. The bar of ~5 px is not met
+by either model; their median is about the error being measured. Per dataset, the Qwen crop
+median error matches the human one within 5 px on 18 of 30 datasets (abc 17.8 vs 20.4,
+g2-cohort-01 25.7 vs 26.4, droid 11.0 vs 13.4). The misses are large: rm2 own3 wrists
+69.9 vs 8.8, g2-cohort-03 50.2 vs 7.4, lane02 43.1 vs 67.0. So it cannot replace
+validation clicks. With noise this size, the correction from auto-click keypoints (G1
+top_head, HSR) was not attempted.
+
+**Throughput** (one GH200, shared with other jobs at 100 % use, plain transformers):
+- Decider: 2.2 requests/s (3 images at ≤ 448², 3 questions each); without the
+  `flash-linear-attention` and `causal-conv1d` kernels it falls back to PyTorch.
+- Molmo2-8B and Qwen3.5-9B: 1.9 images/s.
+
+At these rates, 8 frames for each of ~1,000 setups cost ~1.2 GPU-h. Four frames per episode
+on 100k episodes (400k images) cost ~50-60 GPU-h, about 5× the ~12 GPU-h budget. vLLM or the
+fast kernels might gain 5-10×, but the scores do not justify asking for them.
+
+Scripts, inputs and results (not in the repo): `/e/scratch/reformo/blanchon1/r4r-cache/vlmchecks/`
+(`code/prep.py` builds `data/clicks.pt` and `data/judge.pt` from the DINO-check scenes,
+`code/vlm.py` runs the models, `code/ana.py` scores them; `res/judge.parquet`,
+`res/point_Molmo2-8B.parquet` and `res/point_Qwen3.5-9B.parquet` hold the raw answers).
+
 ## Automatic per-episode checks from DINO features (2026-11-16): not adopted
 
 Two image checks were tested, independent of the solve, against the held-out clicks. Neither

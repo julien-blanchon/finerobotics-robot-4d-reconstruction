@@ -88,8 +88,9 @@ class Report:
 def inspect_episode(episode: Episode[int, int], root: Path) -> Report:
     """The report of one episode (loaded with any `decode`, frames are not used)."""
 
-    info = json.loads((root / "meta" / "info.json").read_text())
-    features = info["features"]
+    from r4r.data.lerobot import dataset_features
+
+    features = dataset_features(root)
     cameras = tuple(
         CameraReport(
             name=c.name,

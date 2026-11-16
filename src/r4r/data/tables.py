@@ -6,6 +6,11 @@ gigabytes per call on a dataset of millions of episodes. Here an episode costs i
 `meta/episodes` (the index columns of its file, read once per file) and the row groups of its
 data file that hold it (found from the row groups' `episode_index` statistics). Both are kept
 for the next episode, so consecutive episodes of a process share the reads.
+
+A side table (`SideTable`, the priors' `side_table`) adds features the delivery dropped, kept
+outside the root: a directory of parquet files with `episode_index`, `frame_index` and the
+features' columns, one row per frame and a row group per episode (e.g. joint states recovered
+from a simulator's upstream records). `LeRobotTables.rows` reads a side feature like any other.
 """
 
 from __future__ import annotations
@@ -48,10 +53,13 @@ class EpisodeFiles:
 class LeRobotTables:
     """A LeRobot v3 root's `meta/info.json`, `meta/episodes` and `data` tables, read lazily."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, side: Path | None = None) -> None:
         self.root = root
         self.info: JsonObject = json.loads((root / "meta" / "info.json").read_text())
-        self.features: JsonObject = self.info["features"]
+        self.side = None if side is None else SideTable(side)
+        self.features: JsonObject = self.info["features"] | (
+            {} if self.side is None else self.side.features
+        )
         self.fps = float(self.info["fps"])
         self.video_keys = tuple(k for k, f in self.features.items() if f["dtype"] == "video")
         self.total_episodes = int(self.info["total_episodes"])
@@ -85,16 +93,27 @@ class LeRobotTables:
         """`columns` of `episode`'s frames, in file order: numbers as tensors `[T, ...]` of the
         stored dtype (vectors and matrices flattened to `[T, n]`), text as lists."""
 
+        side = [] if self.side is None else [c for c in columns if c in self.side.features]
         path = self.files(episode).data
         if self._data is None or self._data[0] != path:
             handle = pq.ParquetFile(path)
             self._data = (path, handle, _row_group_episodes(handle))
         _, handle, spans = self._data
         groups = np.flatnonzero((spans[:, 0] <= episode) & (spans[:, 1] >= episode)).tolist()
-        wanted = list(dict.fromkeys(["episode_index", *columns]))
+        wanted = list(dict.fromkeys(["episode_index", *(c for c in columns if c not in side)]))
         table = handle.read_row_groups(groups, columns=wanted)
         table = table.filter(pa.array(table["episode_index"].to_numpy() == episode))
-        return {name: _column(table[name]) for name in columns}
+        out = {name: _column(table[name]) for name in wanted[1:]}
+        if side:
+            assert self.side is not None
+            extra = self.side.rows(episode, side)
+            if len(extra[side[0]]) != table.num_rows:
+                raise ValueError(
+                    f"{self.side.directory}: episode {episode} has {len(extra[side[0]])} rows, "
+                    f"the dataset {table.num_rows}"
+                )
+            out |= extra
+        return {name: out[name] for name in columns}
 
     def length(self, episode: int) -> int:
         """How many frames `episode` has (its row of `meta/episodes`)."""
@@ -149,6 +168,62 @@ class LeRobotTables:
             else:
                 return self._episode_files[middle]
         raise IndexError(f"{self.root}: no episode {episode} in meta/episodes")
+
+
+class SideTable:
+    """Features kept apart from a root (see the module doc): parquet files of a directory,
+    each holding a run of episodes; an episode's rows are found from the row groups'
+    `episode_index` statistics, sorted by `frame_index`."""
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self.paths = sorted(directory.glob("*.parquet"))
+        self.paths = [p for p in self.paths if "frame_index" in pq.read_schema(p).names]
+        if not self.paths:
+            raise FileNotFoundError(f"{directory}: no side table files")
+        schema = pq.read_schema(self.paths[0])
+        self.features: JsonObject = {
+            name: {
+                "dtype": str(_leaf(schema.field(name).type)),
+                "shape": [_width(schema.field(name).type)],
+            }
+            for name in schema.names
+            if name not in ("episode_index", "frame_index")
+        }
+        # Each file's row groups' (first, last) episode, read when first needed
+        self._spans: dict[Path, np.ndarray] = {}
+        self._open: tuple[Path, pq.ParquetFile] | None = None
+
+    def rows(self, episode: int, columns: Sequence[str]) -> dict[str, Column]:
+        """`columns` of `episode`'s frames in frame order (as `LeRobotTables.rows`)."""
+
+        for path in self.paths:
+            if path not in self._spans:
+                handle = pq.ParquetFile(path)
+                self._spans[path] = _row_group_episodes(handle)
+                self._open = (path, handle)
+            spans = self._spans[path]
+            groups = np.flatnonzero((spans[:, 0] <= episode) & (spans[:, 1] >= episode)).tolist()
+            if not groups:
+                continue
+            if self._open is None or self._open[0] != path:
+                self._open = (path, pq.ParquetFile(path))
+            wanted = ["episode_index", "frame_index", *columns]
+            table = self._open[1].read_row_groups(groups, columns=wanted)
+            table = table.filter(pa.array(table["episode_index"].to_numpy() == episode))
+            table = table.sort_by("frame_index")
+            return {name: _column(table[name]) for name in columns}
+        raise IndexError(f"{self.directory}: no episode {episode}")
+
+
+def _leaf(kind: pa.DataType) -> pa.DataType:
+    while pa.types.is_list(kind) or pa.types.is_fixed_size_list(kind):
+        kind = kind.value_type
+    return kind
+
+
+def _width(kind: pa.DataType) -> int:
+    return kind.list_size if pa.types.is_fixed_size_list(kind) else 1
 
 
 def _episode_span(path: Path) -> tuple[int, int]:

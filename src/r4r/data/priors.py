@@ -25,6 +25,11 @@ take precedence over `meta/robot.json` and the camera feature info:
 
 `state_feature` names the joint-state feature when `meta/robot.json` names a wrong one (a list:
 the features' columns concatenated, e.g. leg joints recorded apart from the arms).
+`side_table` is a directory of parquet files holding features the delivery dropped (an
+absolute path, or relative to `priors/`; `r4r.data.tables.SideTable`), read like the
+dataset's own features, e.g. by `state_feature`: `{"side_table":
+"/e/scratch/.../panda-omron-mobile.side", "state_feature": ["observation.state",
+"upstream.arm_qpos"]}` with `joints` indexing the concatenated columns.
 `description` replaces the delivered robot description by a corrected one kept under
 `priors/` (fixes to the URDF/MJCF itself: wrong joints, frames, meshes). `joints` add or
 replace (by URDF joint name) entries of the state mapping; `removed_joints`
@@ -316,6 +321,8 @@ class DatasetPriors:
     description: str | None = None
     # The feature holding the joint state, when `meta/robot.json` names a wrong one
     state_feature: str | tuple[str, ...] | None = None  # several: concatenated
+    # Features kept outside the delivery (`r4r.data.tables.SideTable`): a directory
+    side_table: str | None = None
     # Kinematic refinement in `r4r rig` (absent: held)
     kinematics: KinematicsPrior | None = None
     # Named points on the robot (body origins are points without being named here)
@@ -333,6 +340,12 @@ class DatasetPriors:
     # The raw dataset-level `cameras` and `bodies` (for merging station overrides)
     raw: JsonObject = field(default_factory=dict, repr=False, compare=False)
     notes: str = ""
+
+    @property
+    def side_directory(self) -> Path | None:
+        """The side table's directory (`side_table`, relative to `priors/` unless absolute)."""
+
+        return None if self.side_table is None else PRIORS / self.side_table
 
     @property
     def replaced(self) -> frozenset[str]:
@@ -412,6 +425,7 @@ def load_priors(root: Path) -> DatasetPriors:
         cameras=cameras,
         description=raw.get("description"),
         state_feature=_feature(raw.get("state_feature")),
+        side_table=raw.get("side_table"),
         kinematics=_kinematics(raw.get("kinematics"), str(path)),
         robot_points=_robot_points(raw.get("robot_points", {}), str(path)),
         stations=raw.get("stations", {}),

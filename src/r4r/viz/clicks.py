@@ -13,11 +13,17 @@ grid (nothing drawn) for clicking the real point; the click is scored against th
   modelled one);
 - fingertips (hands): the nearest fingertip.
 
+Each target also stores the drawn points moved along the end effector's approach axis (z) by
+`SHIFTS`: `score` reports the error with one shift for the whole dataset (the median of each
+click's best one) next to the plain error. A plain error that drops at a constant shift is the
+TCP depth (the drawn point short of or past the real fingertips), not the camera.
+
 Projection uses OpenCV (`cv2.projectPoints`, `cv2.fisheye.projectPoints`) on the columns as
 `docs/output-spec.md` defines them, independently of r4r's own camera code.
 
     python -m r4r.viz.clicks sample DATASET N SEED [--exclude 1,2,3]
     python -m r4r.viz.clicks make SHARD DATASET CLICKS.json SHEETS_DIR [--open 0.08] [--views 1]
+        [--no-sheets]
     python -m r4r.viz.clicks score CLICKS.json
 
 `make` writes the targets (with the drawn points) into CLICKS.json and the sheets
@@ -41,6 +47,7 @@ import pyarrow.parquet as pq
 
 MARGIN = 0.06  # a scene target's TCP lies this fraction of the image size inside its border
 OTHER_ARM = 0.25  # a wrist view's target: an end effector at least this far in front (m)
+SHIFTS = np.round(np.arange(-0.10, 0.1001, 0.01), 3)  # along the approach axis (m)
 SHOW = 448  # height of the whole frame and side of the zoom on a sheet (display pixels)
 
 
@@ -76,8 +83,11 @@ def _episodes(shard: Path) -> Iterator[tuple[int, pa.Table, dict, list[str], dic
         yield episode, part, cams, arms, layout
 
 
-def _arm_points(part: pa.Table, arm: str, opened: float) -> tuple[np.ndarray, str] | None:
-    """[T, P, 3] points of one end effector and the metric (`jaws`, `line`, `tips`)."""
+def _arm_points(
+    part: pa.Table, arm: str, opened: float
+) -> tuple[np.ndarray, str, np.ndarray | None] | None:
+    """[T, P, 3] points of one end effector, the metric (`jaws`, `line`, `tips`, `tcp`) and its
+    approach axis [T, 3] (None for fingertips)."""
 
     prefix = f"observation.ee.{arm}"
     pose = _column(part, f"{prefix}.pose")
@@ -85,12 +95,12 @@ def _arm_points(part: pa.Table, arm: str, opened: float) -> tuple[np.ndarray, st
         return None
     tips = _column(part, f"{prefix}.fingertips")
     if tips is not None:
-        return tips, "tips"
+        return tips, "tips", None
     frame = _matrix(pose)
     tcp, y = frame[:, :3, 3], frame[:, :3, 1]
     width = _column(part, f"{prefix}.gripper")
     if width is None:
-        return tcp[:, None], "tcp"
+        return tcp[:, None], "tcp", frame[:, :3, 2]
     width = width.reshape(-1)
     if np.nanstd(width) < 1e-4:  # not recorded: the jaw line, fully open
         width = np.full_like(width, opened)
@@ -98,7 +108,7 @@ def _arm_points(part: pa.Table, arm: str, opened: float) -> tuple[np.ndarray, st
     else:
         metric = "jaws"
     half = (width / 2)[:, None] * y
-    return np.stack([tcp + half, tcp - half], 1), metric
+    return np.stack([tcp + half, tcp - half], 1), metric, frame[:, :3, 2]
 
 
 def _project(
@@ -195,7 +205,7 @@ def _targets(
             for arm in order:
                 if arm not in points:
                     continue
-                pts, metric = points[arm]
+                pts, metric, axis = points[arm]
                 uv, depth = _project(part, camera, cams[camera]["camera.lens"], pts)
                 mid, z = np.nanmean(uv, 1), np.nanmean(depth, 1)
                 w, h = _size(part, camera)
@@ -218,10 +228,19 @@ def _targets(
                 t = int(np.argmax(score))
                 # the first arm in turn order wins unless another reaches clearly farther
                 if best is None or (kind == "wrist" and score[t] > best[0]):
-                    best = (score[t], arm, t, metric, uv[t], w, h)
+                    best = (score[t], arm, t, metric, uv[t], w, h, pts, axis)
             if best is None:
                 continue
-            _, arm, t, metric, uv, w, h = best
+            _, arm, t, metric, uv, w, h, pts, axis = best
+            along = []
+            if axis is not None:
+                moved = pts[t][None, None] + SHIFTS[:, None, None] * axis[t][None, None]
+                moved = np.repeat(moved, len(pts), 0)  # rows: frames of the episode
+                lens = cams[camera]["camera.lens"]
+                shifted = [
+                    _project(part, camera, lens, moved[:, j])[0][t] for j in range(len(SHIFTS))
+                ]
+                along = np.round(np.stack(shifted), 2).tolist()
             out.append(
                 {
                     "key": f"{episode}_{camera}_{arm}_{int(frames[t])}",
@@ -235,6 +254,7 @@ def _targets(
                     "width": w,
                     "height": h,
                     "drawn": np.round(uv, 2).tolist(),
+                    "along": along,
                     "click": None,
                 }
             )
@@ -248,7 +268,15 @@ def _size(part: pa.Table, camera: str) -> tuple[int, int]:
     return round(2 * np.nanmedian(k[:, 2]) + 1), round(2 * np.nanmedian(k[:, 3]) + 1)
 
 
-def make(shard: Path, dataset: str, clicks: Path, sheets: Path, opened: float, views: int) -> None:
+def make(
+    shard: Path,
+    dataset: str,
+    clicks: Path,
+    sheets: Path,
+    opened: float,
+    views: int,
+    no_sheets: bool = False,
+) -> None:
     from r4r.cli import dataset_root
     from r4r.data.lerobot import keyframes
 
@@ -261,7 +289,7 @@ def make(shard: Path, dataset: str, clicks: Path, sheets: Path, opened: float, v
         print(episode, [t["key"] for t in found] or "no target")
     sheets.mkdir(parents=True, exist_ok=True)
     tiles = []
-    for t in targets:
+    for t in [] if no_sheets else targets:
         image = keyframes(root, t["episode"], [t["frame"]], [t["camera"]])[t["camera"]][0]
         image = cv2.cvtColor(image.permute(1, 2, 0).numpy(), cv2.COLOR_RGB2BGR)
         t["width"], t["height"] = image.shape[1], image.shape[0]
@@ -275,17 +303,23 @@ def make(shard: Path, dataset: str, clicks: Path, sheets: Path, opened: float, v
         cv2.imwrite(str(sheets / f"sheet_{i // 2}.png"), np.vstack(pair))
     old = json.loads(clicks.read_text()) if clicks.exists() else {}
     known = {t["key"]: t.get("click") for t in old.get("targets", [])}
+    sizes = {t["key"]: (t["width"], t["height"]) for t in old.get("targets", [])}
     for t in targets:
         t["click"] = known.get(t["key"])
+        if no_sheets and t["key"] in sizes:
+            t["width"], t["height"] = sizes[t["key"]]
     clicks.parent.mkdir(parents=True, exist_ok=True)
     clicks.write_text(json.dumps({"dataset": dataset, "targets": targets}, indent=1))
     print(f"{len(targets)} targets -> {clicks}, sheets in {sheets}")
 
 
-def error(target: dict) -> float:
-    """Pixel distance of the click to the drawn point(s) (module doc)."""
+def error(target: dict, shift: float | None = None) -> float:
+    """Pixel distance of the click to the drawn point(s) (module doc), the points moved by
+    `shift` (m, one of `SHIFTS`) along the approach axis when given."""
 
     c, drawn = np.array(target["click"], float), np.array(target["drawn"], float)
+    if shift is not None and target.get("along"):
+        drawn = np.array(target["along"][int(np.argmin(np.abs(SHIFTS - shift)))], float)
     if target["metric"] == "line":
         a, b = drawn[0], drawn[1]
         s = np.clip(np.dot(c - a, b - a) / max(np.dot(b - a, b - a), 1e-9), 0, 1)
@@ -313,6 +347,17 @@ def score(clicks: Path) -> None:
         print(
             f"{g:20s} n {len(v):3d}  median {np.median(v):5.1f}  p90 {np.percentile(v, 90):5.1f}  "
             f"max {v.max():5.1f} px  |  median {np.median(p):4.1f}% width"
+        )
+    shifted = [t for t in rows if t.get("along")]
+    if shifted:
+        best = [float(SHIFTS[np.argmin([error(t, x) for x in SHIFTS])]) for t in shifted]
+        shift = float(np.median(best))
+        v = np.array([error(t, shift) for t in shifted])
+        low, high = (100 * np.percentile(best, q) for q in (10, 90))
+        print(
+            f"TCP moved {100 * shift:+.0f} cm along the approach axis (median of the clicks' best "
+            f"shifts, p10-p90 {low:+.0f}..{high:+.0f} cm): n {len(v)}  median {np.median(v):5.1f}  "
+            f"p90 {np.percentile(v, 90):5.1f}  max {v.max():5.1f} px"
         )
     skipped = len(data["targets"]) - len(rows)
     print(f"{skipped} targets without a click")
@@ -363,6 +408,14 @@ if __name__ == "__main__":
         print(" ".join(map(str, sample(args[1], int(args[2]), int(args[3]), excluded))))
     elif args[0] == "make":
         opened, views = float(option("--open", "0.08")), int(option("--views", "1"))
-        make(Path(args[1]), args[2], Path(args[3]), Path(args[4]), opened, views)
+        make(
+            Path(args[1]),
+            args[2],
+            Path(args[3]),
+            Path(args[4]),
+            opened,
+            views,
+            "--no-sheets" in args,
+        )
     elif args[0] == "score":
         score(Path(args[1]))

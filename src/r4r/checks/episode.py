@@ -3,7 +3,7 @@
 
 - `sync` for every calibrated camera: does the video move when the state says the robot (or
   the camera) moves (`r4r.checks.sync`)? The episode is flagged when the mean `ρ` over its
-  scene cameras (its wrist cameras when it has none) is below `CheckConfig.sync_flag`;
+  cameras is below `CheckConfig.sync_flag`;
 - `edge`, `motion` and their combination `camera` for every calibrated scene camera: the 2D
   shift that puts the drawn robot on the image, an estimate of the camera's pixel error. It is
   reported, not used as a flag: against clicked fingertips it separates cameras above 30 px
@@ -40,9 +40,10 @@ class CheckConfig:
     # The motion shift counts only when moving the drawn robot improves the agreement by this
     # share (else the evidence is too weak: few or no still pairs, the robot barely moving)
     min_gain: float = 0.1
-    # An episode whose mean sync ρ is below this is flagged: 5 % of in-sync episodes, 61 % / 78 %
-    # of the same episodes with the state 1 s / 3 s late (docs/verification.md)
-    sync_flag: float = 0.3
+    # An episode whose mean sync ρ over its cameras is below this is flagged: 3.4 % of the
+    # click-set and simulated episodes (several of them real mismatches), 62 % / 88 % of the
+    # same episodes with the state 1 s / 3 s late (docs/verification.md)
+    sync_flag: float = 0.35
 
 
 def moments(steps: int, count: int, gap: int) -> list[int]:
@@ -62,13 +63,9 @@ def estimate(edge: edges.ShiftResult, moved: edges.ShiftResult, config: CheckCon
 
 
 def episode_sync(rows: list[dict], config: CheckConfig) -> tuple[float, bool]:
-    """An episode's mean sync `ρ` (scene cameras, else wrists) and whether it is flagged."""
+    """An episode's mean sync `ρ` over its cameras and whether it is flagged."""
 
-    found: dict[str, list[float]] = {}
-    for r in rows:
-        if r["method"] == "sync" and np.isfinite(r["score"]):
-            found.setdefault(r["role"], []).append(1.0 - r["score"])
-    values = found.get("scene") or found.get("wrist")
+    values = [1.0 - r["score"] for r in rows if r["method"] == "sync" and np.isfinite(r["score"])]
     if not values:
         return float("nan"), False
     rho = float(np.mean(values))

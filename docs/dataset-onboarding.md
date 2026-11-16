@@ -41,6 +41,7 @@ Only then calibrate: the solver refines good priors; it does not rescue bad ones
 | 7 | **overlay** | `r4r overlay sol.pt check.png`, `… episode.mp4 --episode 0` | robot on the real one, every camera, several episodes |
 | 8 | write | `r4r rig … --write`, `r4r export <dataset> robot.xml` | priors and record committed; metadata bugs in `priors/ISSUES.md` |
 | 9 | every episode | `r4r reconstruct <dataset> --plan`, then `r4r reconstruct <dataset> out/ [--shard i/n]` | the plan says fast/light for (nearly) every episode; one parquet per shard, route and check per episode in its metadata |
+| 10 | check against the video | `r4r check <dataset> out/ [--episodes …]`, then `r4r merge` | few episodes flagged out of sync; read the overlay of each flagged one and of the highest camera error estimates ([below](#automatic-checks-r4r-check)) |
 
 ### Draft priors
 
@@ -312,6 +313,26 @@ episodes.
 
 ⬜ `r4r report`: per-camera residuals, inlier share, agreement across episodes, held-out
 episodes, with the overlay.
+
+### Automatic checks: `r4r check`
+
+After `r4r reconstruct`, `r4r check <dataset> out/` compares every episode with its own video,
+independently of the solve (CPU, ~0.2–2 s per episode; `src/r4r/checks/`). It writes
+`checks.parquet` beside the shards, and `r4r merge` copies it into `meta/r4r.json`.
+
+- **Sync** (flag). For 16 frame pairs, it compares how much the image changes with how much the
+  state says the robot (static camera) or the camera itself (wrist, head) moves. `ρ` is the
+  rank correlation of the two. An episode whose mean `ρ` over its cameras is below 0.35 is flagged: its state does
+  not drive its video. This happens with a state from another episode, streams out of step, or
+  a wrong lag. Static cameras on fixed arms separate cleanly; head cameras on humanoids and
+  mobile bases less so.
+- **Camera error estimate** (reported, not a flag). It is the 2D shift that best puts the drawn
+  robot's outline on the image's edges, or its moving silhouette on the image change. It finds
+  a camera 30+ px off with AUC ~0.85 against clicked fingertips. It misses errors that sit only
+  in the end effector (gripper length, jaw model). Use it to rank episodes for a look, not as
+  a verdict, and never as a correction: the shift does not reduce held-out click error.
+
+Numbers and what failed: [verification](verification.md#automatic-per-episode-checks-2026-11-16).
 
 ## Lessons so far
 

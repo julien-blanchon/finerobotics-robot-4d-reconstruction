@@ -193,6 +193,18 @@ stay free.
   [output spec](output-spec.md)'s columns. The schema metadata `r4r.episodes` (JSON) gives per
   episode its route, fit check, each camera's source and errors, or the error that stopped it;
   `r4r.layout` holds the feature info.
+- **Checks against the video (`r4r check`, `src/r4r/checks/`):** after reconstruct, each
+  episode is compared with its own frames on the CPU, independently of the solve. It samples
+  16 frame pairs and draws the robot's silhouette from the description's meshes
+  (`checks/render.py`, shared with overlays). It computes **sync**: the rank correlation
+  between the image change and the motion the state predicts. That motion is the robot
+  silhouette's change for a still camera, or the camera's own motion for a moving one. An
+  episode with a low mean is flagged. For scene cameras it also computes the 2D shift that best
+  fits the drawn robot to the Canny edges (chamfer) and to the image change. This shift is an
+  error estimate, reported but not a flag. Results go to `checks.parquet` beside the shards,
+  then to `meta/r4r.json` at merge. The fit check (epipolar distance on the light bursts) is
+  unchanged. `r4r.checks.eval` scores any check against clicked fingertips or synthetic
+  perturbations ([verification](verification.md#automatic-per-episode-checks-2026-11-16)).
 - **Resumable:** a shard is written once, atomically; shards already written are skipped.
 - **Spread over processes:** `--shard i/n` takes the shards `k` with `k mod n = i`, e.g. a
   Slurm array: `--shard $SLURM_ARRAY_TASK_ID/$SLURM_ARRAY_TASK_COUNT`.

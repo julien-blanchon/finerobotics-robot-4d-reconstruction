@@ -16,7 +16,7 @@ from a simulator's upstream records). `LeRobotTables.rows` reads a side feature 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,16 +38,29 @@ type Column = Tensor | list[str]
 
 # Columns of `meta/episodes` that locate an episode's rows and video segments
 INDEX_COLUMNS = ("episode_index", "length", "data/chunk_index", "data/file_index")
-VIDEO_COLUMNS = ("chunk_index", "file_index", "from_timestamp")
+VIDEO_COLUMNS = ("chunk_index", "file_index", "from_timestamp", "to_timestamp")
+# A video segment longer or shorter than the episode's frames at the dataset's fps by more than
+# this share (and two frames) runs at its own rate: FineART stores 597 episodes' videos with 3x
+# timestamps (every frame present, at 90 fps); normal segments differ by under 1 %
+RATE_TOLERANCE = 0.05
 
 
 @dataclass(frozen=True, slots=True)
 class EpisodeFiles:
     """Where an episode lives: its data file and, per video key, its video file and the
-    episode's start in it (seconds)."""
+    episode's start in it (seconds); `rates`: video seconds per episode second, per video key
+    (1 unless the segment's span says otherwise, `RATE_TOLERANCE`)."""
 
     data: Path
     videos: dict[str, tuple[Path, float]]
+    rates: dict[str, float] = field(default_factory=dict)
+
+    def times(self, key: str, timestamps: Sequence[float]) -> list[float]:
+        """Video times (seconds in the file) of episode timestamps."""
+
+        start = self.videos[key][1]
+        rate = self.rates.get(key, 1.0)
+        return [start + rate * t for t in timestamps]
 
 
 class LeRobotTables:
@@ -79,15 +92,24 @@ class LeRobotTables:
         data = self.info["data_path"].format(
             chunk_index=int(row["data/chunk_index"]), file_index=int(row["data/file_index"])
         )
-        videos = {}
+        videos, rates = {}, {}
+        duration = int(row["length"]) / self.fps
         for key in self.video_keys:
             path = self.info["video_path"].format(
                 video_key=key,
                 chunk_index=int(row[f"videos/{key}/chunk_index"]),
                 file_index=int(row[f"videos/{key}/file_index"]),
             )
-            videos[key] = (self.root / path, float(row[f"videos/{key}/from_timestamp"]))
-        return EpisodeFiles(self.root / data, videos)
+            start = float(row[f"videos/{key}/from_timestamp"])
+            videos[key] = (self.root / path, start)
+            span = row.get(f"videos/{key}/to_timestamp")
+            if (
+                span is not None
+                and duration > 0
+                and abs(span - start - duration) > max(RATE_TOLERANCE * duration, 2 / self.fps)
+            ):
+                rates[key] = (span - start) / duration
+        return EpisodeFiles(self.root / data, videos, rates)
 
     def rows(self, episode: int, columns: Sequence[str]) -> dict[str, Column]:
         """`columns` of `episode`'s frames, in file order: numbers as tensors `[T, ...]` of the
@@ -152,6 +174,7 @@ class LeRobotTables:
                 *INDEX_COLUMNS,
                 *(f"videos/{k}/{c}" for k in self.video_keys for c in VIDEO_COLUMNS),
             ]
+            names = [n for n in names if n in pq.read_schema(path).names]
             table = pq.read_table(path, columns=names)
             self._episode_rows = (path, {n: table[n].to_numpy() for n in names})
         rows = self._episode_rows[1]

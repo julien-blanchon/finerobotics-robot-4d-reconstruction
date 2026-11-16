@@ -75,8 +75,9 @@ def thumbnails(root: Path, episodes: Sequence[int], camera: str) -> Thumbnails:
     key = IMAGE_PREFIX + camera
     by_file: dict[Path, list[tuple[int, float, float]]] = {}
     for e in episodes:
-        path, start = tables.files(e).videos[key]
-        later = start + LATER * (tables.length(e) - 1) / tables.fps
+        files = tables.files(e)
+        path = files.videos[key][0]
+        start, later = files.times(key, [0.0, LATER * (tables.length(e) - 1) / tables.fps])
         by_file.setdefault(path, []).append((e, start, later))
     gradient, still = {}, {}
     for path, rows in by_file.items():

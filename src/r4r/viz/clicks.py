@@ -196,8 +196,16 @@ def _targets(
 
     frames = np.array(part.column("frame_index").to_pylist())
     points = {a: p for a in arms if (p := _arm_points(part, a, opened)) is not None}
-    scene = [c for c, v in cams.items() if v["camera.role"] != "wrist" and v["camera.calibrated"]]
-    wrist = [c for c, v in cams.items() if v["camera.role"] == "wrist" and v["camera.calibrated"]]
+    # Calibrated in this episode: the dataset's flag, and finite intrinsics (a camera written
+    # as NaN in this episode by `--uncalibrated nan`)
+    shown = {
+        c
+        for c, v in cams.items()
+        if v["camera.calibrated"]
+        and np.isfinite(_column(part, f"observation.camera.{c}.intrinsics")).any()
+    }
+    scene = [c for c, v in cams.items() if v["camera.role"] != "wrist" and c in shown]
+    wrist = [c for c, v in cams.items() if v["camera.role"] == "wrist" and c in shown]
     out = []
     for kind, cameras, wanted in (("scene", scene, views), ("wrist", wrist, 1)):
         cameras = cameras[turn % len(cameras) :] + cameras[: turn % len(cameras)] if cameras else []

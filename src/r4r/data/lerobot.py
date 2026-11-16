@@ -34,7 +34,7 @@ from .priors import (
     load_episode_record,
     load_priors,
 )
-from .tables import Column, LeRobotTables
+from .tables import Column, EpisodeFiles, LeRobotTables
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -198,7 +198,7 @@ def load_episode(
         frames = torch.empty(0, 3, 0, 0)
         if decode is None or name in decode:
             assert files is not None
-            frames = _decode(*files.videos[key], timestamps, tables.fps)
+            frames = _decode(files, key, timestamps, tables.fps)
             height, width = frames.shape[-2:]
         stream = _camera(key, info, links.get(key), prior, frames, (height, width))
         if record is not None and name in record.intrinsics:
@@ -293,15 +293,16 @@ def _world_cameras(
 
 
 def _decode(
-    path: Path, start: float, timestamps: list[float], fps: float
+    files: EpisodeFiles, key: str, timestamps: list[float], fps: float
 ) -> Tensor[[int, *RGB, int, int]]:
-    """uint8 frames of a video file at `start + t` for each episode timestamp `t` (seconds),
-    each within half a frame period."""
+    """uint8 frames of video `key` at each episode timestamp `t` (seconds), each within half a
+    frame period (at the video's own rate, `EpisodeFiles.rates`)."""
 
     from lerobot.datasets.video_utils import decode_video_frames
 
-    times = [start + t for t in timestamps]
-    return decode_video_frames(path, times, 1 / fps / 2, "pyav", return_uint8=True)
+    tolerance = files.rates.get(key, 1.0) / fps / 2
+    times = files.times(key, timestamps)
+    return decode_video_frames(files.videos[key][0], times, tolerance, "pyav", return_uint8=True)
 
 
 def keyframes(
@@ -315,9 +316,10 @@ def keyframes(
     timestamps = cast("Tensor", tables.rows(episode, ["timestamp"])["timestamp"])
     out = {}
     for name in cameras:
-        path, start = files.videos[IMAGE_PREFIX + name]
-        times = [start + float(timestamps[f]) for f in frames]
-        out[name] = seek_frames(path, times, 0.5 / tables.fps)
+        key = IMAGE_PREFIX + name
+        times = files.times(key, [float(timestamps[f]) for f in frames])
+        tolerance = 0.5 * files.rates.get(key, 1.0) / tables.fps
+        out[name] = seek_frames(files.videos[key][0], times, tolerance)
     return out
 
 

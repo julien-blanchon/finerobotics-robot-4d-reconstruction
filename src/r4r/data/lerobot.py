@@ -52,6 +52,22 @@ FORWARD_LEFT_UP_FROM_OPENCV = torch.tensor(
 )
 
 
+def camera_name(key: str) -> str:
+    """A camera's name: its video key without `observation.images.` (or without `observation.`
+    for roots that keep their videos as `observation.<name>`, e.g. FetchMan)."""
+
+    for prefix in (IMAGE_PREFIX, "observation."):
+        if key.startswith(prefix):
+            return key.removeprefix(prefix)
+    return key
+
+
+def video_key(keys: Sequence[str], name: str) -> str:
+    """The video key among `keys` of the camera `name` (`camera_name`'s inverse)."""
+
+    return next(k for k in keys if camera_name(k) == name)
+
+
 @dataclass(frozen=True, slots=True)
 class _Root:
     """What every episode of a root shares: its tables, `meta/robot.json` and priors."""
@@ -61,11 +77,19 @@ class _Root:
     priors: DatasetPriors
 
 
+def robot_metadata(root: Path) -> JsonObject:
+    """`meta/robot.json`; a root delivered without one (no description, e.g. a subset of an
+    upstream dataset) gets no arms: its priors give `description`, `state_feature`, `joints`."""
+
+    path = root / "meta" / "robot.json"
+    return json.loads(path.read_text()) if path.exists() else {"state": {"arms": []}}
+
+
 @functools.cache
 def _root(root: Path) -> _Root:
     """A dataset root opened once per process (episodes of a run reuse its reads)."""
 
-    robot = json.loads((root / "meta" / "robot.json").read_text())
+    robot = robot_metadata(root)
     priors = load_priors(root)
     return _Root(LeRobotTables(root, side=priors.side_directory), robot, priors)
 
@@ -136,7 +160,7 @@ def camera_names(root: Path) -> tuple[tuple[str, ...], frozenset[str]]:
     names, moving = [], set()
     for key in opened.tables.video_keys:
         info = opened.tables.features[key].get("info", {})
-        name = key.removeprefix(IMAGE_PREFIX)
+        name = camera_name(key)
         prior = opened.priors.cameras.get(name, CameraPrior())
         if info.get("is_depth_map", False) or prior.ignore:
             continue
@@ -176,7 +200,7 @@ def load_episode(
         key
         for key in tables.video_keys
         if not tables.features[key].get("info", {}).get("is_depth_map", False)
-        and not priors.cameras.get(key.removeprefix(IMAGE_PREFIX), CameraPrior()).ignore
+        and not priors.cameras.get(camera_name(key), CameraPrior()).ignore
     ]
     feature = priors.state_feature or robot["state"]["feature"]
     every = tables.rows(episode, _needed(keys, feature, priors, record))
@@ -186,7 +210,7 @@ def load_episode(
     files = tables.files(episode) if decode is None or decode else None
     cameras = []
     for key in keys:
-        name = key.removeprefix(IMAGE_PREFIX)
+        name = camera_name(key)
         prior = priors.cameras.get(name, CameraPrior())
         info = tables.features[key].get("info", {})
         height, width = tables.features[key]["shape"][:2]
@@ -205,6 +229,10 @@ def load_episode(
             column = _columns(cast("Mapping[str, Tensor]", every), recorded)
             k = _recorded_intrinsics(column, prior.intrinsics, tables.features[key]["shape"][:2])
             stream = replace(stream, intrinsics=k)
+        elif prior.principal is not None and prior.focal is not None:
+            fx, (cx, cy) = prior.focal, prior.principal
+            k = [[fx, 0, cx], [0, fx * prior.aspect, cy], [0, 0, 1]]
+            stream = replace(stream, intrinsics=torch.tensor(k, dtype=torch.float64))
         # A static camera's pose in the base frame, or a moving camera's mount on its link
         if record is not None and name in record.poses:
             x, y, z, *q = record.poses[name]
@@ -310,7 +338,7 @@ def keyframes(
     timestamps = cast("Tensor", tables.rows(episode, ["timestamp"])["timestamp"])
     out = {}
     for name in cameras:
-        path, start = files.videos[IMAGE_PREFIX + name]
+        path, start = files.videos[video_key(list(files.videos), name)]
         times = [start + float(timestamps[f]) for f in frames]
         out[name] = seek_frames(path, times, 0.5 / tables.fps)
     return out
@@ -362,7 +390,7 @@ def _needed(
         names += (odometry.feature,) if isinstance(odometry.feature, str) else odometry.feature
         names += [odometry.speed_feature] if odometry.speed_feature else []
     for key in keys:
-        name = key.removeprefix(IMAGE_PREFIX)
+        name = camera_name(key)
         prior = priors.cameras.get(name, CameraPrior())
         if prior.intrinsics is not None and (record is None or name not in record.intrinsics):
             names.append(prior.intrinsics.column)
@@ -481,6 +509,8 @@ def _recorded_motion(spec: BaseOdometry, rows: Mapping[str, Tensor]) -> Tensor[[
     values = _columns(rows, spec.feature)[:, list(spec.columns)]
     if spec.kind == "pose" and values.shape[1] == 7:
         return odometry.from_poses_3d(values[:, :3], values[:, 3:])
+    if spec.kind == "pose" and values.shape[1] == 6:  # x, y, z, roll, pitch, yaw
+        return odometry.from_poses_rpy(values[:, :3], values[:, 3:])
     if spec.kind == "pose":
         # x, y, θ; or x, y, qz, qw (a planar heading as a quaternion about z)
         heading = (
@@ -515,7 +545,7 @@ def _camera(
     declared = link or info.get("camera.extrinsics_frame")
     mount = prior.link or (declared if moving and declared != "world" else None)
     return CameraStream(
-        name=key.removeprefix(IMAGE_PREFIX),
+        name=camera_name(key),
         frames=frames,
         role=info.get("camera.role", "other"),
         moving=moving,

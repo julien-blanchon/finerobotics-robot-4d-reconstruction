@@ -45,7 +45,8 @@ between episodes) or per frame.
 `bodies` are elements of the description whose offset from their parent is not exactly known (a
 second arm's base, a mobile base). `focal` is the camera's focal length in pixels at the video
 resolution, a property of the lens: fixed across episodes unless `focal_range` (relative) says
-how far it may vary; `aspect` (fy / fx, default 1) for non-square pixels.
+how far it may vary; `aspect` (fy / fx, default 1) for non-square pixels; `principal` (cx, cy)
+an off-centre principal point (with a held `focal`; default the image centre).
 `lens` is `pinhole` (radial `distortion`: OpenCV's
 k1, k2, k3) or `fisheye` (Kannala–Brandt, OpenCV fisheye's k1..k4); `distortion_range` is the
 prior std of each coefficient when fitting refines them (0: held; default 0 when the
@@ -229,6 +230,9 @@ class CameraPrior:
     # Pixel aspect fy / fx (non-square pixels, e.g. a 848-wide sensor resized to 640): `focal`
     # is fx, fy = focal × aspect; focal corrections keep the ratio
     aspect: float = 1.0
+    # Principal point (cx, cy) in pixels of the video (OpenCV pixel centres) with a known
+    # `focal`; None: the image centre
+    principal: tuple[float, float] | None = None
     # Pinhole: OpenCV radial k1, k2, k3; fisheye: OpenCV fisheye (Kannala–Brandt) k1..k4.
     # None: zero (an ideal pinhole; for a fisheye, unknown: refined from the equidistant model)
     distortion: tuple[float, ...] | None = None
@@ -292,12 +296,12 @@ class OdometryGain:
 class BaseOdometry:
     """Where a mobile base's motion is recorded (see `r4r.rago.odometry`): `feature` columns
     `columns` holding planar poses (x, y, θ or x, y, qz, qw), full poses (x, y, z, qw, qx, qy,
-    qz: list the columns in that order), body-frame velocities (vx, vy, ω), wheel angles (left,
-    right[, steering]) of a caster or differential drive with its geometry, or a swerve drive's
-    steering angles (`columns`) and wheel ground speeds (m/s, `speed_columns` of
-    `speed_feature`, default `feature`) with each wheel's contact point (x, y) in the base
-    frame (`wheels`). `correction` (`OdometryGain`: `scale`, `heading_gain`, `yaw_rate`) is
-    applied to every episode's motion when given."""
+    qz, or x, y, z, roll, pitch, yaw: list the columns in that order), body-frame velocities
+    (vx, vy, ω), wheel angles (left, right[, steering]) of a caster or differential drive with
+    its geometry, or a swerve drive's steering angles (`columns`) and wheel ground speeds (m/s,
+    `speed_columns` of `speed_feature`, default `feature`) with each wheel's contact point
+    (x, y) in the base frame (`wheels`). `correction` (`OdometryGain`: `scale`, `heading_gain`,
+    `yaw_rate`) is applied to every episode's motion when given."""
 
     kind: Literal["pose", "velocity", "caster", "swerve"]
     feature: str | tuple[str, ...]  # several: their columns concatenated
@@ -732,6 +736,7 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
             focal=c.get("focal"),
             focal_range=c.get("focal_range"),
             aspect=float(c.get("aspect", 1.0)),
+            principal=tuple(c["principal"]) if c.get("principal") else None,
             distortion=tuple(c["distortion"]) if c.get("distortion") is not None else None,
             distortion_range=c.get("distortion_range"),
             scope=c.get("scope", "dataset"),

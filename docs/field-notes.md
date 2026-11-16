@@ -164,6 +164,22 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   per-episode poses do; the robot was moved between rooms. Before freeing a camera per setup,
   test one fixed pose across setups on robot points (resting grippers at the same pixels is a
   quick sign). Freeing it let the light solve wander 15–20 cm at 1–2 px.
+- **Mount periods from the robot at rest, without clicks:** when episodes start from one joint
+  state, the resting grippers' pixel shift against a reference episode measures the camera's
+  move on the robot frame. HABIT: an edge-template scan of every episode (~25 min on 4 CPUs) is
+  repeatable to ~1 px within a period; breaks at 5 px on each gripper's (dx, dy) gave 139
+  periods, where 10 px on the two grippers' mean merged different mounts (one episode's camera
+  off by ~10 px). Each period's camera: the reference turned about its centre and moved along its
+  axis to put the two grippers where they are seen (4 equations, 4 unknowns). Reject samples where
+  one gripper moves alone (60–100 px): no camera move does that. Keypoint transfer (RoMa) and
+  RoMa flow failed on the same data: the room changes and the robot is only at the image edges.
+- **Jaw clicks on an unrecorded gripper mislead:** with the opening unknown, a click lands on one
+  fingertip pad, up to half the stroke from the modelled jaw midpoint. Score to the jaw line between
+  the fully open fingertips instead. HABIT: a reference camera solved on such picks sat 11 cm /
+  9 deg off the scene and its focal followed (238-308 px); a tracks-only rig with the wrist cameras
+  gave 367 px and drew the arm links on the real ones. What remained, the gripper drawn off at far
+  reach, was the gripper mount: its jaws 3.8 cm off the flange axis (a 14.5 deg tilt), found by
+  freeing the jaw point with that camera held. Check the arm links before blaming the camera.
 - **Merged roots mix setups:** community-v3 roots join many LeRobot repos, each with its own
   cameras and calibration (one root's overlay showed three rooms). Find the setup key first
   (`source/subtree` or `source/publisher_repo` in `meta/episodes`), write it as `station`, and

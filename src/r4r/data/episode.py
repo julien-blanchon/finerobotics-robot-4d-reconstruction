@@ -7,7 +7,7 @@ joints, and for each camera whether it moves and, when known, the link it is mou
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -66,6 +66,8 @@ class Episode[T: IntVar, NState: IntVar]:
     priors: DatasetPriors
     # Which setup (e.g. recording station) the episode belongs to, when the dataset says
     station: str | None = None
+    # Cameras with their own setup key (episodes table `station.<camera>`): camera → station
+    camera_stations: dict[str, str] = field(default_factory=dict)
     # A mobile base's recorded motion since the first timestep, in its own frame [T, 4, 4]
     # (from the priors' `base_odometry`), the start of its per-frame pose
     base_motion: Tensor[[T, *Mat4x4]] | None = None

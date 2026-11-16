@@ -191,12 +191,15 @@ def setups(found: Thumbnails, config: SetupConfig) -> list[tuple[int, int]]:
 
 
 def labelled(
-    runs: Sequence[tuple[int, int]], known: dict[int, str], episodes: Iterable[int] | None = None
+    runs: Sequence[tuple[int, int]],
+    known: dict[int, str],
+    episodes: Iterable[int] | None = None,
+    prefix: str = "",
 ) -> tuple[dict[int, str], list[int]]:
     """A station per episode of `runs`: each label of `known` (labelled episodes) goes to the
-    run holding most of its episodes, the other runs are `auto-<first episode>`; and the
-    labelled episodes whose run says otherwise. With `episodes` (the thumbnailed ones, e.g. one
-    priors group's) a run spans only those of them between its first and last episode."""
+    run holding most of its episodes, the other runs are `<prefix>auto-<first episode>`; and
+    the labelled episodes whose run says otherwise. With `episodes` (the thumbnailed ones, e.g.
+    one priors group's) a run spans only those of them between its first and last episode."""
 
     def members(first: int, last: int) -> Iterable[int]:
         if chosen is None:
@@ -212,7 +215,7 @@ def labelled(
     owner = {max(range(len(runs)), key=c.__getitem__): label for label, c in count.items()}
     stations, relabelled = {}, []
     for i, (first, last) in enumerate(runs):
-        name = owner.get(i, f"auto-{first}")
+        name = owner.get(i, f"{prefix}auto-{first}")
         for e in members(first, last):
             stations[e] = name
             if e in known and known[e] != name:
@@ -220,27 +223,34 @@ def labelled(
     return stations, relabelled
 
 
-def write_stations(path: Path, stations: dict[int, str], relabelled: Sequence[int]) -> None:
-    """Set the `station` of the episodes table at `path` (created if absent): rows of known
-    episodes get their station, other episodes one row with only it; the recorded poses of
-    `relabelled` episodes (a station's values given to an episode of another setup) are
-    cleared."""
+def write_stations(
+    path: Path,
+    stations: dict[int, str],
+    relabelled: Sequence[int],
+    camera: str | None = None,
+) -> None:
+    """Set the `station` of the episodes table at `path` (created if absent), or with `camera`
+    that camera's own setup key `station.<camera>`: rows of known episodes get their station,
+    other episodes one row with only it; the recorded poses of `relabelled` episodes (a
+    station's values given to an episode of another setup) are cleared (only `camera`'s, with
+    `camera`)."""
 
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     rows = pq.read_table(path).to_pylist() if path.exists() else []
     pose = ("x", "y", "z", "qw", "qx", "qy", "qz")
+    column = "station" if camera is None else f"station.{camera}"
     seen = set()
     for row in rows:
         episode = int(row["episode"])
         seen.add(episode)
         if episode in stations:
-            row["station"] = stations[episode]
-        if episode in relabelled:
+            row[column] = stations[episode]
+        if episode in relabelled and (camera is None or row.get("camera") == camera):
             row.update(dict.fromkeys(pose))
     rows += [
-        {"episode": e, "camera": None, "station": s} for e, s in stations.items() if e not in seen
+        {"episode": e, "camera": None, column: s} for e, s in stations.items() if e not in seen
     ]
     columns = list(dict.fromkeys(k for row in rows for k in row))
     table = pa.Table.from_pylist([{k: row.get(k) for k in columns} for row in rows])

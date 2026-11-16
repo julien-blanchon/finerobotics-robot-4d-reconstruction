@@ -24,7 +24,9 @@ Held values:
 `dataset_plan` counts the routes over a dataset from its priors and episodes table alone (no
 episode is loaded) and costs them with the per-episode timings measured on this cluster
 (`COST`): a setup that is not calibrated costs one `r4r rig` on a sample, after which its
-episodes take the route their own unknowns allow.
+episodes take the route their own unknowns allow. A setup is an episode's common `station`, or
+for a camera with its own setup key (`station.<camera>`) that camera's station: a value missing
+for such a camera belongs to its own setup.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
     from r4r.data.priors import DatasetPriors
@@ -221,23 +223,26 @@ def dataset_plan(
     seconds = frames / tables.fps
     real = simulated(root) is False
     routes, reasons = Counter(), Counter()
-    sizes: Counter[str | None] = Counter()
-    for (_, station, _, _), count in groups.items():
-        sizes[station] += count
-    stations, lone, neighbours = set(), set(), set()
+    # A setup is a common station (camera None) or a camera's own station (camera, station)
+    sizes: Counter[Setup] = Counter()
+    for (_, station, own, _, _), count in groups.items():
+        sizes[None, station] += count
+        for setup in own:
+            sizes[setup] += count
+    # Setups to calibrate by kind: a whole rig, from a neighbour station, a lone camera placed
+    kinds: dict[str, set[Setup]] = {"rig": set(), "neighbour": set(), "lone": set()}
     checked = odd = 0
     cpu = gpu = 0.0
-    for (group, station, poses, intrinsics), count in groups.items():
-        episode_priors = priors.for_episode(group, station)
+    for (group, station, own, poses, intrinsics), count in groups.items():
+        keys = dict(own)
+        episode_priors = priors.for_episode(group, station, keys)
         unknowns = episode_unknowns(episode_priors, names, moving, poses, intrinsics)
-        if unknowns.setup and station is not None and sizes[station] < MIN_SETUP:
+        by_setup = setup_reasons(unknowns.setup, station, keys)
+        if any(s[1] is not None and sizes[s] < MIN_SETUP for s in by_setup):
             odd += count
-        elif unknowns.setup and all(r.endswith(LONE) for r in unknowns.setup):
-            lone.add(station)
-        elif unknowns.setup and priors.stations and _from_neighbour(unknowns.setup, moving):
-            neighbours.add(station)
-        elif unknowns.setup:
-            stations.add(station)
+        else:
+            for setup, why in by_setup.items():
+                kinds[_setup_kind(why, moving, bool(priors.stations))].add(setup)
         if unknowns.setup:
             reasons.update(dict.fromkeys(unknowns.setup, count))
         reasons.update(dict.fromkeys(unknowns.missing, count))
@@ -256,9 +261,10 @@ def dataset_plan(
             cpu += count * cost.light_solve
         elif check:
             cpu += count * cost.flagged * cost.light_solve
-    failing = len(neighbours) * (1 - cost.station_pass)
-    gpu += (len(stations) + failing) * cost.calibration_gpu + len(neighbours) * cost.station_gpu
-    cpu += len(neighbours) * cost.station_cpu
+    rigs, neighbours = len(kinds["rig"]), len(kinds["neighbour"])
+    failing = neighbours * (1 - cost.station_pass)
+    gpu += (rigs + failing) * cost.calibration_gpu + neighbours * cost.station_gpu
+    cpu += neighbours * cost.station_cpu
     hours = tables.info.get("total_frames", 0) / tables.fps / 3600 * len(selection)
     return DatasetPlan(
         name=f"{root.parent.parent.name}/{root.name}",
@@ -266,9 +272,9 @@ def dataset_plan(
         episodes=len(selection),
         routes=routes,
         checked=checked,
-        setups=len(stations),
-        neighbours=len(neighbours),
-        placements=len(lone),
+        setups=rigs,
+        neighbours=neighbours,
+        placements=len(kinds["lone"]),
         odd=odd,
         reasons=reasons,
         cpu_hours=cpu / 3600,
@@ -276,15 +282,19 @@ def dataset_plan(
     )
 
 
-type RecordKey = tuple[str | None, str | None, frozenset[str], frozenset[str]]
+type Setup = tuple[str | None, str | None]
+type RecordKey = tuple[
+    str | None, str | None, frozenset[tuple[str, str]], frozenset[str], frozenset[str]
+]
 
 
 def _record_groups(
     path: Path, episodes: Sequence[int] | range, group_of: Callable[[int], str | None]
 ) -> Counter[RecordKey]:
-    """How many of `episodes` share each (priors group, station, cameras with a recorded pose,
-    cameras with recorded intrinsics) of the episodes table (episodes without a row: none
-    recorded); `group_of` gives an episode's priors group."""
+    """How many of `episodes` share each (priors group, station, per-camera stations (camera,
+    station), cameras with a recorded pose, cameras with recorded intrinsics) of the episodes
+    table (episodes without a row: none recorded); `group_of` gives an episode's priors
+    group."""
 
     import numpy as np
 
@@ -292,9 +302,11 @@ def _record_groups(
     groups: Counter[RecordKey] = Counter()
     if not path.exists():
         for e in wanted.tolist():
-            groups[group_of(e), None, frozenset(), frozenset()] += 1
+            groups[group_of(e), None, frozenset(), frozenset(), frozenset()] += 1
         return groups
     import pyarrow.parquet as pq
+
+    from r4r.data.priors import STATION_PREFIX
 
     table = pq.read_table(path)
     columns = set(table.column_names)
@@ -302,23 +314,56 @@ def _record_groups(
     inside = np.isin(episode, wanted)
     camera = table["camera"].to_pylist() if "camera" in columns else [None] * len(episode)
     station = table["station"].to_pylist() if "station" in columns else [None] * len(episode)
+    own = {
+        c.removeprefix(STATION_PREFIX): table[c].to_pylist()
+        for c in table.column_names
+        if c.startswith(STATION_PREFIX)
+    }
     posed = _not_null(table, ("x", "qw"))
     focal = _not_null(table, ("fx",))
-    record: dict[int, tuple[str | None, set[str], set[str]]] = {}
+    record: dict[int, tuple[str | None, dict[str, str], set[str], set[str]]] = {}
     for i in np.flatnonzero(inside).tolist():
-        entry = record.setdefault(int(episode[i]), (None, set(), set()))
+        entry = record.setdefault(int(episode[i]), (None, {}, set(), set()))
         if station[i] is not None and entry[0] is None:
-            entry = record[int(episode[i])] = (str(station[i]), entry[1], entry[2])
+            entry = record[int(episode[i])] = (str(station[i]), *entry[1:])
+        for name, values in own.items():
+            if values[i] is not None:
+                entry[1].setdefault(name, str(values[i]))
         if camera[i] is not None and posed[i]:
-            entry[1].add(camera[i])
-        if camera[i] is not None and focal[i]:
             entry[2].add(camera[i])
-    for e, (station_name, poses, intrinsics) in record.items():
-        groups[group_of(e), station_name, frozenset(poses), frozenset(intrinsics)] += 1
+        if camera[i] is not None and focal[i]:
+            entry[3].add(camera[i])
+    for e, (station_name, setups, poses, intrinsics) in record.items():
+        key = (frozenset(setups.items()), frozenset(poses), frozenset(intrinsics))
+        groups[group_of(e), station_name, *key] += 1
     for e in wanted.tolist():
         if e not in record:
-            groups[group_of(e), None, frozenset(), frozenset()] += 1
+            groups[group_of(e), None, frozenset(), frozenset(), frozenset()] += 1
     return +groups
+
+
+def setup_reasons(
+    reasons: Sequence[str], station: str | None, camera_stations: Mapping[str, str]
+) -> dict[Setup, list[str]]:
+    """`reasons` (`name: why`) by the setup they belong to: a camera with its own station
+    (`camera_stations`) to (camera, its station), the rest to the common (None, `station`)."""
+
+    out: dict[Setup, list[str]] = {}
+    for reason in reasons:
+        name = reason.split(":")[0]
+        own = camera_stations.get(name)
+        out.setdefault((None, station) if own is None else (name, own), []).append(reason)
+    return out
+
+
+def _setup_kind(reasons: Sequence[str], moving: Collection[str], stations: bool) -> str:
+    """How a setup missing `reasons` is calibrated: `lone` (a lone camera placed), `neighbour`
+    (one static camera fitted from a neighbour station, when the priors have `stations`) or
+    `rig`."""
+
+    if all(r.endswith(LONE) for r in reasons):
+        return "lone"
+    return "neighbour" if stations and _from_neighbour(reasons, moving) else "rig"
 
 
 def _from_neighbour(reasons: Sequence[str], moving: Collection[str]) -> bool:

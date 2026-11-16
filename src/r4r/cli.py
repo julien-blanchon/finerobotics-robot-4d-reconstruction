@@ -378,6 +378,13 @@ def _prepare_rig(
             f"episodes come from several stations {sorted(map(str, stations))}: a rig is "
             "calibrated per station (pick episodes of one)"
         )
+    for name in names:
+        own = {e.camera_stations.get(name) for e in loaded}
+        if len(own) > 1:
+            raise SystemExit(
+                f"episodes come from several {name} stations {sorted(map(str, own))}: a rig "
+                "is calibrated per station (pick episodes of one)"
+            )
     k = []
     for c in streams:
         height, width = c.size
@@ -571,7 +578,9 @@ def _write_rig(
                 # No per-group mounts to measure a spread from: the indicative ranges
                 **range_fields(*INDICATIVE_RANGES),
             }
-        print(f"wrote {write_camera(rig.root, stream.name, values, *target)}")
+        own = rig.loaded[0].camera_stations.get(stream.name)  # one per rig (`_prepare_rig`)
+        where = target if own is None else (own, None)
+        print(f"wrote {write_camera(rig.root, stream.name, values, *where)}")
     checked = len(fit.group_corrections) > 1
     for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
         if robot.free_bodies[name].scope != "dataset":
@@ -1460,8 +1469,11 @@ class Stations:
     """Setups (stations) of a dataset from two thumbnails per episode of a camera that is not on
     the robot (`r4r.data.setups`, CPU): runs of episodes with the camera in one place. Prints
     the runs; `--write` sets each episode's `station` in the episodes table (a run takes the
-    label most of its labelled episodes carry, else `auto-<first episode>`). `--group` keeps
-    a priors group's episodes only (a dataset mixing robots: setups within each robot)."""
+    label most of its labelled episodes carry, else `auto-<first episode>`), or with
+    `--per-camera` the camera's own setup key `station.<camera>` (runs named
+    `<camera>-auto-<first episode>`): for static cameras re-placed independently of each other.
+    `--group` keeps a priors group's episodes only (a dataset mixing robots: setups within each
+    robot)."""
 
     dataset: tyro.conf.Positional[str]
     camera: tyro.conf.Positional[str]
@@ -1470,6 +1482,8 @@ class Stations:
     last: int | None = None
     # Only the episodes of this priors group (`groups`; `-` for those of no group)
     group: str | None = None
+    # Write the camera's own setup key (`station.<camera>`) instead of the common `station`
+    per_camera: bool = False
     write: bool = False
 
     def run(self) -> None:
@@ -1491,21 +1505,24 @@ class Stations:
         took = time.perf_counter() - start
         print(f"{len(runs)} runs in {len(episodes)} episodes ({took:.0f} s)")
         path = episode_table_path(root)
+        column = f"station.{self.camera}" if self.per_camera else "station"
         known = {}
         if path.exists():
             import pyarrow.parquet as pq
 
-            table = pq.read_table(path, columns=["episode", "station"]).to_pylist()
-            known = {int(r["episode"]): str(r["station"]) for r in table if r["station"]}
-        stations, relabelled = labelled(runs, known, episodes)
+            if column in pq.read_schema(path).names:
+                table = pq.read_table(path, columns=["episode", column]).to_pylist()
+                known = {int(r["episode"]): str(r[column]) for r in table if r[column]}
+        prefix = f"{self.camera}-" if self.per_camera else ""
+        stations, relabelled = labelled(runs, known, episodes, prefix)
         for first, end in runs:
             count = sum(first <= e <= end for e in stations)
             print(f"{first}-{end}: {stations[first]} ({count} episodes)")
         if relabelled:
             print(f"labelled episodes another run claims: {relabelled}")
         if self.write:
-            write_stations(path, stations, relabelled)
-            print(f"wrote {path}")
+            write_stations(path, stations, relabelled, self.camera if self.per_camera else None)
+            print(f"wrote {path} ({column})")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1517,7 +1534,9 @@ class Station:
     robot points follow if the fit check fails. RoMa links and transfer run on a GPU when
     there is one (~20 GPU s per station), the rest on the CPU. `--write` stores the station's
     camera (and the neighbour's other values) under `stations.<name>`; failed checks are
-    flagged in the station's `fitted` record for reading its overlay."""
+    flagged in the station's `fitted` record for reading its overlay. When the episodes table
+    gives the camera its own setup key (`station.<camera>`, `r4r stations --per-camera`), its
+    stations are those keys and only the camera's values are written (`--only` implied)."""
 
     dataset: tyro.conf.Positional[str]
     camera: tyro.conf.Positional[str]
@@ -1557,10 +1576,14 @@ class Station:
 
         root = dataset_root(self.dataset)
         priors = _root(root).priors
-        table = pq.read_table(episode_table_path(root), columns=["episode", "station"])
+        path = episode_table_path(root)
+        own = f"station.{self.camera}" in pq.read_schema(path).names
+        column = f"station.{self.camera}" if own else "station"
+        only = self.only or own
+        table = pq.read_table(path, columns=["episode", column])
         runs: dict[str, list[int]] = {}
         for episode, name in zip(
-            table["episode"].to_pylist(), table["station"].to_pylist(), strict=True
+            table["episode"].to_pylist(), table[column].to_pylist(), strict=True
         ):
             if name is not None and episode not in runs.setdefault(name, []):
                 runs[name].append(episode)
@@ -1600,6 +1623,8 @@ class Station:
                     sides.add(side(pose))
                     seeds.append((other, pose, focal))
             block = copy.deepcopy(priors.stations[neighbour])
+            if own:  # the camera's own setup: only its entry is read from the block
+                block = {"cameras": {self.camera: block["cameras"][self.camera]}}
             values = block["cameras"][self.camera]
             values |= {
                 "scope": "dataset",
@@ -1609,22 +1634,36 @@ class Station:
             priors.stations[name] = block
             numbers = tuple(samples(sorted(runs[name]), self.samples))
             rig = _prepare_rig(self.dataset, numbers, 1, 0.7, (), "cpu")
-            static = [rig.robot.camera_body[rig.robot.camera(n)] == 0 for n in rig.names]
+            # The cameras placed there (other static cameras with their own setups may not be
+            # calibrated yet: left out, not held at a missing pose)
+            use = [
+                i
+                for i, s in enumerate(rig.streams)
+                if s.name == self.camera
+                or s.moving
+                or s.pose is not None
+                or s.prior.position is not None
+            ]
+            names = tuple(rig.names[i] for i in use)
+            index = torch.tensor(use)
+            intrinsics = rig.intrinsics[index]
+            lens = None if rig.lens is None else rig.lens.select(index)
+            static = [rig.robot.camera_body[rig.robot.camera(n)] == 0 for n in names]
             data = station_data(
                 root,
                 numbers,
                 rig.episodes,
-                rig.names,
+                names,
                 static,
                 self.camera,
-                rig.intrinsics,
-                rig.lens,
+                intrinsics,
+                lens,
                 1,
                 config,
                 matcher,
             )
             fit = calibrate_station(
-                data, rig.robot, rig.names, rig.intrinsics, rig.lens, self.camera, config, seeds
+                data, rig.robot, names, intrinsics, lens, self.camera, config, seeds
             )
             print(
                 f"{name} ({len(runs[name])} episodes), held values of {neighbour}: "
@@ -1646,9 +1685,7 @@ class Station:
                 },
             }
             if self.write:
-                _write_station(
-                    root, name, {"cameras": {self.camera: values}} if self.only else block
-                )
+                _write_station(root, name, {"cameras": {self.camera: values}} if only else block)
             if not fit.flagged:
                 done.append(name)
                 done.sort(key=lambda n: min(runs[n]))

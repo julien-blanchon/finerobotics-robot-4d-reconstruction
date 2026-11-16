@@ -131,6 +131,9 @@ class RigConfig:
     # Per camera, the relative prior std of a known focal in the bundles (0: held; the priors'
     # `focal_range`); None: known focals held
     focal_ranges: tuple[float, ...] | None = None
+    # Moving cameras whose known mount the bundles refine within its prior (priors `refine`),
+    # as if they saw robot keypoints; others are frozen after stage 1
+    refined: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,7 +224,8 @@ def calibrate_rig[L: IntVar, J: IntVar, C: IntVar](
 
     # 4-5. Bundles: all episodes, then groups. Known focals stay fixed; those found in stage 3
     # are refined
-    frozen = _freeze_moving_mounts(robot, names, starts[0], _with_keypoints(episodes, names))
+    seen = _with_keypoints(episodes, names) | config.refined
+    frozen = _freeze_moving_mounts(robot, names, starts[0], seen)
     config = bundle_setting(robot, names, config)
     everything = _bundle(frozen, episodes, merged, names, intrinsics, starts, config, known_focal)
     group_fits = _group_bundles(

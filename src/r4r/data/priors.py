@@ -235,6 +235,10 @@ class CameraPrior:
     pose: PoseColumn | None = None
     # Left out of every command (a camera on no robot body, e.g. worn by a person)
     ignore: bool = False
+    # A moving camera whose mount the priors give, refined by `r4r rig`'s bundles within its
+    # ranges (one value for all episodes) instead of held: a by-eye mount that the mount search
+    # cannot find (a wrist filled by its own hand) but other held cameras pin
+    refine: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,6 +705,7 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
             intrinsics=_intrinsics_column(c.get("intrinsics"), f"{where}: cameras.{name}"),
             pose=_pose_column(c.get("pose"), f"{where}: cameras.{name}"),
             ignore=bool(c.get("ignore", False)),
+            refine=bool(c.get("refine", False)),
         )
         for name, c in raw.items()
     }

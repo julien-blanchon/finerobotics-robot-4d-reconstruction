@@ -670,11 +670,12 @@ def _focal_varies(fit: RigFit, camera: int) -> bool:
 
 
 def station_of(loaded: list[Episode[int, int]]) -> str | None:
-    """Where fitted values go: the episodes' station when the priors keep per-station
-    values (`stations`), else the dataset level (None)."""
+    """Where fitted values go: the station all the episodes share (the episodes table's
+    `station`), else the dataset level (None: no station, or episodes of several, e.g. a wrist
+    mount fitted across setups). The first station written starts the priors' `stations`."""
 
-    first = loaded[0]
-    return first.station if first.station is not None and first.priors.stations else None
+    stations = {e.station for e in loaded}
+    return stations.pop() if len(stations) == 1 else None
 
 
 def write_target(loaded: list[Episode[int, int]]) -> tuple[str | None, str | None]:

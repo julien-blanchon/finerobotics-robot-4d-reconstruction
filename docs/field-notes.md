@@ -367,6 +367,11 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **One label, two robots:** split the episodes by per-episode statistics before anything else
   (RoboMIND2 agilex: q99 of joint 3, Piper < 0.05, ARX > 0.5, nothing between) and give each group
   its own description, joints and lag (`groups` in the priors; `r4r stations --group`).
+- **Hundreds of "stations" can be one robot-mounted camera:** RoboMIND2 agilex's front camera
+  sits within 2.5 cm in three independently calibrated stations; held there, 20 random stations drew
+  the gripper on the real one. The per-episode light solve of that camera (SIFT links to the wrists)
+  landed 2-24 cm off even when started within 3 cm: try one held pose across stations before
+  solving each one.
 - **Hold a station camera's focal when one camera model serves every station:** `r4r station`
   with a free focal let it run to 354-608 px across RoboMIND2 agilex stations while the fit check
   passed; two full rigs agreed on 419 / 434 px (`--focal-std 0`). Read the station previews anyway:

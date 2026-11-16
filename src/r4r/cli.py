@@ -1776,13 +1776,13 @@ def _write_station(root: Path, name: str, block: JsonObject) -> None:
 
 @dataclass(frozen=True, slots=True)
 class Check:
-    """Per-episode camera checks of a reconstruction, independent of the solve (CPU,
-    `r4r.checks`): for every calibrated scene camera, the 2D shift that best puts the drawn
-    robot on the image's edges and on the image change where it moves, and the camera's error
-    estimate from them. Reads `<out>/<family>/<dataset>/shard-*.parquet` (`r4r reconstruct`),
-    writes the result table `checks.parquet` beside them and prints the flagged cameras. A
-    screening aid that ranks episodes for a look or a refit; see docs/verification.md for how
-    far it agrees with clicked fingertips."""
+    """Per-episode checks of a reconstruction against its video, independent of the solve
+    (CPU, `r4r.checks`): per calibrated camera the sync `ρ` (does the image change when the
+    state says the robot or the camera moves?), and per scene camera an estimate of its pixel
+    error (the 2D shift that best puts the drawn robot on the image's edges and motion). An
+    episode whose mean `ρ` is low is flagged: its state does not match its video. Reads
+    `<out>/<family>/<dataset>/shard-*.parquet` (`r4r reconstruct`) and writes the result table
+    `checks.parquet` beside them, which `r4r merge` folds into `meta/r4r.json`."""
 
     dataset: tyro.conf.Positional[str]
     out: tyro.conf.Positional[Path] = Path("reconstruction")
@@ -1790,7 +1790,7 @@ class Check:
     episodes: tuple[int, ...] = ()
 
     def run(self) -> None:
-        from r4r.checks.episode import CheckConfig, check_episode, flagged
+        from r4r.checks.episode import CheckConfig, check_episode, episode_sync
         from r4r.checks.eval import write_rows
         from r4r.checks.scene import scenes_from_shard
         from r4r.data.lerobot import frame_rate
@@ -1802,21 +1802,28 @@ class Check:
         shards = sorted(target.glob("shard-*.parquet"))
         if not shards:
             raise SystemExit(f"no shards in {target}: run r4r reconstruct first")
-        config, fps, rows = CheckConfig(), frame_rate(root), []
+        config, fps, rows, flagged = CheckConfig(), frame_rate(root), [], 0
         wanted = set(self.episodes) or None
         for shard in shards:
             for scene in scenes_from_shard(shard, wanted, self.dataset):
                 found = check_episode(scene, root, fps, config)
                 rows += found
-                for row in (r for r in found if r["method"] == "camera"):
-                    width = scene.views[row["camera"]].size[0]
-                    mark = "  FLAGGED" if flagged(row, width, config) else ""
-                    print(
-                        f"episode {scene.episode} {row['camera']}: estimated error "
-                        f"{row['estimate_px']:.1f} px ({row['seconds']:.2f} s){mark}"
-                    )
+                rho, bad = episode_sync(found, config)
+                flagged += bad
+                errors = ", ".join(
+                    f"{r['camera']} {r['estimate_px']:.0f} px"
+                    for r in found
+                    if r["method"] == "camera"
+                )
+                seconds = found[0]["seconds"] if found else 0.0
+                print(
+                    f"episode {scene.episode}: sync rho {rho:+.2f}"
+                    + (" FLAGGED (state and video disagree)" if bad else "")
+                    + (f"; camera error estimates {errors}" if errors else "")
+                    + f" ({seconds:.1f} s)"
+                )
         write_rows(rows, target / "checks.parquet")
-        print(f"{len(rows)} rows -> {target / 'checks.parquet'}")
+        print(f"{flagged} flagged; {len(rows)} rows -> {target / 'checks.parquet'}")
 
 
 @dataclass(frozen=True, slots=True)

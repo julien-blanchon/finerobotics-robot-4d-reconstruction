@@ -178,7 +178,9 @@ PRESETS: dict[str, EffectorPrior] = {
     ),
     # Toyota HSR: fingers rotate about the palm's x and close along its y; fingertip frames
     # (`hand_*_finger_tip_frame`, on the pads' inner edge) 4.4 mm apart at q = 0 (closed),
-    # 0.137 m at the 1.24 rad limit; TCP between the closed fingertips, 0.093 m along z
+    # 0.137 m at the 1.24 rad limit; TCP between the closed fingertips, 0.093 m along z. The
+    # fingers swing on arcs (fully open, their tips are 0.046 m along z, not at the TCP's
+    # depth), so the fingertips are given too: each distal finger's tip, mid-width of its pad
     "hsr": EffectorPrior(
         type="parallel",
         body="hand_palm_link$",
@@ -186,6 +188,10 @@ PRESETS: dict[str, EffectorPrior] = {
         orientation=IDENTITY,
         pads=(RobotPoint("hand_r_finger_tip_frame$"), RobotPoint("hand_l_finger_tip_frame$")),
         closed=0.0044,
+        fingertips={
+            "left": RobotPoint("hand_l_distal_link$", (0.02, 0.0078, 0.0405)),
+            "right": RobotPoint("hand_r_distal_link$", (0.02, -0.0078, 0.0405)),
+        },
     ),
     # I2RT YAM: the gripper points along its −z (fingertips 0.1468 m out); the tips slide along
     # its y, their inner faces touching at q = 0 and 0.094 m apart at the −0.04695 m limit

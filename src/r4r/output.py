@@ -170,7 +170,7 @@ def state_mapping(
 ) -> tuple[dict, ...]:
     """Per aligned joint, the raw column and its map `q = t0 + (σ s − s0)(t1 − t0)/(s1 − s0)`
     (or `q = σ s`), plus r4r's fitted offset `δq` (`q' = q + δq`): enough to go back to the raw
-    state (the lag is in `Layout.lag`)."""
+    state (the lag is in `Layout.lag`), except where a `clip` (listed when given) held it."""
 
     by_name = {m.name: m for m in maps}
     return tuple(
@@ -182,6 +182,7 @@ def state_mapping(
             "to": by_name[j].target,
             "offset": offsets.get(j, 0.0),
         }
+        | ({"clip": by_name[j].clip} if by_name[j].clip is not None else {})
         for j in joints
     )
 

@@ -33,7 +33,7 @@ Clicks, targets and drawn points, one JSON per dataset:
 
 | dataset | h | n (skipped) | median / p90 / max px | image | % width | TCP shift → median | verdict | pattern |
 |---|---|---|---|---|---|---|---|---|
-| airoa-moma-5k (HSR) | 5025 | 8 (1) | 36.9 / 70.8 / 108 | 512×384 | 7.2 | −2 cm → 27.4 | fail | head off per episode, ahead of or beside the fingers |
+| airoa-moma-5k (HSR) | 5025 | 8 (1) | 36.9 / 70.8 / 108 → 21.7 / 37.6 / 39.8 (fingertips) | 512×384 | 4.2 | −2 cm → 27.4 (before) | fail | the jaw model drew open fingers 4.7 cm too far (fixed: fingertips); the rest is one head camera per HSR unit (50 units, 1-4°) |
 | agibot-world g1-cohort-04 | 2620 | 23 (7) | 71.1 / 122 / 146 | 512×384 (fisheyes 512×410) | 13.9 | +10 cm (scan edge) → 27.6 | fail | top_head 71 px, drawn 1.3-1.6× farther from the image centre than the real grippers (the gripper is longer than described, not the focal: +10 cm → 19 px); hands seeing the other arm 98 px; fisheyes 20-46 px; jaw points at the jaw roots (TCP short); lag ±45 frames ruled out |
 | abc-130k abc-640x480 | 1752 | 21 (19) | 17.4 / 42.0 / 54.0 | 512×384 | 3.4 | +1 cm → 17.5 | fail | top 16.4 px (n 14), wrists 26.9 (left 38). Per station (top / wrist): 2: 17; 8: 16; 9: 54; 18: 17; 19: 21, 16 / 17; 22: 7 / 14; 24: 10; 26: wrist 42; 27: 15 / 34; 29: 8 / 26; 30: 10 / 27; 31: 20; 35: 24 / 47; 37: 41 |
 | abc-130k abc-848x480 | 723 | 19 (11) | 17.0 / 49.4 / 54.8 | 512×290 | 3.3 | +3 cm → 15.7 | fail | top 14.1 px (n 12, holds); wrists 46.5 (left 47.8): the wrist mounts |
@@ -128,6 +128,18 @@ past the black wrist section, and the jaws on the real jaws. In the G2 hand view
 jaws now sit on the real ones instead of at the image edges. On flexiv, the Robotiq stand-in's
 tips are on the real gel fingertips. None of these descriptions is used by a simulated dataset:
 genie-1, g2a-simulation and xrobotwin keep their own. Their ground-truth checks are unchanged.
+
+**HSR (airoa-moma-5k), 2026-11-16.** Two causes, found with 42 fingertip clicks on 27 other
+episodes (`priors/onboarding/toyota__hsr.md`, "Held-out diagnosis"):
+- HSR's fingers swing on arcs, so the parallel-jaw points `TCP ± y·w/2` put open fingertips
+  4.7 cm past the real ones. The `hsr` preset now gives `fingertips` (the scorer uses them), and
+  the priors clip the hand motor to [0, 1.24] (past contact it squeezes its springs and the
+  description's fingers crossed). Same clicks: 36.9 → 21.7 px median.
+- The rest is per HSR unit (`source/hsr_id`, 50 units). No dataset-level head, tilt, focal, lag,
+  lift or arm-joint parameter improves the held-out clicks, while a head-mount rotation fitted on
+  one episode of a unit fixes another episode of that unit (hsrb55 22 → 8 px, hsrb045 34 → 4 px).
+  Needed: a head-camera mount per unit (stations by `hsr_id`), solved automatically per unit.
+  Two of the 8 held-out clicks are not on a fingertip (a held bottle's top, a dark blob).
 
 **Still open:**
 - G1 hand cameras: 55-212 px. In the a2d preview, the hand views draw their own gripper in the

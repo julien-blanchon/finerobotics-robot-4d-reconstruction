@@ -173,7 +173,18 @@ Findings:
 |---|---|---|---|---|
 | abc-848x480 | original 19 clicks | 17.0 / 14.1 / 46.5 | 13.4 / 11.0 / 35.7 | hand-eye/tip wrist mounts (dataset level), 16 station rigs written (focals, right base, joint and time offsets) |
 | abc-848x480 | + 12 new wrist clicks (31) | 23.9 / 14.1 / 39.9 | 20.2 / 11.0 / 28.2 | same |
+| abc-640x480 | original 21 clicks (re-run base: 20.4 / 16.6 / 27.1) | 17.4 / 16.4 / 26.9 (as published) | 17.4 / 16.6 / 20.2 | 14 fx~313 / OAK stations rigged and written (1 14 15 16 17 24 26-29 36-39), incl. searched wrist mounts of OAK stations 15 16 28; the D405 stations' rigs were still running (see below) |
+| abc-640x480 | 7 new wrist clicks | 30.7 (wrist) | 35.7 | same; per click st 27 99 → 37, st 36 19 → 52, the rest unchanged |
 | molmoact2-yam | original 10 clicks | 35.6 / 25.2 / 114 | unchanged (35.6) | hand-eye mounts with a free focal (384 / 422 px vs the inferred 262.8) fit the own tips (3 px) but put the other arm 215 px off: not written |
+
+Verdict: abc-848 passes the overall median on its original clicks (13.4 px) and its top camera
+holds (11.0 px, 723 h of top views), but its wrists (28 px over 19 clicks) and the pooled set
+(20.2 px over 31) do not. abc-640 and molmoact2 still fail. No YAM dataset is ready by the bar
+of a median ~15 px in every camera. Videos of held-out episodes (jaw points from the twin's
+columns): `yam/w3/vid/abc848_6537.mp4`, `abc640_48467.mp4`, `molmo_775.mp4`.
+The abc-640 D405-family station rigs (0 2 5 6 8-13 19-23, 33, 7*, 25 30 3 18 34 35 40 41) were
+not finished: `yam/w3/bin/feed.sh` submits them at most 3 at a time (largest first); merge with
+`bin/merge.py` into `pri/I640` and re-score with `bin/rs.sh`.
 
 
 ## Method

@@ -1556,6 +1556,10 @@ class Station:
     only: bool = False
     # Fit again the stations a previous run flagged (default: skip them, read their overlays)
     retry: bool = False
+    # Seeds from up to this many calibrated stations, nearest first, each placement at least
+    # 5 cm / 5 deg from the seeds already taken (0: the nearest on each side of the robot); for
+    # a camera moved between a few placements
+    seeds: int = 0
 
     def run(self) -> None:
         import copy
@@ -1568,9 +1572,10 @@ class Station:
         from r4r.plan import MIN_SETUP
         from r4r.rago.station import (
             StationConfig,
+            by_side,
             calibrate_station,
+            distinct,
             samples,
-            side,
             station_data,
         )
 
@@ -1616,12 +1621,8 @@ class Station:
                 continue
             nearest = sorted(kin, key=lambda n: abs(min(runs[n]) - min(runs[name])))
             neighbour = nearest[0]
-            seeds, sides = [], set()
-            for other in nearest:
-                pose, focal = _station_camera(priors.stations[other], self.camera)
-                if side(pose) not in sides:
-                    sides.add(side(pose))
-                    seeds.append((other, pose, focal))
+            placed = [(n, *_station_camera(priors.stations[n], self.camera)) for n in nearest]
+            seeds = distinct(placed, self.seeds) if self.seeds else by_side(placed)
             block = copy.deepcopy(priors.stations[neighbour])
             if own:  # the camera's own setup: only its entry is read from the block
                 block = {"cameras": {self.camera: block["cameras"][self.camera]}}

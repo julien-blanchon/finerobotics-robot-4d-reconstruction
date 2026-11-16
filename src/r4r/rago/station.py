@@ -10,7 +10,8 @@ everything else held at a calibrated neighbour station's values:
    links between the camera and the wrist cameras at the bursts' middle frames: SIFT, and
    RoMa v2 when a matcher is given (a few dozen frame pairs per station).
 2. Starts: seeds from calibrated stations (the nearest one on each side of the robot: a third
-   camera facing the robot or behind the arms, `side`), all solved, the passing solve with
+   camera facing the robot or behind the arms, `by_side`; or one per distinct placement,
+   `distinct`, for a camera moved between a few), all solved, the passing solve with
    the lowest check kept; if none passes, PnP on the points the wrist cameras triangulate
    (`stages.static_starts`, focal searched), then PnP on robot surface points transferred
    from a neighbour's frames (`transfer`, given by the caller).
@@ -181,6 +182,42 @@ def calibrate_station(
     if not solved:
         raise ValueError(f"{camera}: no start (no seed, PnP and picks found none)")
     return min(solved, key=lambda f: f.check.median_px)
+
+
+type Seed = tuple[str, Tensor[[*Mat4x4]], float]
+
+
+def by_side(placed: Sequence[Seed]) -> list[Seed]:
+    """Of calibrated placements (station, pose, focal), nearest first: the first on each `side`
+    of the robot."""
+
+    seeds, sides = [], set()
+    for seed in placed:
+        if side(seed[1]) not in sides:
+            sides.add(side(seed[1]))
+            seeds.append(seed)
+    return seeds
+
+
+def distinct(
+    placed: Sequence[Seed], count: int, metres: float = 0.05, degrees: float = 5.0
+) -> list[Seed]:
+    """Of calibrated placements (station, pose, focal), nearest first: up to `count`, each at
+    least `metres` or `degrees` from those already taken (a camera moved between a few
+    placements: one seed per placement)."""
+
+    seeds: list[Seed] = []
+    for seed in placed:
+        far = all(
+            float(torch.linalg.norm(seed[1][:3, 3] - s[1][:3, 3])) > metres
+            or math.degrees(float(se3.so3_log(s[1][:3, :3].mT @ seed[1][:3, :3]).norm())) > degrees
+            for s in seeds
+        )
+        if far:
+            seeds.append(seed)
+        if len(seeds) == count:
+            break
+    return seeds
 
 
 def side(pose: Tensor[[*Mat4x4]]) -> str:

@@ -39,6 +39,7 @@ What exists to get each quantity, what it costs, and where it is known to fail (
 | ✅ `r4r inspect`, `r4r preview` (`.png` / `.mp4`) | the description at the recorded joints over every camera, from the priors only | the agent's first look: joint signs, units, lag, focal, mounts |
 | ✅ corrected descriptions `priors/descriptions/<embodiment>/` | missing parts, gripper length and rotation, mounts, link lengths | the most frequent real-data fix (G1/G2 wrist sections, Franka hand, OpenNeoData gripper, HSR fingertips) |
 | ✅ priors `joints` (map, offsets, clip), `kinematics` (fitted offsets), groups (`groups.<name>.match`) | joint mapping, encoder zeros, per-episode-group robots | joint offsets only when disjoint fits agree |
+| ✅ family-level priors (`priors/<family>/family.json`, types matched on `meta/info.json`) | one priors file per robot type for families of many single-episode roots | RoboBrain-X0; [checklist](#checklist) |
 | ✅ `r4r fit --shifts` | video/state lag | |
 | ✅ recorded EE pose vs FK | checks the joint map and units | agreement shows consistency with the vendor model, not with reality |
 | 🧪 motion-agreement check | state/video mismatch per episode (wrong or desynchronised states) | G1: ~10 % of episodes |
@@ -144,6 +145,7 @@ cameras need clicks is not solved for those cameras.
 | lens | pinhole or fisheye, recorded coefficients | `lens`, `distortion`, `distortion_range` |
 | scope | bolted (dataset), re-placed (episode), driving (frame) | `scope` on cameras and bodies |
 | robots | one dataset mixing robots (RoboMIND2 agilex: Piper and ARX arms): per-episode statistics tell them apart (`meta/episodes` `stats/observation.state/q99`) | `groups`: a `match` on a statistic and the group's own description, joints, cameras (`r4r.data.priors`); `r4r stations … --group` per group |
+| many roots, one robot type each | a family delivered as one root per episode (RoboBrain-X0: 35,515 roots of four upstream robot groups): one priors file per type, not per root | `priors/<family>/family.json`: `{"types": [{"match": {"info": "robot_type", "in": [...]}, "priors": "<type>.json"}]}`; a root without its own file takes the first type whose `meta/info.json` value is listed (`r4r.data.priors.priors_path`); `rig --write` writes into the type's file; the episodes table stays per root (every root's episode is 0). One root is one episode, so calibrate on several roots and hold the agreed values in the type file |
 | setups | sessions where a static camera stays put: `r4r stations <dataset> <camera> --write`; cameras re-placed independently of each other: `--per-camera`, one key per camera | `station` (or `station.<camera>`) column of the episodes table; values per station in `stations` |
 | odometry gain | `r4r rig --write` on driving episodes fits `base_odometry.correction` | then reconstruct holds the base on its record |
 | second arm | its base placement is usually a guess | `bodies.<base>`: ranges, scope |

@@ -2,7 +2,12 @@
 
 A dataset's own metadata (joint mapping, camera links, labels) is often incomplete or wrong.
 Priors live in this repository as `priors/<family>/<dataset>.json`, one per dataset root, and
-take precedence over `meta/robot.json` and the camera feature info:
+take precedence over `meta/robot.json` and the camera feature info. A family of many roots of
+one robot type each (RoboBrain-X0: one root per episode) shares one file per type instead:
+`priors/<family>/family.json` lists the types, `{"types": [{"match": {"info": "robot_type",
+"in": ["..."]}, "priors": "<type>.json"}]}`, and a root without its own file takes the first
+type whose `info` key of `meta/info.json` is one of `in` (`priors_path`); writes (`r4r rig
+--write`) go to that shared file, the episodes table stays per root. A priors file reads:
 
 ```json
 {
@@ -480,10 +485,59 @@ def _conditions(match: JsonObject | list[JsonObject]) -> list[JsonObject]:
     return list(match) if isinstance(match, list) else [match] if match else []
 
 
-def priors_path(root: Path) -> Path:
-    """`priors/<family>/<dataset>.json` for a delivery root `<family>/datasets/<dataset>`."""
+FAMILY_FILE = "family.json"
+TYPE_KEYS = frozenset({"match", "priors"})
+TYPE_MATCH_KEYS = frozenset({"info", "in"})
 
-    return PRIORS / root.parent.parent.name / f"{root.name}.json"
+
+def priors_path(root: Path) -> Path:
+    """The priors file of a delivery root `<family>/datasets/<dataset>`: its own
+    `priors/<family>/<dataset>.json` when it exists, else the shared file of the first type of
+    `priors/<family>/family.json` it matches (families of many single-episode roots), else its
+    own path (absent: no priors)."""
+
+    own = PRIORS / root.parent.parent.name / f"{root.name}.json"
+    if own.exists():
+        return own
+    return _typed_path(root) or own
+
+
+def _typed_path(root: Path) -> Path | None:
+    """The shared priors file of a root's type (`family.json`), None when no type matches.
+
+    `family.json` lists types in order, `{"types": [{"match": {"info": "robot_type", "in":
+    ["a", "b"]}, "priors": "a.json"}]}`: a root has the first type where the `info` key of its
+    `meta/info.json` takes one of the `in` values; `priors` is relative to the family's folder.
+    """
+
+    family = PRIORS / root.parent.parent.name / FAMILY_FILE
+    if not family.exists():
+        return None
+    types = _family_types(family, family.stat().st_mtime_ns)
+    info_path = root / "meta" / "info.json"
+    info = json.loads(info_path.read_text()) if info_path.exists() else {}
+    for match, name in types:
+        if info.get(match["info"]) in match["in"]:
+            return family.parent / name
+    return None
+
+
+@functools.lru_cache(maxsize=8)
+def _family_types(path: Path, modified: int) -> tuple[tuple[JsonObject, str], ...]:
+    """A `family.json`'s types, checked, read once per process (again if the file changes:
+    `modified` is its mtime)."""
+
+    del modified  # part of the cache key only
+    raw = _checked(json.loads(path.read_text()), frozenset({"types", "notes"}), str(path))
+    out = []
+    for i, block in enumerate(raw.get("types", [])):
+        where = f"{path}: types[{i}]"
+        _checked(block, TYPE_KEYS, where)
+        match = _checked(block.get("match", {}), TYPE_MATCH_KEYS, f"{where}.match")
+        if set(match) != TYPE_MATCH_KEYS or "priors" not in block:
+            raise ValueError(f"{where} needs `priors` and a `match` with `info` and `in`")
+        out.append((match, block["priors"]))
+    return tuple(out)
 
 
 def load_priors(root: Path) -> DatasetPriors:
@@ -861,9 +915,10 @@ class EpisodeRecord:
 
 
 def episode_table_path(root: Path) -> Path:
-    """`priors/<family>/<dataset>.episodes.parquet` next to the dataset's priors."""
+    """`priors/<family>/<dataset>.episodes.parquet`: per root even when the root's priors are its
+    type's shared file (`family.json`), whose roots all number their episodes from 0."""
 
-    return priors_path(root).with_suffix(".episodes.parquet")
+    return PRIORS / root.parent.parent.name / f"{root.name}.episodes.parquet"
 
 
 def load_episode_record(root: Path, episode: int) -> EpisodeRecord | None:

@@ -288,6 +288,16 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **States may be commanded, not measured** (xrobotwin). Or absent: many Open X-Embodiment
   sets record only the end-effector pose. With no joint states there is no FK, so blocked.
 
+- **End-effector-only datasets: find the record's convention before IK (`r4r ik`).** Upstream code or a
+  simulator port usually states it; a published start pose checks it against the description's FK.
+  - BridgeData: `ee_gripper_link` in `wx250s/base_link`, Euler angles of `R · DEFAULT_ROTATIONᵀ` (`R = Rz Ry Rx`), from the robot code; exact.
+  - RT-1 (fractal): `link_gripper_tcp` in `link_base`, quaternion x, y, z, w; SimplerEnv's start pose reproduces the first recorded frame within 1.5 cm.
+  - Language-Table: x, y only; height 0.145 m on `link_eef` and a pointing-down rotation from upstream `constants.py`, rotation about the pusher left free.
+  - MolmoAct (DROID-style): `panda_link8` + 0.1034 m along z; the alternative (the hand's TCP) put joint 7 at its limit and made 0.7 rad jumps. Implausible joints and jumps tell conventions apart where the residual cannot (7-DoF arms reach almost anything).
+  - HandsOn: palm poses in the world; the description's wrist limits are too tight for ~10 % of them (`limits: false`). The rest pose decides the elbow side: the wrong one drew a forearm leaving the view sideways.
+  - bc-z: not found (not `link_base`/tcp; a 180° tool flip still misses 49 mm at p90).
+- **IK batches:** sort episodes by length (a batch runs to its longest episode) and stop extra iterations per frame once the error stalls; one unreachable frame at a joint limit otherwise held a 2048-episode batch for 100 extra iterations per frame.
+
 ## Timing
 
 - **Measure the video/joint lag on every dataset** (`r4r fit --shifts`): abc's states lag

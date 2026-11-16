@@ -49,7 +49,7 @@ Clicks, targets and drawn points, one JSON per dataset:
 | g2-cohort-02 | 198 | 10 (5) | 20.0 / 38.3 / 43.1 | 512×320 / 410 / 422 | 3.9 | +6 cm → 11.6 | fail | mostly TCP depth (omnipicker_g2) |
 | rw-rl r1lite (5 datasets, pooled) | 165 | 10 (10) | 15.1 / 57 / 59 | 512×288 | 2.9 | per dataset, signs differ | fail (borderline) | top views 4-22 px, three outliers (tissue 403, plug 239 wrist, scan 1845) |
 | openneodata aloha | 157 | 7 (10) | 54.9 / 228 / 234 | 512×384 | 10.7 | +10 cm → 62.9 | fail | third view (light solve per episode) 45-68 px off on most; 2 clicks ~230 px |
-| robomind agilex-real | 59 | 16 (4) | 55.9 / 75.5 / 80.3 | 512×384 | 10.9 | +6 cm → 42.0 | fail | as agilex-5b28: drawn jaw points at the jaw roots and above the real jaws in front and wrist views; state lag ruled out (best at 0-2 frames) |
+| robomind agilex-real | 59 | 16 (4) | 55.9 / 75.5 / 80.3 → 12.8 (10 scene clicks) | 512×384 | 10.9 | +6 cm → 42.0 | pass (scene view, 2026-11-16) | the front camera was 15° too pitched down (rig agx2); refitted from 33 other fingertip clicks on 11 episodes (`priors/onboarding/agilex__cobot_magic.md`, "Arm-side test"); wrist clicks not re-scored |
 | robomind ur5e-real | 36 | 11 (0) | 19.4 / 27.6 / 61.7 | 512×384 | 3.8 | +4 cm → 15.4 | fail | drawn 10-30 px above; part gripper length, rest per-session camera |
 | rdt-ft-data | 30 | 11 (9) | 44.3 / 71.1 / 79.8 | 512×384 | 8.7 | 0 cm → 44.3 | fail | cam_high 34 px in a different direction per room (one held pose for every room); wrists 67 |
 | xvla-soft-fold | 26 | 13 (7) | 22.1 / 68.1 / 98.0 | 512×384 | 4.3 | +2 cm → 20.1 | fail | cam_high 2-9 px on 5 of 10 episodes, 19-25 px on most others; wrists 22-73 px |

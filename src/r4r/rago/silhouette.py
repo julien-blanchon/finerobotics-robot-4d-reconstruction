@@ -420,7 +420,7 @@ def _descend(
     turn = torch.zeros_like(centre0, requires_grad=True)
     move = torch.zeros_like(centre0, requires_grad=True)
     zoom = torch.zeros_like(focal0, requires_grad=True)
-    groups = [
+    groups: list[dict[str, object]] = [
         {"params": [turn], "lr": config.lr_rotation},
         {"params": [move], "lr": config.lr_position},
     ]
@@ -647,7 +647,11 @@ def scored(
         for k, mask in enumerate(episode.masks):
             size = mask.shape[:2]
             now = render(episode.world[k].double().numpy(), camera, focal, size, geoms)
-            both = now if episode.segmented else now | render(rest, camera, focal, size, geoms)
+            both = (
+                now
+                if episode.segmented
+                else np.maximum(now, render(rest, camera, focal, size, geoms))
+            )
             # Decimated meshes leave pinholes
             drawn.append(cv2.morphologyEx(both, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)))
     return score(stacked(episodes, config), pose, focal, drawn, config)

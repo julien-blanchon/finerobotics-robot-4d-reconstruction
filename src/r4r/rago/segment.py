@@ -54,7 +54,9 @@ def segmenter(prompt: str, device: str = "cuda") -> Callable[[np.ndarray], np.nd
     of SAM 3's instances for `prompt` (bf16)."""
 
     import torch
-    from transformers import Sam3Model, Sam3Processor
+
+    # Not an r4r dependency: the module runs in the SAM 3 environment
+    from transformers import Sam3Model, Sam3Processor  # type: ignore[pyrefly:missing-import]
 
     model = Sam3Model.from_pretrained(MODEL, torch_dtype=torch.bfloat16).to(device).eval()
     processor = Sam3Processor.from_pretrained(MODEL)

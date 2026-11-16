@@ -79,11 +79,15 @@ def _groups(root: Path) -> tuple[np.ndarray, list[str | None]]:
 
     opened = _root(root)
     matches = opened.priors.group_matches()
-    statistics = {s: opened.tables.episode_statistic(s) for s in {m.stat for m in matches.values()}}
+    stats = {m.stat for conditions in matches.values() for m in conditions}
+    statistics = {s: opened.tables.episode_statistic(s) for s in stats}
     episodes = next(iter(statistics.values()))[0]
     names = np.full(len(episodes), None, dtype=object)
-    for name, match in matches.items():  # file order: the first matching group takes it
-        names[np.equal(names, None) & match.matches(statistics[match.stat][1])] = name
+    for name, conditions in matches.items():  # file order: the first matching group takes it
+        inside = np.equal(names, None)
+        for match in conditions:
+            inside &= match.matches(statistics[match.stat][1])
+        names[inside] = name
     return episodes, names.tolist()
 
 

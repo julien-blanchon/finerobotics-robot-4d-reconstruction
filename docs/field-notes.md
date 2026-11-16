@@ -55,6 +55,16 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   `meta/camera.json` has per-episode hand-eye and K (ready with no solve); HRDexDB ships
   `C2R.npy` + camera parameters. Hand-eye names don't say which frame is which: render the
   transform and its inverse on the candidate link and pick by overlay.
+- **Large upstream MCAPs can be read without downloading them:** the footer gives the summary
+  (channels, chunk index); HTTP range requests then fetch one chunk (HIW-500: 3 GB files,
+  uncompressed chunks of ~0.8 MB). It showed the head is a side-by-side stereo eye, the wrists
+  D405s with per-episode intrinsics in small JSONs next to the MCAP, and an odometry topic the
+  delivery dropped.
+- **A "verified" calibration on one episode is not a dataset calibration:** lane00's head pose
+  from RealSource's hand-eye looked right on episode 0 at a 2.58 px rig median, but the drawn
+  jaws were 50-100 px off and the head pose changes between its 27 source repos. Project a
+  known point (the TCP between the jaws) over one episode per source repo before calling a head
+  held.
 - **Put a head camera on the link its calibration refers to** (e.g. the arm base): unrecorded
   head and lift joints then don't matter.
 - **Check recorded extrinsics over all episodes, not the first few:** AXIS re-places the camera
@@ -347,6 +357,13 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   with a free focal let it run to 354-608 px across RoboMIND2 agilex stations while the fit check
   passed; two full rigs agreed on 419 / 434 px (`--focal-std 0`). Read the station previews anyway:
   an unflagged station drew an arm where there was none.
+- **Humanoid wrist cameras that never see a modelled gripper can be placed on the robot's own
+  feet** (HIW-500, Dex1 grippers not modelled): triangulate the wrist camera's position from
+  clicks in the head view, take the orientation from the feet seen looking down, refine with
+  `r4r fit` on standing spans (legs still within 0.03 rad), and check on another episode's feet.
+  The scene-only search from scratch agreed in 1 of 4 episodes.
+- **No recorded root, no base pose:** write `observation.base.pose` as NaN (`available: false`)
+  and keep the cameras in the root frame of each frame; commanded velocities are not odometry.
 - **Stations:** a dataset can mix physical setups (abc: 19 stations by camera calibration
   signature). Calibrate per station.
 

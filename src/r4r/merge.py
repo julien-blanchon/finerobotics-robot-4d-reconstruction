@@ -301,7 +301,8 @@ def _write_info(
         "splits": {"train": f"0:{episodes}"},
         "chunks_size": CHUNKS_SIZE,
         "features": features,
-        "robot": {"mobile": layout["robot"]["mobile"]},
+        "robot": {"mobile": layout["robot"]["mobile"]}
+        | ({"base_pose": False} if layout["robot"].get("base_pose") is False else {}),
     }
     (target / "meta" / "info.json").write_text(json.dumps(out, indent=2) + "\n")
 

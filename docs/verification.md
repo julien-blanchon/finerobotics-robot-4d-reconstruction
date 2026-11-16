@@ -57,6 +57,8 @@ unless stated.
 | openneodata flexiv-rizon4 (1 station) | 412 | fast 444 / full 20.4k now | 0.4 / 0 | 10 fast | left_wrist (ignored) | — | ok |
 | realsource-world | 341 | fast | 0.4 / 0 | 10 fast | none | — | meshes on the wrist grippers. EE (`rs02_tool`, 2 episodes): jaw points on the pad tips open and closed in the hand views |
 | groot panda-omron-base | 273 | light | 100 / 0 | 10 light | none | — | ok |
+| hiw-500 (added 2026-11-16) | 378 | fast | 0.4 / 0 | 10 fast | none (base pose NaN by design, `robot.base_pose: false`) | — | head points on the arms (episodes 604, 11969, from the twin's fields); wrists checked on the feet separately. Known exception: the head is 20-50 px off in clothes washing (14.7 h) and one bedroom home. No EE columns (Dex1 not modelled) |
+| robocoin lane00-realman (added 2026-11-16, partial) | 154 | fast, all 3 cameras not calibrated | 0.2 / 0.25 | 10 fast | all 3 cameras (not calibrated) | — | head and wrists NaN; the former held head pose missed the grippers (`hiw-lane00/o/twin_l00.png`) and was removed |
 | groot r1-pro (3 of 18 roots) | 254 / 20 / 10 | fast | ~0 | 10 fast each | none | — | arm meshes on the arms. EE (`galaxea_r1_pro`, root 88b8…, 2 episodes): jaw points on the other arm's fingertips seen from each wrist; own fingertips at the wrist image edges |
 | agibot-world g2-cohort-02 / -03 | 198 / 6 | fast | ~0 | 10 fast | none | — | ok; EE as g2-cohort-01 (corrected description) |
 | molmobot rby1-open / pick-10 / pick-15.15 | 189 / 143 / 55 | fast | ~0 | 10 fast | none | cameras ≤ 0.04 cm, ≤ 0.015°; EE 0.1-0.2 mm (30.3 mm, 180° convention) | ok |

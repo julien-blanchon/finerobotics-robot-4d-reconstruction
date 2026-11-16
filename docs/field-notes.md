@@ -318,6 +318,13 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
 - **Humanoids:** a leg-joint range above 0.1 rad per episode separates standing from walking
   episodes (13–100% walking by dataset): calibrate on standing ones first. A head that never
   moves while standing anchors nothing: the head mount comes by eye and is held.
+- **One label, two robots:** split the episodes by per-episode statistics before anything else
+  (RoboMIND2 agilex: q99 of joint 3, Piper < 0.05, ARX > 0.5, nothing between) and give each group
+  its own description, joints and lag (`groups` in the priors; `r4r stations --group`).
+- **Hold a station camera's focal when one camera model serves every station:** `r4r station`
+  with a free focal let it run to 354-608 px across RoboMIND2 agilex stations while the fit check
+  passed; two full rigs agreed on 419 / 434 px (`--focal-std 0`). Read the station previews anyway:
+  an unflagged station drew an arm where there was none.
 - **Stations:** a dataset can mix physical setups (abc: 19 stations by camera calibration
   signature). Calibrate per station.
 

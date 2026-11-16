@@ -41,13 +41,13 @@ Clicks, targets and drawn points, one JSON per dataset:
 | openneodata arx5 (8 stations) | 660 | 7 (13) | 24.1 / 69.5 / 137 | 512×384 | 4.7 | +1 cm → 24.0 | fail (low confidence) | third view 16-25 px in no common direction (light solve per episode); one wrist 137 px |
 | g2-cohort-01 | 516 | 18 (12) | 29.6 / 85.2 / 148 | 512×320 / 410 / 422 | 5.8 | +4 cm → 26.9 | fail | top_head 41 px, hands 27, head fisheye 14; per episode (cart episodes 1696, 10102, 26517 and 5166 worst: problem 8) |
 | droid | 512 | 18 (2) | 13.4 / 86.6 / 109 | 320×180 | 4.2 | +3 cm → 12.9 | fail (% width) | 6 of 9 episodes 3-17 px; 29119 and 74644 (recorded calibration, not flagged) 80-110 px, 27915 (flagged, light solve) 57-86 px: exterior pose wrong per episode |
-| galaxea-open-world r1-lite | 484 | 11 (6) | 24.4 / 32.1 / 49.9 | 512×288 | 4.8 | −2 cm → 22.4 | fail | head views 23.5 px in mixed directions (parked episodes; no driving one sampled), wrists 32 |
+| galaxea-open-world r1-lite | 484 | 11 (6) | 24.4 / 32.1 / 49.9 → 20.5 / 37.2 / 49.9 (4 re-clicks, head pitch) | 512×288 | 4.0 | +1 cm → 20.7 (after) | fail | 4 of 8 head clicks were off the jaw tip (re-clicked: 21.0); head pitched 2.46° (description fix): head 18.6 px, 6 fresh held-out head clicks 16.0 → 12.4; wrists 32 (not worked on) |
 | flexiv-rizon4 (1 station) | 412 | 10 (0) | 50.4 / 70.1 / 72.1 | 512×384 | 9.8 | +10 cm → 11.6 | fail | all drawn 45-70 px above the fingertips, flange clicks 2-11 px: the description's gripper ~10 cm shorter than the real one |
 | hiw-500 | 378 | 10 (5) | 11.0 / 31.8 / 41.5 | head 256×192, wrists 512×384 | 4.3 | — | fail (% width) | flange point: head drawn 7-22 px above in 5 of 7 (≈ 26 px at 640), wrist views of the other arm 29-38 px low |
 | realsource-world | 341 | 15 (4) | 14.8 / 120 / 218 | 512×288 | 2.9 | +1 cm → 13.0 | fail (% width, borderline) | head 14.8 px (max 25); hand cameras 4 of 6 within 28 px, 2 at 181-218 px (18189, 20401: the per-episode hand record wrong) |
 | robomind2 agilex-5b28 Piper | 333 | 12 (3) | 59.8 / 96.9 / 205 | 512×384 | 11.7 | +6 cm → 38.9 | fail | drawn above the real jaws in front and wrist views at every station; 17882 ~200 px (held front camera off) |
 | g2-cohort-02 | 198 | 10 (5) | 20.0 / 38.3 / 43.1 | 512×320 / 410 / 422 | 3.9 | +6 cm → 11.6 | fail | mostly TCP depth (omnipicker_g2) |
-| rw-rl r1lite (5 datasets, pooled) | 165 | 10 (10) | 15.1 / 57 / 59 | 512×288 | 2.9 | per dataset, signs differ | fail (borderline) | top views 4-22 px, three outliers (tissue 403, plug 239 wrist, scan 1845) |
+| rw-rl r1lite (5 datasets, pooled) | 165 | 10 (10) | 15.1 / 57 / 59 → 14.1 / 50.2 / 58.8 (head pitch) | 512×288 | 2.8 | per dataset, signs differ | holds at the bar (borderline) | top views 5-16 px after the head pitch fix, outliers tissue 403 (49) and 1712 (31), plug 239 wrist (59) |
 | openneodata aloha | 157 | 7 (10) | 54.9 / 228 / 234 | 512×384 | 10.7 | +10 cm → 62.9 | fail | third view (light solve per episode) 45-68 px off on most; 2 clicks ~230 px |
 | robomind agilex-real | 59 | 16 (4) | 55.9 / 75.5 / 80.3 → 12.8 (10 scene clicks) | 512×384 | 10.9 | +6 cm → 42.0 | pass (scene view, 2026-11-16) | the front camera was 15° too pitched down (rig agx2); refitted from 33 other fingertip clicks on 11 episodes (`priors/onboarding/agilex__cobot_magic.md`, "Arm-side test"); wrist clicks not re-scored |
 | robomind ur5e-real | 36 | 11 (0) | 19.4 / 27.6 / 61.7 | 512×384 | 3.8 | +4 cm → 15.4 | fail | drawn 10-30 px above; part gripper length, rest per-session camera |
@@ -128,6 +128,21 @@ past the black wrist section, and the jaws on the real jaws. In the G2 hand view
 jaws now sit on the real ones instead of at the image edges. On flexiv, the Robotiq stand-in's
 tips are on the real gel fingertips. None of these descriptions is used by a simulated dataset:
 genie-1, g2a-simulation and xrobotwin keep their own. Their ground-truth checks are unchanged.
+
+**Galaxea R1 Lite, 2026-11-16** (`priors/onboarding/galaxea__r1_lite.md`, "Held-out diagnosis";
+42 one-time calibration clicks on 27 episodes of all 16 units, 6 fresh held-out clicks):
+- Four of the eight galaxea-open-world head clicks were on the D405 box, the wrist housing, a
+  held object or the camera, not on the jaw tip. Re-clicked (old values as `click_old`): 21.0 px.
+- The head stereo pair sits 2.46° more pitched down than the description says. Fitted on the
+  calibration clicks, the pitch agrees on disjoint halves (2.7° / 2.2°); yaw, focal, principal
+  point, joint offsets, arm base poses, gravity sag and TCP length do not hold out. Written as a
+  corrected description (`descriptions/galaxea__r1_lite/r1lite_head_pitch.urdf`) for all 19 R1
+  Lite priors files. galaxea-open-world 21.0 → 20.5 px (head 19.9 → 18.6; fresh head clicks
+  16.0 → 12.4); rw-rl pooled 15.1 → 14.1.
+- No per-unit pattern was shown (16 units, `source/raw_file_name`), and no lag. In paired
+  left/right clicks the stereo disparity matches on 10 of 15 frames; the remaining head error
+  is per frame (arm pose), mostly a few close-range frames. Wrist views of the other arm (32 px)
+  and the rw-rl-hil / lane03 sets were not clicked.
 
 **HSR (airoa-moma-5k), 2026-11-16.** Two causes, found with 42 fingertip clicks on 27 other
 episodes (`priors/onboarding/toyota__hsr.md`, "Held-out diagnosis"):

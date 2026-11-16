@@ -27,6 +27,50 @@ setting as priors everything that can be set that way, before any optimisation.
 
 Only then calibrate: the solver refines good priors; it does not rescue bad ones.
 
+## Toolbox
+
+What exists to get each quantity, what it costs, and where it is known to fail (2026-11-16).
+✅ in the library · 🧪 being tested (scratch or an agent branch) · ⬜ idea.
+
+**Robot model and state** (first: every camera inherits their errors)
+
+| tool | gives | notes |
+|---|---|---|
+| ✅ `r4r inspect`, `r4r preview` (`.png` / `.mp4`) | the description at the recorded joints over every camera, from the priors only | the agent's first look: joint signs, units, lag, focal, mounts |
+| ✅ corrected descriptions `priors/descriptions/<embodiment>/` | missing parts, gripper length and rotation, mounts, link lengths | the most frequent real-data fix (G1/G2 wrist sections, Franka hand, OpenNeoData gripper, HSR fingertips) |
+| ✅ priors `joints` (map, offsets, clip), `kinematics` (fitted offsets), groups (`groups.<name>.match`) | joint mapping, encoder zeros, per-episode-group robots | joint offsets only when disjoint fits agree |
+| ✅ `r4r fit --shifts` | video/state lag | |
+| ✅ recorded EE pose vs FK | checks the joint map and units | agreement shows consistency with the vendor model, not with reality |
+| 🧪 motion-agreement check | state/video mismatch per episode (wrong or desynchronised states) | G1: ~10 % of episodes |
+
+**Camera pose and intrinsics**
+
+| tool | gives | scope | notes |
+|---|---|---|---|
+| ✅ recorded values (features, upstream calibration files, `world_anchor` compute-on-load) | pose, intrinsics | as recorded | check them: G1 hand extrinsics and DROID exteriors were wrong per episode |
+| ✅ `r4r focal` (ARROW) | focal estimate | per camera | ~20 % off on several head cameras; recorded intrinsics first |
+| ✅ `r4r rig` (kinematic bundle on scene tracks, RoMa links) | moving mounts, focals, static cameras, arm bases | dataset or station | residuals do not prove the pose (static cameras far off at < 1 px); `--picks`, `--picks-weight`, `refine` |
+| ✅ `r4r fit` | one camera or mount on a few episodes | dataset | |
+| ✅ light route (`r4r reconstruct`, episode scope) | a static camera per episode from wrist-camera matches | episode | lands 2-24 cm off when the static camera sees the robot only at the edges |
+| ✅ `r4r stations` (`--per-camera`), per-camera setup keys `station.<camera>` | which episodes share a placement | dataset | thumbnail distance: confuses background changes with camera moves |
+| ✅ `r4r station` (`--seeds`, `--only`, `--focal-std`) | a station's camera from neighbour stations | station | works when stations are close; 1/8 in leave-one-out on robocoin |
+| ✅ clicks → `r4r rig --picks` / hand PnP | robot points in a frame | once per dataset or a few setups | never per episode or per setup at scale |
+| ✅ `r4r picks` (RoMa v2 keypoint transfer) | clicked points carried from a calibrated frame to new episodes, no new clicks | per setup | ~5.6 cm median, ~20 % failures on SynGrasp; best for small scene changes |
+| 🧪 silhouette refinement (SAM 3 masks + projected mesh, `sam3-overlay` env) | a per-setup static camera | setup | lane02 43 → 23 px, 5b28 46 → 19 px; fails on clutter; meshes in the solve only here |
+| 🧪 DINO part keypoints | per-episode pixel error and a small rotation correction | episode | target: G1 head yaw, HSR per-robot head |
+| 🧪 geometric setup clustering (DINO + homography on background) | placements regardless of background | dataset | to replace thumbnail distance |
+| 🧪 rest-pose template | camera shift per period from the robot at rest | period | HABIT: 139 periods |
+
+**Validation** (an episode is right only when one of these says so)
+
+| tool | measures | notes |
+|---|---|---|
+| ✅ ground truth (sims, recorded poses) | cm / deg | `docs/verification.md` |
+| ✅ held-out clicks (`python -m r4r.viz.clicks sample / sheet / score / redraw`) | px error of drawn fingertips | the bar: median ≤ ~15 px at 512 px on ~10 held-out episodes; ±5-10 px click noise; `redraw` re-scores old clicks on a new reconstruction |
+| ✅ overlay videos | visual check | read several episodes; they overstated accuracy when read alone |
+| ⬜ RoMa-transferred validation clicks | click once on a validated frame, carry the points to other episodes of the setup | cheaper validation per setup; needs a transfer-failure check |
+| 🧪 automatic scores (motion agreement, edge alignment, mask IoU, DINO robot features) | per-episode error estimate without clicks | to be calibrated against the click sets before use |
+
 ## Step by step
 
 | # | step | command | done when |
@@ -41,6 +85,7 @@ Only then calibrate: the solver refines good priors; it does not rescue bad ones
 | 7 | **overlay** | `r4r overlay sol.pt check.png`, `… episode.mp4 --episode 0` | robot on the real one, every camera, several episodes |
 | 8 | write | `r4r rig … --write`, `r4r export <dataset> robot.xml` | priors and record committed; metadata bugs in `priors/ISSUES.md` |
 | 9 | every episode | `r4r reconstruct <dataset> --plan`, then `r4r reconstruct <dataset> out/ [--shard i/n]` | the plan says fast/light for (nearly) every episode; one parquet per shard, route and check per episode in its metadata |
+| 10 | check against the video | `r4r check <dataset> out/ [--episodes …]`, then `r4r merge` | few episodes flagged out of sync; read the overlay of each flagged one and of the highest camera error estimates ([below](#automatic-checks-r4r-check)) |
 
 ### Draft priors
 
@@ -312,6 +357,26 @@ episodes.
 
 ⬜ `r4r report`: per-camera residuals, inlier share, agreement across episodes, held-out
 episodes, with the overlay.
+
+### Automatic checks: `r4r check`
+
+After `r4r reconstruct`, `r4r check <dataset> out/` compares every episode with its own video,
+independently of the solve (CPU, ~0.2–2 s per episode; `src/r4r/checks/`). It writes
+`checks.parquet` beside the shards, and `r4r merge` copies it into `meta/r4r.json`.
+
+- **Sync** (flag). For 16 frame pairs, it compares how much the image changes with how much the
+  state says the robot (static camera) or the camera itself (wrist, head) moves. `ρ` is the
+  rank correlation of the two. An episode whose mean `ρ` over its cameras is below 0.35 is flagged: its state does
+  not drive its video. This happens with a state from another episode, streams out of step, or
+  a wrong lag. Static cameras on fixed arms separate cleanly; head cameras on humanoids and
+  mobile bases less so.
+- **Camera error estimate** (reported, not a flag). It is the 2D shift that best puts the drawn
+  robot's outline on the image's edges, or its moving silhouette on the image change. It finds
+  a camera 30+ px off with AUC ~0.85 against clicked fingertips. It misses errors that sit only
+  in the end effector (gripper length, jaw model). Use it to rank episodes for a look, not as
+  a verdict, and never as a correction: the shift does not reduce held-out click error.
+
+Numbers and what failed: [verification](verification.md#automatic-per-episode-checks-2026-11-16).
 
 ## Lessons so far
 

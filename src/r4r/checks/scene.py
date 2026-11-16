@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     import mujoco
@@ -154,8 +155,11 @@ def body_poses(dataset: str, number: int) -> tuple[np.ndarray, list[Surface]]:
     return world.detach().cpu().double().numpy(), found
 
 
-def scenes_from_shard(shard: Path, episodes: set[int] | None = None) -> list[Scene]:
-    """The scenes of a shard's episodes (all, or those in `episodes`)."""
+def scenes_from_shard(
+    shard: Path, episodes: set[int] | None = None, dataset: str | None = None
+) -> Iterator[Scene]:
+    """The scenes of a shard's episodes (all, or those in `episodes`) of `dataset` (default:
+    named after the shard's directories, `<out>/<family>/<name>/shard-k.parquet`)."""
 
     import pyarrow.parquet as pq
 
@@ -163,25 +167,21 @@ def scenes_from_shard(shard: Path, episodes: set[int] | None = None) -> list[Sce
 
     table = pq.read_table(shard)
     layout = json.loads(table.schema.metadata[LAYOUT_KEY])
-    dataset = _dataset_of(shard)
+    dataset = dataset or _dataset_of(shard)
     index = np.array(table.column("episode_index").to_pylist())
-    out = []
     for number in dict.fromkeys(index.tolist()):
         if episodes is not None and number not in episodes:
             continue
         part = table.take(np.flatnonzero(index == number))
         world, found = body_poses(dataset, number)
-        out.append(
-            Scene(
-                dataset=dataset,
-                episode=int(number),
-                frames=np.array(part.column("frame_index").to_pylist()),
-                views=views_from_table(part, layout),
-                world_from_body=world,
-                surfaces=found,
-            )
+        yield Scene(
+            dataset=dataset,
+            episode=int(number),
+            frames=np.array(part.column("frame_index").to_pylist()),
+            views=views_from_table(part, layout),
+            world_from_body=world,
+            surfaces=found,
         )
-    return out
 
 
 def _dataset_of(shard: Path) -> str:

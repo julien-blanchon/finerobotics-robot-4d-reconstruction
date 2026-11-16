@@ -111,7 +111,10 @@ def best_shift(
 
 
 def check(
-    scene: Scene, view: View, images: dict[int, np.ndarray], config: ShiftConfig
+    scene: Scene,
+    view: View,
+    images: dict[int, np.ndarray],
+    config: ShiftConfig,
 ) -> ShiftResult:
     """The edge check of one view over the frames `images` (timestep -> RGB frame)."""
 

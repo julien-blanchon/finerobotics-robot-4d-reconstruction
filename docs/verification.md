@@ -273,6 +273,27 @@ the body silhouettes do not see. The descriptions' meshes also differ from the r
 (cables, covers, grippers). On the simulated datasets, where the drawn bodies are exact, the
 same code reaches 2-5 px.
 
+**Where the part correction does help: G1 top_head, a per-episode head rotation.** The
+remaining top_head error of g1-cohort-04 is a head orientation that changes per episode (G1
+arm kinematics, above). The test used 35 episodes: 27 with the training jaw-tip clicks (98
+tips) and 8 with held-out clicks, leaving out the six state/video-mismatch episodes and 13647.
+The DINO part check used 12 frames per episode and no click. Its pose fit was run in two
+forms: rotation only (translation held to 2 mm) and all 6 DoF.
+
+| clicks | episodes | before: median / p90 / ≤ 15 px | rotation only | 6 DoF |
+|---|---|---|---|---|
+| training tips (not used by the check) | 27 (98 tips) | 15.6 / 35.8 / 47 % | 12.7 / 26.3 / 62 % | 11.8 / 26.5 / 69 % |
+| held-out | 8 | 15.6 / 23.8 / 38 % | 6.1 / 20.0 / 75 % | 10.5 / 22.8 / 62 % |
+
+Per episode, the rotation fit lowers the median by more than 5 px on 16 of 35 episodes and
+raises it by more than 5 px on 1 (158531, 27.6 → 31.3). Its rotations are 2.6° (median) and
+5.4° at most, about the yaw spread the rig refinement found. The error *estimate* does not sort
+these episodes (AUC 0.53), so the correction can't be gated on it. It would run on every
+episode of such a dataset. On HSR (airoa-moma-5k, 8 held-out heads, 6 DoF), it fixed 3
+episodes (16 → 10, 22 → 4, 20 → 8 px), left 4 unchanged and made 1 worse (39 → 52); the
+median stayed at ~37 px. Script: `code/g1gather.py` and `code/g1corr.py` (results
+`res/g1corr.parquet`).
+
 **Cost** (if it were used): DINOv2-S features cost 0.3 ms per frame on a GH200 (batch 64, 448
 px; 0.6 ms at 644 px). 100k episodes × 2 cameras × 8 frames come to about 8 GPU-minutes. The
 CPU side costs ~0.3 s per camera and episode for 8 body maps and shifts, plus the frame decode.

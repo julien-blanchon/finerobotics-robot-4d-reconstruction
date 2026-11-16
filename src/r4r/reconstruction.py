@@ -224,6 +224,7 @@ def dataset_layout(
         effectors=effectors(robot, priors),
         joints=names,
         mobile=priors.base == "mobile" or moving_base(robot) is not None,
+        base_pose=priors.base != "mobile" or moving_base(robot) is not None,
         action=joint_action(root),
         mapping=state_mapping(names, joints, {} if fitted is None else fitted.offsets),
         lag={

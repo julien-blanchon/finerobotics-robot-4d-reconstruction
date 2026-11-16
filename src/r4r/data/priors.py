@@ -29,7 +29,9 @@ the features' columns concatenated, e.g. leg joints recorded apart from the arms
 absolute path, or relative to `priors/`; `r4r.data.tables.SideTable`), read like the
 dataset's own features, e.g. by `state_feature`: `{"side_table":
 "/e/scratch/.../panda-omron-mobile.side", "state_feature": ["observation.state",
-"upstream.arm_qpos"]}` with `joints` indexing the concatenated columns.
+"upstream.arm_qpos"]}` with `joints` indexing the concatenated columns. `ik` says where a
+dataset without joint states records each arm's end-effector pose; `r4r ik` writes the joints
+inverse kinematics recovers into the side table (`r4r.ik`).
 `description` replaces the delivered robot description by a corrected one kept under
 `priors/` (fixes to the URDF/MJCF itself: wrong joints, frames, meshes). `joints` add or
 replace (by URDF joint name) entries of the state mapping; `removed_joints`
@@ -370,6 +372,8 @@ class DatasetPriors:
     state_feature: str | tuple[str, ...] | None = None  # several: concatenated
     # Features kept outside the delivery (`r4r.data.tables.SideTable`): a directory
     side_table: str | None = None
+    # Recorded end-effector poses that `r4r ik` turns into joint states (`r4r.ik`): per arm
+    ik: dict[str, JsonObject] = field(default_factory=dict)
     # Kinematic refinement in `r4r rig` (absent: held)
     kinematics: KinematicsPrior | None = None
     # Named points on the robot (body origins are points without being named here)
@@ -548,6 +552,7 @@ def _parsed(raw: JsonObject, path: str) -> DatasetPriors:
         description=raw.get("description"),
         state_feature=_feature(raw.get("state_feature")),
         side_table=raw.get("side_table"),
+        ik=raw.get("ik", {}),
         kinematics=_kinematics(raw.get("kinematics"), str(path)),
         robot_points=_robot_points(raw.get("robot_points", {}), str(path)),
         stations=raw.get("stations", {}),

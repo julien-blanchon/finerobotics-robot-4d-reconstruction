@@ -249,6 +249,8 @@ class SideTable:
             wanted = ["episode_index", "frame_index", *columns]
             table = self._open[1].read_row_groups(groups, columns=wanted)
             table = table.filter(pa.array(table["episode_index"].to_numpy() == episode))
+            if not table.num_rows:  # row groups spanning the episode without holding it
+                continue
             table = table.sort_by("frame_index")
             return {name: _column(table[name]) for name in columns}
         raise IndexError(f"{self.directory}: no episode {episode}")

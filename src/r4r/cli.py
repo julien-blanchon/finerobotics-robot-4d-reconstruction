@@ -2031,6 +2031,91 @@ class Merge:
         print(f"wrote {merge(dataset_root(self.dataset), self.reconstruction, self.dest, config)}")
 
 
+@dataclass(frozen=True, slots=True)
+class Ik:
+    """Joint states from recorded end-effector poses (the priors' `ik`, `r4r.ik`): one side
+    table file per data file of the root, written into the priors' `side_table` directory
+    (resumable). `--check N` solves the first data file's first N episodes and prints the
+    errors, writing nothing."""
+
+    dataset: tyro.conf.Positional[str]
+    # This process's share of the data files, `i/n`
+    files: str = "0/1"
+    check: int = 0
+    threads: int = 8
+
+    def run(self) -> None:
+        import time
+
+        import numpy as np
+        import torch
+
+        from r4r.data.lerobot import _description, robot_record
+        from r4r.data.priors import load_priors
+        from r4r.ik import arm_model, episode_states, ik_arms, solve_episodes, write_side_file
+        from r4r.rago.ik import IkConfig
+
+        torch.set_num_threads(self.threads)
+        root = dataset_root(self.dataset)
+        priors = load_priors(root)
+        robot = robot_record(root)
+        arms = ik_arms(priors.ik)
+        description = _description(root, robot, priors)
+        models = {name: arm_model(description, arm) for name, arm in arms.items()}
+        config = IkConfig()
+        paths = sorted((root / "data").glob("*/*.parquet"))
+        if self.check:
+            for name, arm in arms.items():
+                episodes, states = episode_states(paths[0], arm.feature)
+                solved = list(solve_episodes(models[name], arm, states[: self.check], config))
+                errors = np.concatenate([e for _, e in solved])
+                joints = np.concatenate([j for j, _ in solved])
+                print(f"{name}: {len(solved)} episodes, {len(errors)} frames")
+                for label, column in (("position mm", 0), ("rotation deg", 1)):
+                    p50, p90, p99 = np.percentile(errors[:, column], [50, 90, 99])
+                    print(
+                        f"  {label}: median {p50:.3f}, p90 {p90:.3f}, p99 {p99:.3f}, "
+                        f"max {errors[:, column].max():.3f}"
+                    )
+                steps = np.concatenate([np.abs(np.diff(j, axis=0)).max(1) for j, _ in solved])
+                print(
+                    f"  largest joint step per frame: median {np.median(steps):.4f}, "
+                    f"max {steps.max():.4f} rad"
+                )
+                for joint, low, high in zip(arm.joints, joints.min(0), joints.max(0), strict=True):
+                    print(f"  {joint}: {low:+.3f} .. {high:+.3f}")
+            return
+        out = priors.side_directory
+        assert out is not None, "the priors need a `side_table` directory to write into"
+        out.mkdir(parents=True, exist_ok=True)
+        share, count = (int(v) for v in self.files.split("/"))
+        for path in paths[share::count]:
+            target = out / f"{path.parent.name}-{path.stem}.parquet"
+            if target.exists():
+                continue
+            start = time.time()
+            columns: dict[str, list[np.ndarray]] = {}
+            episodes, lengths = None, None
+            for name, arm in arms.items():
+                found, states = episode_states(path, arm.feature)
+                solved = list(solve_episodes(models[name], arm, states, config))
+                columns[f"ik.{name}"] = [j for j, _ in solved]
+                columns[f"ik.{name}.error"] = [e for _, e in solved]
+                episodes, lengths = found, [len(s) for s in states]
+            assert episodes is not None and lengths is not None
+            write_side_file(target, episodes, lengths, columns)
+            worst = {
+                n: float(np.concatenate(v)[:, 0].max())
+                for n, v in columns.items()
+                if n.endswith(".error")
+            }
+            print(
+                f"{target.name}: {len(episodes)} episodes in {time.time() - start:.0f} s, "
+                f"max position error (mm) {worst}",
+                flush=True,
+            )
+
+
 @functools.cache
 def _matcher(device: str) -> RoMaV2:
     """RoMa v2, loaded once per process and device."""
@@ -2056,6 +2141,7 @@ type Command = (
     | Annotated[Station, tyro.conf.subcommand("station")]
     | Annotated[Silhouette, tyro.conf.subcommand("silhouette")]
     | Annotated[Merge, tyro.conf.subcommand("merge")]
+    | Annotated[Ik, tyro.conf.subcommand("ik")]
     | Annotated[Check, tyro.conf.subcommand("check")]
 )
 

@@ -150,6 +150,7 @@ Python 3.13. A dataset is named by its root: an absolute path, or a path relativ
 | `overlay` | Draw the robot with a saved solution over every camera (PNG / MP4). |
 | `export` | Write the description (MJCF) with every known camera and range. |
 | `focal` | Draft a focal length with ARROW when none is recorded (GPU). |
+| `ik` | Joint states from recorded end-effector poses (priors `ik`), into a side table. |
 | `reconstruct` | Write every episode's per-frame output (sharded parquet); `--plan` costs it first. |
 | `merge` | Turn reconstruct shards into a LeRobot v3 dataset (twin or full copy). |
 

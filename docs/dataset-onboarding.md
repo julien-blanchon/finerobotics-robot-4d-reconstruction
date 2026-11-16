@@ -42,6 +42,7 @@ What exists to get each quantity, what it costs, and where it is known to fail (
 | ✅ family-level priors (`priors/<family>/family.json`, types matched on `meta/info.json`) | one priors file per robot type for families of many single-episode roots | RoboBrain-X0; [checklist](#checklist) |
 | ✅ `r4r fit --shifts` | video/state lag | |
 | ✅ recorded EE pose vs FK | checks the joint map and units | agreement shows consistency with the vendor model, not with reality |
+| ✅ `r4r ik` (priors `ik`, `r4r.ik`) | joint states from a recorded end-effector pose, for datasets with no joint state: per-frame damped least squares, warm-started, redundancy pulled to a rest pose; written as a side table | the record's frame and tool convention must be found first (upstream code, a known start pose); exact on 6-DoF arms; HandsOn's wrists exceed the description's limits (`limits: false`) |
 | 🧪 motion-agreement check | state/video mismatch per episode (wrong or desynchronised states) | G1: ~10 % of episodes |
 
 **Camera pose and intrinsics**
@@ -134,6 +135,7 @@ cameras need clicks is not solved for those cameras.
 |---|---|---|
 | joint mapping | varying state columns that drive nothing → a missing joint | `joints`: index, URDF joint, `sign`, optional `from`/`to`, optional `clip` [lo, hi] (a gripper motor closing past finger contact on a spring: HSR) |
 | signs, offsets | joints outside their limits → wrong sign, offset or unit | `sign`, a `from`/`to` range |
+| no joint state, only the end-effector pose | the record's frame (a body of the description), the recorded EE frame on a body (`tool`), the rotation kind (`rpy`, quaternion, rotation vector, fixed), the arm's joints and a rest pose; `r4r ik <dataset> --check 200` prints the residual, then `r4r ik <dataset>` writes the side table | `ik`, `side_table`, `state_feature: ["observation.state", "ik.<arm>"]`, `joints` indexing past the delivered columns (`r4r.ik` module doc) |
 | dropped features | joint states (or other columns) the delivery dropped but the upstream keeps: build a side table (sharded parquet, `episode_index`, `frame_index`, the feature; a row group per episode) outside the delivery | `side_table` (a directory), then `state_feature` lists the side feature after the delivered one and `joints` index the concatenation (nvidia-kitchen-demos: `priors/nvidia-kitchen-demos/build_side_table.py`) |
 | units | degrees converted automatically; `normalised_percent` needs a range per joint | `joints[].from/to` |
 | description | wrong gripper, wrong arm, wrong arm mount or layout, link lengths, single-arm file for bimanual data, unreadable meshes; none delivered (no `meta/robot.json`: robocasa365, robotwin-unified) | `description`: corrected copy under `priors/descriptions/<embodiment>/` (a simulator's own URDF when there is one). A prior like any other: the agent fixes it itself and iterates until the overlay is right, never leaves it as a blocker. Without `robot.json` the state is `observation.state` and every joint comes from the priors' `joints` |

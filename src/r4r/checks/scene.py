@@ -24,8 +24,6 @@ if TYPE_CHECKING:
 
     from r4r.viz.overlay import Surface
 
-# Links above a tip that the end-effector region keeps (`Scene.distal`)
-DISTAL_DEPTH = 2
 # Triangles kept per geom (a random subset beyond): enough to keep the silhouette closed
 MAX_FACES = 4000
 
@@ -58,31 +56,6 @@ class Scene:
     views: dict[str, View]
     world_from_body: np.ndarray
     surfaces: list[Surface]
-    # Each body's parent (MuJoCo order, body 0 the world)
-    parents: tuple[int, ...] = ()
-
-    def distal(self, depth: int = DISTAL_DEPTH) -> set[int]:
-        """The end-effector region: every body with a surface within `depth` links above a
-        drawn body that has no drawn descendant (grippers, hands, fingers)."""
-
-        drawn = {b for b, _, _ in self.surfaces}
-        ancestors: dict[int, set[int]] = {}
-        for body in drawn:
-            up, parent = set(), self.parents[body]
-            while parent > 0:
-                up.add(parent)
-                parent = self.parents[parent]
-            ancestors[body] = up
-        tips = [b for b in drawn if not any(b in ancestors[o] for o in drawn)]
-        out = set()
-        for tip in tips:
-            body = tip
-            for _ in range(depth + 1):
-                out.add(body)
-                body = self.parents[body]
-                if body <= 0:
-                    break
-        return out & drawn
 
 
 def _matrix(pose: np.ndarray) -> np.ndarray:
@@ -161,10 +134,9 @@ def _surfaces(path: Path, mounts: tuple, bodies: tuple, names: tuple[str, ...]) 
     return out
 
 
-def body_poses(dataset: str, number: int) -> tuple[np.ndarray, list[Surface], tuple[int, ...]]:
+def body_poses(dataset: str, number: int) -> tuple[np.ndarray, list[Surface]]:
     """`world_from_body [T, L, 4, 4]` of an episode in its episode frame (forward kinematics
-    with the priors' corrected kinematics and recorded base motion), its surfaces and the
-    bodies' parents."""
+    with the priors' corrected kinematics and recorded base motion) and its surfaces."""
 
     from r4r.cli import _prepare_rig
     from r4r.geometry import se3
@@ -180,7 +152,7 @@ def body_poses(dataset: str, number: int) -> tuple[np.ndarray, list[Surface], tu
     loaded = rig.loaded[0]
     mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in rig.streams)
     found = _surfaces(loaded.robot, mounts, body_mounts(loaded.priors), rig.robot.body_names)
-    return world.detach().cpu().double().numpy(), found, rig.robot.body_parent
+    return world.detach().cpu().double().numpy(), found
 
 
 def scenes_from_shard(
@@ -201,7 +173,7 @@ def scenes_from_shard(
         if episodes is not None and number not in episodes:
             continue
         part = table.take(np.flatnonzero(index == number))
-        world, found, parents = body_poses(dataset, number)
+        world, found = body_poses(dataset, number)
         yield Scene(
             dataset=dataset,
             episode=int(number),
@@ -209,7 +181,6 @@ def scenes_from_shard(
             views=views_from_table(part, layout),
             world_from_body=world,
             surfaces=found,
-            parents=parents,
         )
 
 

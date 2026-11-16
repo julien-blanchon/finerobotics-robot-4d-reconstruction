@@ -142,6 +142,39 @@ genie-1, g2a-simulation and xrobotwin keep their own. Their ground-truth checks 
 (~9 h, 11.6 px) and openneodata ur5e's station (~1 h, 10.3 px) join lane103 (62 h) and
 g2-cohort-03 (6 h, 7.4 px): about 276 h. robomind ur5e-real is at the line (15.6 px).
 
+**YAM wrist mounts and station rigs (abc-130k, molmoact2-yam; 2026-11-16, evening).** Re-scored
+with `redraw` on the same clicks, plus a second held-out wrist set per abc dataset (other-arm
+fingertips in wrist views of 24 (848) / 20 (640) new random episodes, none used by a rig;
+`/e/scratch/reformo/blanchon1/r4r-cache/onboarding/yam/w3/own/ho848.json`, `ho640.json`).
+
+Findings:
+- *Station rigs were not reaching reconstruct.* The light route runs with the priors only:
+  abc-848 had no station blocks except 1 and 6, and the rigs' fitted joint offsets (wrist
+  joints 2-5 deg) were reverted from the dataset level because they are per station. Priors
+  stations can now hold `kinematics` (`offsets`, `time_offset`) and `r4r rig --write` writes
+  there. With every abc-848 station rigged and written (0-15), the top view went 14.1 → 11.0 px.
+- *Own fingertips do not pin a D405 wrist mount.* The jaw tips lie at one depth (~13 cm), so a
+  rotation of the camera and a shift of ~2 cm give the same tips: a rotation fitted to the tips
+  alone (residual 6-9 px) made the other arm worse (46 → 50 px). A wrist-only rig (top camera
+  ignored, no free body: hand-eye of the moving camera in a static scene) pins the rotation but
+  not the translation (it moved the camera 2-5 cm and drew the jaws far too large). Taken
+  together, hand-eye rotation + tip translation, the 848 wrists improved.
+- *The other arm stays ~28 px off in the wrist views.* Per-episode right base (light route,
+  3 cm / 4 deg) and per-episode wrist mounts (1.5 cm / 5 deg) change it by ±3 px; the errors
+  point in different directions per episode. Own-tip clicks also move by ±8 px between
+  episodes of one station (cameras re-seated). Click noise on the other arm's fingertip in
+  oblique wrist views is ~10 px.
+- *Description check (fingertip length, gripper roll).* The top-view clicks' best TCP shift is
+  0 to +3 cm (no length change); the gripper roll (joint 6 zero) is now applied per station from
+  the rigs; the open jaws in the 848 wrist views are ~7 % narrower than drawn (opening or
+  camera distance, not separable from the tips). No description change.
+
+| dataset | set | before (median px: all / top / wrist) | after | change |
+|---|---|---|---|---|
+| abc-848x480 | original 19 clicks | 17.0 / 14.1 / 46.5 | 13.4 / 11.0 / 35.7 | hand-eye/tip wrist mounts (dataset level), 16 station rigs written (focals, right base, joint and time offsets) |
+| abc-848x480 | + 12 new wrist clicks (31) | 23.9 / 14.1 / 39.9 | 20.2 / 11.0 / 28.2 | same |
+| molmoact2-yam | original 10 clicks | 35.6 / 25.2 / 114 | unchanged (35.6) | hand-eye mounts with a free focal (384 / 422 px vs the inferred 262.8) fit the own tips (3 px) but put the other arm 215 px off: not written |
+
 
 ## Method
 

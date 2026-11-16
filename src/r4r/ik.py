@@ -50,7 +50,6 @@ from r4r.rago.kinematics import forward_kinematics
 from r4r.rago.robot import compile_model, load_robot
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
 
     from torch import Tensor
 
@@ -226,12 +225,16 @@ def arm_model(description: Path, arm: IkArm) -> ArmModel:
 
 def solve_episodes(
     model: ArmModel, arm: IkArm, states: list[Tensor[[int, int]]], config: IkConfig
-) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """Per episode (its state rows `[T, n]`): the joints `[T, J]` and errors `[T, 2]` (mm,
-    deg), solved in batches of `BATCH` episodes."""
+    deg), in the order of `states`. Episodes are batched by length (`BATCH` at a time): a
+    batch runs as many frames as its longest episode."""
 
-    for start in range(0, len(states), BATCH):
-        batch = states[start : start + BATCH]
+    order = sorted(range(len(states)), key=lambda i: len(states[i]))
+    out: list[tuple[np.ndarray, np.ndarray]] = [None] * len(states)  # type: ignore[list-item]
+    for start in range(0, len(order), BATCH):
+        members = order[start : start + BATCH]
+        batch = [states[i] for i in members]
         lengths = torch.tensor([len(s) for s in batch])
         frames = int(lengths.max())
         targets = torch.eye(4, dtype=torch.float64).repeat(len(batch), frames, 1, 1)
@@ -240,7 +243,7 @@ def solve_episodes(
             targets[b, : len(state)] = poses
             targets[b, len(state) :] = poses[-1]
         solution = solve_ik(model.robot, model.chain, targets, lengths, config)
-        for b, length in enumerate(lengths.tolist()):
+        for b, (index, length) in enumerate(zip(members, lengths.tolist(), strict=True)):
             joints = solution.joints[b, :length].numpy().astype(np.float32)
             error = torch.stack(
                 (
@@ -249,7 +252,8 @@ def solve_episodes(
                 ),
                 1,
             )
-            yield joints, error.numpy().astype(np.float32)
+            out[index] = (joints, error.numpy().astype(np.float32))
+    return out
 
 
 def episode_states(path: Path, feature: str) -> tuple[np.ndarray, list[Tensor[[int, int]]]]:

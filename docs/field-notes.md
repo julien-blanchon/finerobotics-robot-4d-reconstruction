@@ -218,6 +218,12 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   frequent start pose isn't always the rest pose (Koch starts stretched out): check the images.
 - **Comparing two descriptions:** fit an affine joint map from one to the other; a few mm of
   residual means the same kinematics (SO-100 vs SO-101: 7 mm).
+- **"No joint states" may only mean the conversion dropped them:** nvidia-kitchen-demos keeps
+  robosuite's flattened MuJoCo state per episode upstream (`extras/episode_*/states.npz`: time,
+  qpos, qvel; the robot's joints are the first qpos) and the camera configs in `ep_meta.json`.
+  The arm joints became a side table (57k episodes fetched into memory in ~1 h, 1.8 GB in 58
+  parquet files, no per-episode files) checked per episode against the delivered end-effector
+  pose (0.000 mm). The simulator then gives ground truth for every camera.
 - **States may be commanded, not measured** (xrobotwin). Or absent: many Open X-Embodiment
   sets record only the end-effector pose. With no joint states there is no FK, so blocked.
 

@@ -66,7 +66,8 @@ def _root(root: Path) -> _Root:
     """A dataset root opened once per process (episodes of a run reuse its reads)."""
 
     robot = json.loads((root / "meta" / "robot.json").read_text())
-    return _Root(LeRobotTables(root), robot, load_priors(root))
+    priors = load_priors(root)
+    return _Root(LeRobotTables(root, side=priors.side_directory), robot, priors)
 
 
 @functools.cache
@@ -109,6 +110,12 @@ def episode_count(root: Path) -> int:
     """How many episodes the dataset root holds (`meta/info.json`)."""
 
     return _root(root).tables.total_episodes
+
+
+def dataset_features(root: Path) -> JsonObject:
+    """The root's features (`meta/info.json`) with those of its priors' side table."""
+
+    return _root(root).tables.features
 
 
 def camera_names(root: Path) -> tuple[tuple[str, ...], frozenset[str]]:

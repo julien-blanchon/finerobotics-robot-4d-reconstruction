@@ -222,3 +222,4 @@ r4r merge <dataset> out/ dest/ --full     # merged copy: dest/<dataset>
 | | cameras vs `extrinsic_cv` (camera-from-world) through the recorded base | 0.05–0.16 mm, ≤ 0.014° median |
 | | left TCP vs `tcp_pose` (base frame, w-first) | a constant 29.8 mm along the approach axis (the record's TCP sits at the pad centre, ours at the fingertips), axes turned 180° |
 | InternData-M1 franka-robotiq (5 episodes, light route) | EE vs `publisher.state.eef_position` (= FK(`panda_link8`)) | ours − 0.1493 m z: 1·10⁻⁵ mm; orientation a constant 45° turn about the flange axis (spread 5·10⁻⁶ °) |
+| nvidia-kitchen-demos panda-omron-mobile (12 episodes, fast route, mobile) | cameras vs MuJoCo FK of the upstream model and `cam_configs` at the recorded qpos (arm joints from the side table) | ≤ 0.0002 mm, 0.00003 °; base ≤ 0.0002 mm over drives up to 3.4 m |

@@ -88,6 +88,7 @@ cameras need clicks is not solved for those cameras.
 |---|---|---|
 | joint mapping | varying state columns that drive nothing → a missing joint | `joints`: index, URDF joint, `sign`, optional `from`/`to` |
 | signs, offsets | joints outside their limits → wrong sign, offset or unit | `sign`, a `from`/`to` range |
+| dropped features | joint states (or other columns) the delivery dropped but the upstream keeps: build a side table (sharded parquet, `episode_index`, `frame_index`, the feature; a row group per episode) outside the delivery | `side_table` (a directory), then `state_feature` lists the side feature after the delivered one and `joints` index the concatenation (nvidia-kitchen-demos: `priors/nvidia-kitchen-demos/build_side_table.py`) |
 | units | degrees converted automatically; `normalised_percent` needs a range per joint | `joints[].from/to` |
 | description | wrong gripper, wrong arm, wrong arm mount or layout, link lengths, single-arm file for bimanual data, unreadable meshes | `description`: corrected copy under `priors/descriptions/<embodiment>/`. A prior like any other: the agent fixes it itself and iterates until the overlay is right, never leaves it as a blocker |
 | timing | video/state lag (`r4r fit --shifts`); sub-frame part refined later | `state_shift`, `kinematics.time_offset_frames` |

@@ -185,6 +185,76 @@ episodes (`priors/onboarding/toyota__hsr.md`, "Held-out diagnosis"):
 (~9 h, 11.6 px) and openneodata ur5e's station (~1 h, 10.3 px) join lane103 (62 h) and
 g2-cohort-03 (6 h, 7.4 px): about 276 h. robomind ur5e-real is at the line (15.6 px).
 
+## Automatic per-episode checks (2026-11-16)
+
+The question was whether some cheap CPU check, independent of the solve, can replace clicking
+fingertips on held-out episodes. Code is in `src/r4r/checks/`, and `r4r check` runs it.
+
+**Ground truth.**
+- *Clicks:* the 26 click sets above, re-reconstructed with the current main (G1 hand mount and
+  HSR fingertips included) and redrawn. The truth per (episode, camera) is the median click
+  error; a camera is bad above 15 px. This gives 207 scene-camera and 67 wrist-camera rows,
+  123 / 54 bad.
+- *Synthetic:* 6 episodes each of molmobot rby1-pick-10, interndata-a1-sim arx-lift-2 and
+  agilex-split-aloha, nvidia-kitchen panda-omron-mobile (exact cameras), robomind agilex-real,
+  g2-cohort-02 and dual-franka-real (cameras that pass). Each camera is moved by 1, 2, 5, 10
+  and 20 cm, by 1, 2, 5, 10 and 20°, and its focal by ±10%. The truth is the median
+  displacement of the robot's surface points (`r4r.checks.perturb`).
+- *State/video mismatch:* the same episodes with their state taken 1 s and 3 s late, plus G1
+  episodes 96635 and 23969, which the G1 agent found out of sync (their hand-camera motion does
+  not follow the arm).
+
+Results are in `/e/scratch/reformo/blanchon1/r4r-cache/checks/results/` (parquet per dataset,
+in the shared table of `r4r.checks.eval`). Run `python -m r4r.checks.eval RESULTS… --clicks
+CLICKS… --by kind` to reproduce the tables.
+
+| idea | what | clicks: AUC >15 px / >30 px, Spearman ρ (scene cameras) | synthetic (scene cameras): AUC, ρ, \|estimate − truth\| | CPU per episode | correction (median click px before → after) | verdict |
+|---|---|---|---|---|---|---|
+| 1 motion agreement | 2D shift maximising the overlap of the drawn robot's silhouette change with the frame difference (still camera, 8 pairs 0.3 s apart) | 0.70 / 0.79, 0.45; with gain ≥ 0.1 (64% of rows) 0.78 / 0.86, 0.62 | 0.84, 0.69, 5.6 px | 0.5–1.2 s per scene camera (3 s on 7-camera G1) | 18.2 → 16.8; 51 of 204 worse by >5 px | estimate kept, not a flag |
+| 2 edge alignment | 2D shift minimising the truncated chamfer distance from the drawn outline to Canny edges (8 frames) | 0.67 / 0.76, 0.39 | 0.83, 0.67, 5.4 px | 0.3–0.7 s per scene camera | 18.1 → 18.5; 61 of 207 worse | estimate kept, not a flag |
+| 1+2 | motion shift when its gain ≥ 0.1, else edge (`r4r check`'s `error_px`) | 0.71 / 0.83, 0.49 | — | as above | not applied | reported |
+| 1b sync | rank correlation of image change and the motion the state predicts (silhouette change, or the camera's own motion), 16 pairs | — (measures timing, not pose: DROID 29119 with its camera 87 px off reads ρ 0.8) | 1 s / 3 s state lag, per episode: AUC 0.94 / 0.98; flag at mean ρ < 0.35: 3.4% of episodes, 62% / 88% of lagged ones; G1 96635 (ρ −0.17) and 23969 (0.31) flagged | 0.1–2 s | — | **integrated: the `sync_flagged` episode flag** |
+| 3 rest template | first frames of episodes with the same starting pose: measured image shift vs the drawn robots' shift, per episode relative to the others | scored only 21 of 359 camera rows (4 datasets: aloha, yam, flexiv, HSR): random held-out episodes rarely start within 3 cm of each other. On those, AUC 1.00 (n 18, 9 bad), ρ 0.81 | — | ~0.1 s | 14.5 → 13.3, 4 of 18 worse | promising where episodes start at one rest pose; too little coverage to integrate (a per-setup reference episode is needed, as HABIT's period scan has) |
+| 4 setup screening | the shift's distance from its (dataset, camera) median | 0.65 / 0.73 (motion); with the absolute shift 0.72 / 0.82 | — | free | — | no gain over the absolute shift |
+| distal | 1 and 2 restricted to the end-effector bodies (what the clicks measure) | motion 0.61, edge 0.54 | — | +0.5 s | worse (19.9 / 25.6) | dropped |
+
+**By dataset kind** (motion, scene cameras, AUC >15 px / ρ): arm 0.68 / 0.39, bimanual
+0.72 / 0.62, fisheye 0.85 / 0.70, humanoid 0.79 / 0.61, mobile 0.57 / −0.20. On DROID alone it
+is 1.00 (the bad per-episode extrinsics 29119 and 74644 are found). The sync check per kind
+(scene cameras, 1 s lag): fixed arms and bimanual rigs 0.96–1.00 (abc, droid, aloha, arx5,
+flexiv, ur5e, xvla, yam, agilex, dual-franka, the franka sims); humanoid and mobile heads
+0.57–0.94 (G2 0.71–0.73, HSR 0.68, hiw-500 0.84, r1-lite 0.83). Wrist cameras: 0.85 overall.
+
+**Why the camera estimates are not green.**
+- *The clicks measure more than the camera.* On ur5e, xvla, abc and molmoact2 the drawn
+  silhouette sits on the real robot (both checks find shifts under 5 px) while the clicked
+  fingertip is 20–35 px off. The rest of the error is in the end effector: jaw model, TCP depth
+  or the opening. No body-silhouette check can see it, and restricting the checks to the
+  distal bodies made them noisier, not better.
+- *A 2D shift is the wrong model for large errors.* It does not fit a focal error (±10% gives
+  14 px of truth but 2–25 px of shift) or a camera 10–20 cm off. The search radius is 35% of
+  the width, so errors beyond it read as random shifts.
+- *Wrist cameras.* The drawn gripper stays in place in the image. Where the real gripper
+  differs from the description (YAM, OmniPicker), the outline matches nothing, and the motion
+  check rarely finds still pairs. Wrist rows give AUC ~0.6, so `r4r check` gives no shift
+  estimate for wrists.
+- *Corrections do not hold.* Applying the proposed shift lowers the median click error a
+  little on scene cameras (18.2 → 16.8 px, motion), but makes a quarter of them worse by more
+  than 5 px. It is never applied.
+
+**State/video mismatch (sync) is green and integrated.** Static views separate cleanly, and
+moving heads are weaker. The lowest in-sync scores are not noise:
+- g2-cohort-01 10102 and 26517 are the cart episodes of problem 8 below, with the arms
+  drifting off over time. Their ρ of −0.21 and −0.08 says their state does not drive their
+  video: a record problem, not a camera.
+- realsource-world 20401 has its per-episode hand record wrong (above).
+- Not read yet: g2-cohort-02 1050 and airoa-moma-5k 844104 (both 0.08).
+- One sim false positive, arx-lift-2 79000 (0.17).
+
+`r4r check` writes `checks.parquet` beside the shards, and `r4r merge` copies it into
+`meta/r4r.json` (`checks`: `sync_rho`, `sync_flagged`, per camera `sync_rho`, `error_px`). The
+fit check of `r4r reconstruct` is unchanged: the image checks decode 32 frames per camera, and
+on the fast route (13–40 ms, no video) that would be most of the cost.
 
 ## Method
 
@@ -343,3 +413,6 @@ says `not calibrated` or the camera is ignored (`camera.calibrated: false`).
    something the record does not capture in these sessions, such as the arms deflecting while
    pushing the cart. A per-episode solve of the head cameras (light route, scope `episode`)
    moves top_head by 7 cm / 3° in 1696 but cannot follow a change within the episode.
+   The sync check (`r4r check`, [above](#automatic-per-episode-checks-2026-11-16)) puts
+   10102 and 26517 at mean ρ −0.21 and −0.08. Their image motion does not follow their state,
+   which points at the record (or its timing) rather than the camera.

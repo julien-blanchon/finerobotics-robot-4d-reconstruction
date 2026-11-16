@@ -1775,6 +1775,51 @@ def _write_station(root: Path, name: str, block: JsonObject) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class Check:
+    """Per-episode camera checks of a reconstruction, independent of the solve (CPU,
+    `r4r.checks`): for every calibrated scene camera, the 2D shift that best puts the drawn
+    robot on the image's edges and on the image change where it moves, and the camera's error
+    estimate from them. Reads `<out>/<family>/<dataset>/shard-*.parquet` (`r4r reconstruct`),
+    writes the result table `checks.parquet` beside them and prints the flagged cameras. A
+    screening aid that ranks episodes for a look or a refit; see docs/verification.md for how
+    far it agrees with clicked fingertips."""
+
+    dataset: tyro.conf.Positional[str]
+    out: tyro.conf.Positional[Path] = Path("reconstruction")
+    # Episodes to check (default: every episode of the shards)
+    episodes: tuple[int, ...] = ()
+
+    def run(self) -> None:
+        from r4r.checks.episode import CheckConfig, check_episode, flagged
+        from r4r.checks.eval import write_rows
+        from r4r.checks.scene import scenes_from_shard
+        from r4r.data.lerobot import frame_rate
+        from r4r.reconstruction import limit_threads
+
+        limit_threads()
+        root = dataset_root(self.dataset)
+        target = self.out / root.parent.parent.name / root.name
+        shards = sorted(target.glob("shard-*.parquet"))
+        if not shards:
+            raise SystemExit(f"no shards in {target}: run r4r reconstruct first")
+        config, fps, rows = CheckConfig(), frame_rate(root), []
+        wanted = set(self.episodes) or None
+        for shard in shards:
+            for scene in scenes_from_shard(shard, wanted, self.dataset):
+                found = check_episode(scene, root, fps, config)
+                rows += found
+                for row in (r for r in found if r["method"] == "camera"):
+                    width = scene.views[row["camera"]].size[0]
+                    mark = "  FLAGGED" if flagged(row, width, config) else ""
+                    print(
+                        f"episode {scene.episode} {row['camera']}: estimated error "
+                        f"{row['estimate_px']:.1f} px ({row['seconds']:.2f} s){mark}"
+                    )
+        write_rows(rows, target / "checks.parquet")
+        print(f"{len(rows)} rows -> {target / 'checks.parquet'}")
+
+
+@dataclass(frozen=True, slots=True)
 class Merge:
     """A LeRobot v3 dataset from `r4r reconstruct` shards (`r4r.merge`, docs/output-spec.md):
     by default a twin `<dest>/<dataset>--r4r` (index and r4r columns, `meta/episodes` linking
@@ -1819,6 +1864,7 @@ type Command = (
     | Annotated[Stations, tyro.conf.subcommand("stations")]
     | Annotated[Station, tyro.conf.subcommand("station")]
     | Annotated[Merge, tyro.conf.subcommand("merge")]
+    | Annotated[Check, tyro.conf.subcommand("check")]
 )
 
 

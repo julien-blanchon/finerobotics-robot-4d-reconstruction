@@ -111,7 +111,11 @@ def best_shift(
 
 
 def check(
-    scene: Scene, view: View, images: dict[int, np.ndarray], config: ShiftConfig
+    scene: Scene,
+    view: View,
+    images: dict[int, np.ndarray],
+    config: ShiftConfig,
+    bodies: set[int] | None = None,
 ) -> ShiftResult:
     """The edge check of one view over the frames `images` (timestep -> RGB frame)."""
 
@@ -122,7 +126,7 @@ def check(
             continue
         small, scale = resized(image, config.width)
         h, w = small.shape[:2]
-        points = outline(silhouette(scene, view, t, scale, (h, w)))
+        points = outline(silhouette(scene, view, t, scale, (h, w), bodies))
         if len(points) < config.min_pixels:
             continue
         template = np.zeros((h, w), np.float32)

@@ -53,6 +53,7 @@ def check(
     view: View,
     pairs: dict[int, tuple[int, np.ndarray, np.ndarray]],
     config: ShiftConfig,
+    bodies: set[int] | None = None,
 ) -> ShiftResult:
     """The motion check of one view over frame pairs (timestep -> (later timestep, RGB frame
     at the timestep, RGB frame at the later one))."""
@@ -66,8 +67,8 @@ def check(
         b, _ = resized(second, config.width)
         shape = a.shape[:2]
         masks = (
-            silhouette(scene, view, t, scale, shape),
-            silhouette(scene, view, later, scale, shape),
+            silhouette(scene, view, t, scale, shape, bodies),
+            silhouette(scene, view, later, scale, shape, bodies),
         )
         moved = cv2.bitwise_xor(*masks)
         region = cv2.dilate(cv2.bitwise_or(*masks), np.ones((5, 5), np.uint8))

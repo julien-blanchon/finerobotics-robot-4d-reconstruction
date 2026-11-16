@@ -33,7 +33,7 @@ from r4r.output import LAYOUT_KEY, CameraInfo, EpisodeOutput, Layout
 from r4r.rago.stages import moved_kinematics
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, MutableMapping, Sequence
     from pathlib import Path
 
     from shape_extensions import IntVar
@@ -50,6 +50,39 @@ if TYPE_CHECKING:
 
 # Per-episode summary of a shard, in its schema metadata (JSON list of records)
 EPISODES_KEY = b"r4r.episodes"
+
+# CPU threads of one reconstruct process when the user sets none: torch and OpenCV otherwise
+# take every core, and on a shared login node the light route then ran 10 episodes in over
+# 16 min instead of 150-170 s with 8 threads (docs/verification.md)
+DEFAULT_THREADS = 8
+THREAD_VARIABLES = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
+
+def default_threads(environ: Mapping[str, str], cpus: int | None) -> int | None:
+    """Threads for one reconstruct process: `DEFAULT_THREADS` (at most the `cpus` available),
+    or None when the user chose a count (`OMP_NUM_THREADS` or a sibling in `environ`)."""
+
+    if any(environ.get(name) for name in THREAD_VARIABLES):
+        return None
+    return max(1, min(DEFAULT_THREADS, cpus or 1))
+
+
+def limit_threads(environ: MutableMapping[str, str] | None = None) -> int | None:
+    """Cap torch's and OpenCV's thread pools at `default_threads` unless the user set a count
+    (then nothing changes); also exported to `environ` for libraries started later. Returns
+    the count set, or None."""
+
+    import cv2
+
+    environ = os.environ if environ is None else environ
+    count = default_threads(environ, os.process_cpu_count())
+    if count is None:
+        return None
+    for name in THREAD_VARIABLES:
+        environ[name] = str(count)
+    torch.set_num_threads(count)
+    cv2.setNumThreads(count)
+    return count
 
 
 def shards(episodes: Sequence[int], size: int, worker: int = 0, workers: int = 1) -> list[int]:

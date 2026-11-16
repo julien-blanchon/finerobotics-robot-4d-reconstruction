@@ -1211,7 +1211,7 @@ class Reconstruct:
         import time
 
         from r4r.data.lerobot import episode_count
-        from r4r.reconstruction import shard_path, shards, write_shard
+        from r4r.reconstruction import limit_threads, shard_path, shards, write_shard
 
         root = dataset_root(self.dataset)
         if self.plan:
@@ -1219,6 +1219,9 @@ class Reconstruct:
 
             print(describe([dataset_plan(root, self.episodes or None)]))
             return
+        threads = limit_threads()
+        if threads is not None:
+            print(f"{threads} CPU threads (set OMP_NUM_THREADS to choose)")
         selection = list(self.episodes) or list(range(episode_count(root)))
         worker, workers = (int(v) for v in self.shard.split("/"))
         if not 0 <= worker < workers:

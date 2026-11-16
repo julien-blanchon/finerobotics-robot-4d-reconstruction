@@ -106,8 +106,9 @@ RoboMIND2 agilex: Piper and ARX X5 arms under one label) its own priors per grou
 {"match": {"stat": "observation.state/q99", "columns": [2, 8], "above": 0.1}, "description":
 "...", "joints": [...], "cameras": {...}}}`. `match` picks the group's episodes from their
 statistics in `meta/episodes` (`stats/<stat>`): an episode belongs to the first group where the
-largest of `columns`' values exceeds `above` and/or the smallest lies below `below`; episodes no
-group matches keep the dataset-level priors. A group's other fields replace the dataset's
+largest of `columns`' values exceeds `above` and/or the smallest lies below `below` (`match`
+may be a list of such conditions, all of which must hold: e.g. one per arm); episodes no group
+matches keep the dataset-level priors. A group's other fields replace the dataset's
 (`cameras` and `bodies` entry by entry, as a station's); `stations` then apply on top
 (`for_episode`). Fitted values of a group's episodes are written into its block.
 
@@ -401,15 +402,14 @@ class DatasetPriors:
 
         return tuple(j for j in metadata if j.name not in self.replaced) + self.joints
 
-    def group_matches(self) -> dict[str, GroupMatch]:
-        """Each group's `match`, in file order (the first matching group takes an episode)."""
+    def group_matches(self) -> dict[str, tuple[GroupMatch, ...]]:
+        """Each group's `match` conditions (all must hold), in file order (the first matching
+        group takes an episode)."""
 
         return {
-            name: GroupMatch(
-                block["match"]["stat"],
-                tuple(block["match"]["columns"]),
-                block["match"].get("above"),
-                block["match"].get("below"),
+            name: tuple(
+                GroupMatch(c["stat"], tuple(c["columns"]), c.get("above"), c.get("below"))
+                for c in _conditions(block["match"])
             )
             for name, block in self.groups.items()
         }
@@ -446,6 +446,12 @@ class DatasetPriors:
         return replace(self, cameras=_cameras(cameras, where), bodies=_bodies(bodies, where))
 
 
+def _conditions(match: JsonObject | list[JsonObject]) -> list[JsonObject]:
+    """A group's `match`: one condition, or a list of them that must all hold."""
+
+    return list(match) if isinstance(match, list) else [match] if match else []
+
+
 def priors_path(root: Path) -> Path:
     """`priors/<family>/<dataset>.json` for a delivery root `<family>/datasets/<dataset>`."""
 
@@ -461,8 +467,10 @@ def load_priors(root: Path) -> DatasetPriors:
     raw = _checked(json.loads(path.read_text()), TOP_KEYS, str(path))
     for group, block in raw.get("groups", {}).items():
         _checked(block, GROUP_KEYS, f"{path}: groups.{group}")
-        _checked(block.get("match", {}), MATCH_KEYS, f"{path}: groups.{group}.match")
-        if "stat" not in block.get("match", {}) or "columns" not in block["match"]:
+        conditions = _conditions(block.get("match", {}))
+        for condition in conditions:
+            _checked(condition, MATCH_KEYS, f"{path}: groups.{group}.match")
+        if not conditions or any("stat" not in c or "columns" not in c for c in conditions):
             raise ValueError(f"{path}: groups.{group} needs a `match` with `stat` and `columns`")
     priors = _parsed(raw, str(path))
     for group in priors.groups:  # each group's fields parse

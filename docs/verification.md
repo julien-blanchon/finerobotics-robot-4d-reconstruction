@@ -49,7 +49,7 @@ unless stated.
 | molmoact2-yam bimanual-yam | 704 | light (top camera per episode) | 46 / 0 | 10 light (85 s) | none | — | skeleton on both arms in the top view (fixed 2026-11-16). EE (`yam`) |
 | openneodata arx5 (8 stations) | 660 | 31.9k light, 414 neighbour, 1096 odd; 27.6k full now | 52 / **95** | 9 light, 1 fast | none | — | ok |
 | interndata-a1-sim franka-5c46641bda | 527 | fast | 1 / 0 | 10 fast | none | head 0.00 cm; hand 0.34 cm (p95 1.1); EE resid 3.5 mm (45.7 mm, 45° convention) | ok |
-| agibot-world g2-cohort-01 | 516 | fast | 0.6 / 0 | 10 fast | none | — | ok. EE: the delivered description draws the OmniPicker jaws across the wrist camera's side (camera mount at −8 cm y, jaws on y); corrected description `agibot__g2` (jaws on x) and preset `omnipicker_g2`: jaw points on both jaws in the hand views. top_head draws the TCPs ~10 cm below the grippers in episode 1696 (camera, not EE) |
+| agibot-world g2-cohort-01 | 516 | fast | 0.6 / 0 | 10 fast | none | — | ok. EE: the delivered description draws the OmniPicker jaws across the wrist camera's side (camera mount at −8 cm y, jaws on y); corrected description `agibot__g2` (jaws on x) and preset `omnipicker_g2`: jaw points on both jaws in the hand views. The −90° turn and +90° put the plates at the same places (they differ only by which plate is on which side), and no view separates the two plates; the preset is tied to the −90° file. Head cameras: the arms drawn several cm off the real ones in 4 of 17 episodes checked (problem 8) |
 | droid | 512 | 95.6k fast (checked), **8 full** | 66 / 0.02 | 3 fast, 7 light (flagged) | none | — | ok |
 | robointer-droid | 512 | as droid, 8 full | 66 / 0.02 | 7 fast, 3 light | none | — | ok |
 | galaxea-open-world r1-lite | 484 | fast | 0.3 / 0 | 10 fast | none | — | fingers on the wrist fingers; base motion not checkable on video (fixed 2026-11-16). EE (`galaxea_r1_lite`) |
@@ -63,7 +63,7 @@ unless stated.
 | interndata-a1-sim genie-1 | 174 | fast | 0.5 / 0 | 10 fast | none | head 0.25 cm; wrists 0.2-1.1 cm (p95 3-4 cm, 4°); EE resid 1 mm, **p95 29 mm**; EE vs `states.*_tcp_to_robot_pose`: record TCP 76 mm further along z than ours (0.219 m from the gripper base, beyond the description's jaw tips), axes turned 90° about z, residual 1.1-1.6 mm median (p95 24-29 mm); aperture = 0.127 · `states.*_gripper.position` (1 = open) | ok; jaw points on the jaws |
 | openneodata aloha | 157 | light (third view per episode) | 17 / 0 | 10 light | none | — | arms on the real ones within a few cm in the third view, right gripper up to ~5 cm off in one episode; wrist fingers approximate (fixed 2026-11-16) |
 | interndata-a1-sim franka-b090d20bcf | 142 | fast | 0.5 / 0 | 10 fast | none | head 0.00 cm; hand 0.43 cm / 0.74°; EE resid 4.1 mm | ok |
-| axis sim-sawyer-cohort-02 | 108 | fast | 0.1 / 0 | 10 fast | none | — | meshes on the arm. **No EE columns**: the description has no gripper (robosuite's Rethink gripper; state 7-8 unmapped) |
+| axis sim-sawyer-cohort-02 | 108 | fast | 0.1 / 0 | 10 fast | none | — | meshes on the arm. **No EE columns**: the description has no gripper, and the recorded finger values (state 7: 0 / 0.040, state 8: −0.030 / 0, two-valued) do not fit robosuite's Rethink gripper (finger ranges −0.0115..0.0208 / −0.0208..0.0115 m), so the simulated gripper is not the published one and its pads and closing axis cannot be placed |
 | interndata-m1 franka-panda | 64 | light | 25 / 0 | 10 light | none | EE position exact (0.00 mm) at link8 | ok |
 | open-x-embodiment maniskill-sim | 63 | fast (main camera per episode: 6 setups) | 0.3 / 0 | 10 fast | none | EE exact; cameras 0.00 cm in all 10 (fixed 2026-11-16) | ok |
 | robomind agilex-real | 59 | fast | 0.1 / 0 | 10 fast | none | — | right gripper on the real one in camera_front, jaw points on the wrist jaws (fixed 2026-11-16) |
@@ -131,7 +131,9 @@ says `not calibrated` or the camera is ignored (`camera.calibrated: false`).
 5. **omnipicker grippers** (AgiBot G1/G2, genie-1, rw-rl g2): fixed 2026-11-16, pads on the
    jaw plates (`gripper` and `aperture`, 0 to 0.129 m). The G2 description draws its jaws
    across the wrist camera's side; G2 priors now use the corrected `agibot__g2` description
-   (jaws on the base's x) and the `omnipicker_g2` preset.
+   (jaws on the base's x) and the `omnipicker_g2` preset. g2a-simulation: its gripper columns
+   (state 0-1) are now mapped as on the real G2; the rendered jaws spread across the hand
+   view and the drawn ones land on them.
 6. **Light route on a loaded login node:** with default threading (~300 threads per process)
    10 light episodes took over 16 minutes; with `OMP_NUM_THREADS=8`, 150-170 s.
    **Fixed 2026-11-16:** `r4r reconstruct` sets 8 threads (torch, OpenCV, exported to the
@@ -140,3 +142,20 @@ says `not calibrated` or the camera is ignored (`camera.calibrated: false`).
 7. Ground-truth outliers worth a look: genie-1 EE residual p95 29 mm and wrist cameras p95
    3-4 cm (median ~1 mm / 0.2-1 cm, so frames during fast motion); a1-sim wrists p95
    1-2 cm generally.
+8. **G2 head cameras vs the arms** (checked on held calibration, 2026-11-16): the arms are drawn
+   several cm off the real ones in the head views in 4 of 17 episodes checked: 1696, 10102,
+   1600, 2000 (g2-cohort-01, supermarket aisles with a shopping cart; 22426 slightly). They
+   sit on the real arms in 7906, 8166, 12243, 17602, 17708, 22336, 22777, g2-cohort-02 1217,
+   4251, 7714, g2-cohort-03 113 and rw-rl g2-box 56. In 1696 the offset changes over time
+   (up and to the left early on, gone at frame 2255 after a light solve). Ruled out:
+   - waist mapping: head and arms both hang on `body_link5`, so the waist does not move one
+     against the other;
+   - recorded poses: the arm end poses equal FK on `arm_base_link` (0.0 mm), and the recorded
+     head camera is 1.4-2.3 cm / 0.5-2.3° from FK in every episode, 1696 included;
+   - head joints: flipping the pan sign makes 22777 worse, flipping the roll sign does not fix 1696, and a tilt
+     offset fixes one moment but not the others;
+   - state lag: ±20 and ±60 frames make no difference.
+   Not fixed: no single priors or description value fits these episodes. The likely cause is
+   something the record does not capture in these sessions, such as the arms deflecting while
+   pushing the cart. A per-episode solve of the head cameras (light route, scope `episode`)
+   moves top_head by 7 cm / 3° in 1696 but cannot follow a change within the episode.

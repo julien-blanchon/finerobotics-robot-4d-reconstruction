@@ -120,7 +120,9 @@ def _project(
     pose = _matrix(_column(part, f"{prefix}.pose"))
     k = _column(part, f"{prefix}.intrinsics")
     dist = _column(part, f"{prefix}.distortion")
-    inv = np.linalg.inv(pose)
+    finite = np.isfinite(pose).all(axis=(1, 2))
+    inv = np.full_like(pose, np.nan)
+    inv[finite] = np.linalg.inv(pose[finite])  # uncalibrated cameras are NaN
     local = np.einsum("tij,tpj->tpi", inv[:, :3, :3], points) + inv[:, None, :3, 3]
     uv = np.full((*points.shape[:2], 2), np.nan)
     for t in range(len(points)):

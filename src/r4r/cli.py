@@ -1520,7 +1520,9 @@ class Stations:
     `--per-camera` the camera's own setup key `station.<camera>` (runs named
     `<camera>-auto-<first episode>`): for static cameras re-placed independently of each other.
     `--group` keeps a priors group's episodes only (a dataset mixing robots: setups within each
-    robot)."""
+    robot). `--compare A B …` only prints, for each pair of these episodes, the static
+    background's pixel shift and its inlier count (`r4r.data.placements`): do two setups share
+    the camera's placement? A diagnostic; nothing is written."""
 
     dataset: tyro.conf.Positional[str]
     camera: tyro.conf.Positional[str]
@@ -1532,6 +1534,8 @@ class Stations:
     # Write the camera's own setup key (`station.<camera>`) instead of the common `station`
     per_camera: bool = False
     write: bool = False
+    # Episodes whose background shifts are printed pairwise (instead of finding runs)
+    compare: tuple[int, ...] = ()
 
     def run(self) -> None:
         import time
@@ -1541,6 +1545,19 @@ class Stations:
         from r4r.data.setups import SetupConfig, labelled, setups, thumbnails, write_stations
 
         root = dataset_root(self.dataset)
+        if self.compare:
+            from itertools import combinations
+
+            from r4r.data.placements import REPORT_WIDTH, backgrounds, shift
+
+            found = backgrounds(root, self.compare, self.camera)
+            for a, b in combinations(self.compare, 2):
+                moved, inliers = shift(found[a], found[b])
+                print(
+                    f"{a} - {b}: background shift {moved:.1f} px (at {REPORT_WIDTH} px width), "
+                    f"{inliers} inliers"
+                )
+            return
         last = episode_count(root) - 1 if self.last is None else self.last
         episodes = list(range(self.first, last + 1))
         if self.group is not None:

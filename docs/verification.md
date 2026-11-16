@@ -289,6 +289,71 @@ moving heads are weaker. The lowest in-sync scores are not noise:
 fit check of `r4r reconstruct` is unchanged: the image checks decode 32 frames per camera, and
 on the fast route (13–40 ms, no video) that would be most of the cost.
 
+## Automatic per-episode checks from DINO features (2026-11-16): not adopted
+
+Two image checks were tested, independent of the solve, against the held-out clicks. Neither
+meets the bar on real data, so neither runs in `r4r reconstruct`. The shared feature helper
+(`src/r4r/checks/features.py`: DINOv2 ViT-S/14 with registers, through `timm`) stays for other
+checks.
+
+**Data.** There are 372 clicked (episode, camera) targets of 27 real click sets (the click sets
+above plus the onboarding sets of robocoin lane02/21/103/104, agilex-5b28 and robomind2
+dual-franka). Each target's episode was reconstructed again on the current priors
+(`--uncalibrated nan`), and its click error recomputed. There are also 72 targets of 6
+simulated datasets (molmobot franka and rby1, interndata-a1-sim franka, genie and aloha,
+nvidia-kitchen), where the truth is exact. Each target has its click frame plus 7 frames where
+an end effector is in view. Every target is also scored with its camera moved by 13 known
+amounts: rotations of 0.5–4°, translations of 2–20 cm, focal ±10 %, and combinations. The
+truth is the click error after the move (simulated: the projected TCP displacement).
+
+**1. Fingertips by descriptor matching.** The bank holds the DINO descriptors at the clicked
+fingertips of the other episodes of the same dataset, from the same kind of view. The search
+covers ±20 % of the image width around the drawn jaw points, on features upsampled ×2 at 448 px.
+The detected fingertip lies a median 32 px from the click, and within 10 px for only 16 %.
+Its error estimate has AUC 0.75 for "click error > 15 px" (ρ 0.48), with |estimate − click
+error| at a median 14 px. Grippers are 10-30 px wide, and 16-px patches cannot tell a
+fingertip from the rest of the gripper, the other gripper or held objects.
+
+**2. Robot parts by feature classes (robot-feature check and part keypoints).** A linear softmax
+classifier maps the patch features to the robot's bodies plus background. It is trained,
+leaving the episode out, on the body maps drawn from the reconstruction (convex hull per geom,
+painted far to near) of the dataset's other episodes. Each body's drawn silhouette is shifted
+to best fit that body's probability map (±15 % of the width, sub-cell peak). The weighted
+median of the body shifts near the target end effector (within 25 cm), over the 8 frames,
+estimates the pixel error. A Huber Gauss-Newton fit of the camera pose to those part offsets
+(body centroid ↔ its shifted pixel) proposes the correction.
+
+| data | rows | bad (>15 px) | AUC | Spearman | median \|estimate − truth\| | truth before → after correction (median) | correction worse by >5 px |
+|---|---|---|---|---|---|---|---|
+| simulated, 6 datasets | 1547 | 423 | 0.87 | 0.61 | 4.8 px | 6.7 → 4.6 px | 13 % |
+| nvidia-kitchen (sim) | 312 | 62 | 0.97 | 0.88 | 2.3 px | 6.8 → 2.3 px | 0 % |
+| real, 27 click sets | 4836 | 3529 | 0.64 | 0.38 | 18.3 px | 27.8 → 21.3 px | 17 % |
+| real, reconstructed cameras only | 372 | 230 | 0.57 | 0.22 | 15.7 px | 21.1 → 18.7 px | 17 % |
+| real, scene views / wrist views | 3406 / 741 | | 0.70 / 0.47 | 0.49 / 0.23 | 15.3 / 29.4 px | 28.0 → 21.3 / 51.6 → 43.9 | 18 / 24 % |
+
+The best real datasets are droid (AUC 0.91, 8 px), flexiv-rizon4 (0.83), agilex-real (0.82) and
+rdt (0.81). The worst are g2-cohort-01 (0.41), agilex-5b28 (0.36), rw-rl (0.45) and every
+wrist view. In the shared table (`python -m r4r.checks.eval`, method `dino-parts`, by kind), the
+AUC is 0.80 for single arms, 0.68 bimanual, 0.59 humanoid and 0.54 fisheye.
+
+**Why not on real data:** the classifier learns from the reconstruction's own drawn bodies. On
+the real datasets these carry the error being measured (10-60 px medians). Moving each
+training frame's maps by its own estimated offset (one round of self-training) did not help
+(lane103: AUC 0.74 → 0.73). Part of a click error is the TCP depth or gripper geometry, which
+the body silhouettes do not see. The descriptions' meshes also differ from the real arms
+(cables, covers, grippers). On the simulated datasets, where the drawn bodies are exact, the
+same code reaches 2-5 px.
+
+**Cost** (if it were used): DINOv2-S features cost 0.3 ms per frame on a GH200 (batch 64, 448
+px; 0.6 ms at 644 px). 100k episodes × 2 cameras × 8 frames come to about 8 GPU-minutes. The
+CPU side costs ~0.3 s per camera and episode for 8 body maps and shifts, plus the frame decode.
+
+Scripts, the per-target scenes and the result tables (not in the repo):
+`/e/scratch/reformo/blanchon1/r4r-cache/dinochecks/` (`code/gather.py` builds the scenes,
+`code/pert2.py` runs the part check, `code/kp.py` the fingertip check, `res/v1/*.parquet` and
+`res/dino_parts_rows.parquet` hold the results in the shared eval schema).
+
+
 ## Method
 
 Per dataset, CPU only (`CUDA_VISIBLE_DEVICES=""`, `OMP_NUM_THREADS=8`), commit `54b8e49`:

@@ -42,7 +42,7 @@ LeRobot v3 dataset (`r4r merge`). Code: `src/r4r/output.py` (columns), `src/r4r/
 | `observation.camera.<cam>.intrinsics` | 4 | `fx, fy, cx, cy` in pixels of the delivered video, OpenCV pixel centres (integer coordinates) |
 | `observation.camera.<cam>.distortion` | 4 | `pinhole`: OpenCV radial `k1, k2, k3, 0` (no tangential); `fisheye`: OpenCV fisheye (Kannala–Brandt) `k1..k4`; zeros when ideal |
 | `observation.ee.<arm>.pose` | 7 | the `ee` frame in the episode frame, by forward kinematics with r4r's corrected kinematics |
-| `observation.ee.<arm>.gripper` | 1 | parallel grippers with two jaw pads only: jaw opening in metres (absent for a linkage gripper without pads, e.g. `omnipicker`) |
+| `observation.ee.<arm>.gripper` | 1 | two-jaw grippers with pads (parallel, linkage or a single moving jaw): jaw opening in metres |
 | `observation.ee.<arm>.aperture` | 1 | jaw opening (parallel gripper, equal to `.gripper`), thumb–index fingertip distance (hand); absent for suction cups and tools |
 | `observation.ee.<arm>.fingertips` | F × 3 | hands and multi-finger grippers: fingertip positions in the episode frame |
 | `observation.ee.<arm>.actuation` | 1 | optional: a suction cup's or a tool's recorded actuation |
@@ -104,7 +104,7 @@ a right one. Only the origins differ:
 | field | how |
 |---|---|
 | pose | `E⁻¹ · W_b(q_t) · body_from_ee`, with `b` a description body and `body_from_ee` from the priors or a preset |
-| gripper | `|(p_a − p_b) · y_t| − closed`: two jaw pad points along the frame's y, minus their distance when the jaws touch |
+| gripper | `max((p_a − p_b) · y_t − closed, 0)`: two jaw pad points along the frame's y (`p_a` on the +y side when open), minus their signed distance when the jaws touch; jaws that pass through each other in the description (HSR's motor closing on its finger springs) read 0 |
 | aperture | the gripper opening, or `‖p_thumb − p_index‖` for a hand |
 | fingertips | `E⁻¹ · W_f(q_t) · o_f`: a named point (body + offset at the fingertip pad) per finger |
 
@@ -126,19 +126,31 @@ Fingertips and the pose are not in the state at all (forward kinematics).
 
 A `preset` supplies defaults, and any other field overrides them. Pad and fingertip bodies are
 regular expressions over the bodies below `body`. Without an `ee` block, presets are matched
-against the description, and of nested matches the deepest is kept.
+against the description, and of nested matches the deepest is kept. A matched pad or fingertip
+must end its branch (at most one more link below it). Presets that share body names apply
+under a given parent body (`PARENTS` in `src/r4r/effectors.py`). Arms are `left`/`right` from
+the body's name, else from its nearest ancestor naming a side.
 
 | preset | body | `ee` origin in the body | jaws / fingers |
 |---|---|---|---|
 | `franka_hand` | `panda_hand`, `fr3_hand` | 0.1034 m along z (`panda_hand_tcp`) | pads on the finger origins, touching at q = 0 |
 | `robotiq_2f85` | `robotiq_85_base_link` | 0.1493 m along z (`robotiq_tcp`), closing along x | pads on the inner fingers (0.079 m open) |
-| `piper` | `*gripper_base` | 0.1358 m along z | `link7` / `link8` |
+| `piper` | `*gripper_base` | 0.1358 m along z | `link8` / `link7` |
 | `arx_x5` | `*link6` | 0.1576 m along x | `link7` / `link8`, 0.0498 m apart when touching |
 | `rby1` | `ee_left`, `ee_right` | 0.1328 m along −z | `finger_*1` / `finger_*2` inner faces |
-| `omnipicker` | `gripper_[lr]_base_link` | 0.14308 m along z | linkage: no opening |
+| `omnipicker` | `gripper_[lr]_base_link` (under `arm_*_link7`, AgiBot G1) | 0.14308 m along z | jaw plates `*_link4` near the tips, on the base's y; 0 to 0.129 m |
+| `omnipicker_g2` | `gripper_[lr]_base_link` (under `arm_*_end_link`, AgiBot G2, corrected description) | 0.14308 m along z | the same, jaws on the base's x |
+| `hsr` | `hand_palm_link` (Toyota HSR) | 0.093 m along z (closed fingertips) | `hand_[rl]_finger_tip_frame`, 4.4 mm apart at q = 0; 0 to 0.132 m |
+| `yam` | `left_gripper`, `right_gripper`, `gripper` (I2RT YAM) | 0.1468 m along −z | `tip_right` / `tip_left` inner faces; 0 to 0.094 m |
+| `z1` | `gripperStator` (Unitree Z1) | 0.1489 m along x, on the fixed jaw's face | `gripperMover` / `gripperStator`, closing along the stator's z |
+| `rs02_tool` | `[lr]tool_base_link` (RealSource RS-02) | 0.229 m along z, closing along x | `tool_Right_Pad_Link` / `tool_Left_Pad_Link`; 0 to 0.103 m |
+| `galaxea_r1_pro` | `(left\|right)_gripper_link` under `arm_link7` | 0.108 m along −z | `gripper_finger_link1` / `2` inner faces; 0 to 0.1 m |
+| `galaxea_r1_lite` | `(left\|right)_gripper_link` under `arm_link6` | 0.0784 m along x | `gripper_finger_link1` / `2`, 0.027 m apart touching; 0 to 0.1 m |
+| `fourier_hand_right`, `fourier_hand_left` | `[RL]_hand_base_link` (Fourier GR1) | palm centre, 0.05 m from the wrist along −z, y towards the index | five `*_tip_link` fingertips |
 | `inspire_right`, `inspire_left` | `[RL]_hand_base_link` | palm centre, 0.09 m from the wrist | five fingertips |
 
-The geometry comes from the descriptions' own frames and collision meshes (jaw tips, finger pads).
+The geometry comes from the descriptions' own frames and collision or visual meshes (jaw tips,
+finger pads).
 
 ## Joint state and action
 

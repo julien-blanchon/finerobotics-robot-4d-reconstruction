@@ -34,7 +34,7 @@ Clicks, targets and drawn points, one JSON per dataset:
 | dataset | h | n (skipped) | median / p90 / max px | image | % width | TCP shift → median | verdict | pattern |
 |---|---|---|---|---|---|---|---|---|
 | airoa-moma-5k (HSR) | 5025 | 8 (1) | 36.9 / 70.8 / 108 | 512×384 | 7.2 | −2 cm → 27.4 | fail | head off per episode, ahead of or beside the fingers |
-| agibot-world g1-cohort-04 | 2620 | 23 (7) | 71.1 / 122 / 146 | 512×384 (fisheyes 512×410) | 13.9 | +10 cm (scan edge) → 27.6 | fail | top_head 71 px, drawn 1.3-1.6× farther from the image centre than the real grippers (focal); hands seeing the other arm 98 px; fisheyes 20-46 px; jaw points at the jaw roots (TCP short); lag ±45 frames ruled out |
+| agibot-world g1-cohort-04 | 2620 | 23 (7) | 71.1 / 122 / 146 | 512×384 (fisheyes 512×410) | 13.9 | +10 cm (scan edge) → 27.6 | fail | top_head 71 px, drawn 1.3-1.6× farther from the image centre than the real grippers (the gripper is longer than described, not the focal: +10 cm → 19 px); hands seeing the other arm 98 px; fisheyes 20-46 px; jaw points at the jaw roots (TCP short); lag ±45 frames ruled out |
 | abc-130k abc-640x480 | 1752 | 21 (19) | 17.4 / 42.0 / 54.0 | 512×384 | 3.4 | +1 cm → 17.5 | fail | top 16.4 px (n 14), wrists 26.9 (left 38). Per station (top / wrist): 2: 17; 8: 16; 9: 54; 18: 17; 19: 21, 16 / 17; 22: 7 / 14; 24: 10; 26: wrist 42; 27: 15 / 34; 29: 8 / 26; 30: 10 / 27; 31: 20; 35: 24 / 47; 37: 41 |
 | abc-130k abc-848x480 | 723 | 19 (11) | 17.0 / 49.4 / 54.8 | 512×290 | 3.3 | +3 cm → 15.7 | fail | top 14.1 px (n 12, holds); wrists 46.5 (left 47.8): the wrist mounts |
 | molmoact2-yam bimanual-yam | 704 | 10 (10) | 35.6 / 113 / 115 | 512×288 | 7.0 | −5 cm → 31.7 | fail | top 25.2 px (per-episode light solve), wrist views of the other arm 114 px |
@@ -72,11 +72,40 @@ about 15,100 h of real data by dataset hours (flexiv's ready part is one station
   light-solved), airoa-moma head, g2-cohort-01 (cart), molmoact2, openneodata arx5 and aloha
   (light-solved third views 16-68 px), rdt (one cam_high for many rooms), ur5e-real sessions.
   The keyframe check (`check_px`) did not flag droid 29119 and 74644 (80-110 px off).
-- **Focal / scale:** g1-cohort-04 top_head (fx 256.6, aspect 1.33): the drawn points spread
-  1.3-1.6× wider than the real ones.
+- **Not focal: g1-cohort-04 top_head.** The drawn points sit 1.68× (median) farther from the
+  image centre than the clicks. Moving them +10 cm along the approach axis brings this to 1.15×
+  and the error from 71 to 19 px. In the mesh overlays the drawn wrists sit on the real wrists,
+  and the TCP lands at the base of the real gripper, about 10 cm short of its jaw tips. The
+  description's OmniPicker meshes end 1 cm past the TCP. So the real gripper is longer than the
+  description, and the focal is not the cause. The 0.755 aspect is right: the square wall
+  sockets measure about 0.78 wide-to-high in the delivered frames.
 - **Wrists:** abc-848 and abc-640 left wrists (38-48 px), molmoact2 (114 px), hiw-500,
   agilex wrists; realsource-world 2 per-episode hand records far off.
 - Not far-reach only. Lag was scanned on agilex-real (±20 frames) and g1 (±45): no effect.
+
+**Audit for a pipeline-wide error (2026-11-16): none found.** The held-out failures come from
+each dataset's description (gripper length), its camera records or its camera mounts. Neither
+the frame geometry, the projection, the timing nor the scorer explains them. The checks:
+- *Frame geometry.* Every clicked camera of the 26 click sets was scanned for black bars, at
+  up to 3 clicked frames each. None has letterbox or pillarbox bars; only the dark edges of
+  the fisheye images show up. Real datasets take a `focal` at the video resolution with the
+  principal point at `((W−1)/2, (H−1)/2)`. Only simulated priors use recorded intrinsics
+  columns. `resize_intrinsics` follows the pixel-centre convention.
+- *Projection.* `camera.project` matches `cv2.projectPoints` (k1 k2 k3, non-square pixels,
+  off-centre principal point) to 3e-5 px. It matches `cv2.fisheye.projectPoints` to 1e-6 px.
+  `camera.rays` inverts it exactly for every point that lands in the image.
+- *Timing.* Checked on g1, droid, flexiv, agilex-real, airoa, realsource, abc-640 and
+  molmoact2: each episode's decoded frame count equals its state rows, with no gaps and no
+  start offset. `keyframes` (seek) returns the same frame as a straight decode (offset 0 on
+  g1, agilex-real and droid).
+- *Recorded calibration, no solve.* g1 runs the fast route, so its overlay comes straight
+  from the records; the click set reproduces exactly from a fresh reconstruction (median
+  71.1 px). The bad DROID episodes 29119 and 74644 draw the whole arm displaced: DROID's own
+  per-episode extrinsics are wrong there. Swapping the exterior_1/2 poses does not fix them.
+  The left-lens column is used.
+- *Scorer.* The scorer's drawn points come out equal to a fresh reconstruction's. The
+  description's jaw meshes end 0-1 cm past each preset's TCP, so a fingertip click is
+  compared with the drawn fingertip to within about 1 cm.
 
 
 ## Method

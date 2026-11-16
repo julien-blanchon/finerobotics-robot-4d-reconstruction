@@ -191,11 +191,16 @@ Quality and provenance, not features. The file can be dropped later.
   `source_episode_index`, `route` (`fast` | `light` | `full`), `median_px`, `track_share`,
   `flagged` (fit check), and `cameras`: per camera `recorded`, `held calibration`,
   `light solve`, `full solve` or `not calibrated`.
+- **Per episode, `checks`** (`null` unless `r4r check` ran before the merge): `sync_rho` (mean
+  over the cameras of the correlation between image change and the motion the state
+  predicts), `sync_flagged` (`sync_rho` < 0.35: the state does not drive the video), and `cameras`: per camera its `sync_rho` and, for scene cameras, `error_px` (the
+  estimated camera error in pixels; an indication, not a verdict).
 
 ## Packaging (`r4r merge`)
 
 ```bash
 r4r reconstruct <dataset> out/ [--shard i/n] [--uncalibrated nan]   # sharded parquet, resumable
+r4r check <dataset> out/                  # optional: checks.parquet beside the shards
 r4r merge <dataset> out/ dest/            # twin: dest/<dataset>--r4r
 r4r merge <dataset> out/ dest/ --full     # merged copy: dest/<dataset>
 ```

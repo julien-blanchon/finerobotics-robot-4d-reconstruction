@@ -247,6 +247,9 @@ class CameraPrior:
     # ranges (one value for all episodes) instead of held: a by-eye mount that the mount search
     # cannot find (a wrist filled by its own hand) but other held cameras pin
     refine: bool = False
+    # The camera's role (`wrist`, `head`, `exo`, ...) when the feature info declares none or a
+    # wrong one (kai0, FineART): the output's `camera.role`, which `r4r.viz.clicks` reads
+    role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -739,6 +742,7 @@ def _cameras(raw: Mapping[str, JsonObject], where: str) -> dict[str, CameraPrior
             pose=_pose_column(c.get("pose"), f"{where}: cameras.{name}"),
             ignore=bool(c.get("ignore", False)),
             refine=bool(c.get("refine", False)),
+            role=c.get("role"),
         )
         for name, c in raw.items()
     }

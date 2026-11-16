@@ -530,7 +530,7 @@ def _camera(
     return CameraStream(
         name=key.removeprefix(IMAGE_PREFIX),
         frames=frames,
-        role=info.get("camera.role", "other"),
+        role=prior.role or info.get("camera.role", "other"),
         moving=moving,
         mount=mount,
         side=info.get("camera.side"),

@@ -61,12 +61,25 @@ class _Root:
     priors: DatasetPriors
 
 
+def robot_record(root: Path) -> JsonObject:
+    """The root's `meta/robot.json`; a root delivered without one (no description, no joint
+    map: robocasa365, robotwin-unified) gets an empty record on `observation.state`, and its
+    priors must then give the `description` and the `joints`."""
+
+    path = root / "meta" / "robot.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return {"state": {"feature": "observation.state", "arms": []}, "cameras": []}
+
+
 @functools.cache
 def _root(root: Path) -> _Root:
     """A dataset root opened once per process (episodes of a run reuse its reads)."""
 
-    robot = json.loads((root / "meta" / "robot.json").read_text())
+    robot = robot_record(root)
     priors = load_priors(root)
+    if "urdf" not in robot and not priors.description:
+        raise ValueError(f"{root}: no meta/robot.json, so the priors must give a description")
     return _Root(LeRobotTables(root, side=priors.side_directory), robot, priors)
 
 

@@ -24,13 +24,16 @@ Projection uses OpenCV (`cv2.projectPoints`, `cv2.fisheye.projectPoints`) on the
     python -m r4r.viz.clicks sample DATASET N SEED [--exclude 1,2,3]
     python -m r4r.viz.clicks make SHARD DATASET CLICKS.json SHEETS_DIR [--open 0.08] [--views 1]
         [--no-sheets]
+    python -m r4r.viz.clicks redraw SHARD CLICKS.json OUT.json [--open 0.08]
     python -m r4r.viz.clicks score CLICKS.json
 
 `make` writes the targets (with the drawn points) into CLICKS.json and the sheets
 `SHEETS_DIR/sheet_<i>.png` (two targets each: the whole frame and a zoom, both gridded in the
 frame's pixels). The clicks go into the same JSON (`"click": [u, v]`, `null` when the point is
 not visible); `score` prints each error and the median, p90 and max in pixels and in % of the
-image width.
+image width. `redraw` re-scores the same clicks on a new reconstruction of their episodes
+(after a description or priors change): each target's drawn points are recomputed at its
+episode, camera, arm and frame.
 """
 
 from __future__ import annotations
@@ -234,15 +237,7 @@ def _targets(
             if best is None:
                 continue
             _, arm, t, metric, uv, w, h, pts, axis = best
-            along = []
-            if axis is not None:
-                moved = pts[t][None, None] + SHIFTS[:, None, None] * axis[t][None, None]
-                moved = np.repeat(moved, len(pts), 0)  # rows: frames of the episode
-                lens = cams[camera]["camera.lens"]
-                shifted = [
-                    _project(part, camera, lens, moved[:, j])[0][t] for j in range(len(SHIFTS))
-                ]
-                along = np.round(np.stack(shifted), 2).tolist()
+            along = _along(part, camera, cams[camera]["camera.lens"], pts, axis, t)
             out.append(
                 {
                     "key": f"{episode}_{camera}_{arm}_{int(frames[t])}",
@@ -262,6 +257,53 @@ def _targets(
             )
             taken += 1
     return out
+
+
+def _along(
+    part: pa.Table, camera: str, lens: str, pts: np.ndarray, axis: np.ndarray | None, t: int
+) -> list:
+    """Pixels [S, P, 2] of row `t`'s points moved by each of `SHIFTS` along `axis` ([] for
+    fingertips)."""
+
+    if axis is None:
+        return []
+    moved = pts[t][None, None] + SHIFTS[:, None, None] * axis[t][None, None]
+    moved = np.repeat(moved, len(pts), 0)  # rows: frames of the episode
+    shifted = [_project(part, camera, lens, moved[:, j])[0][t] for j in range(len(SHIFTS))]
+    return np.round(np.stack(shifted), 2).tolist()
+
+
+def redraw(shard: Path, clicks: Path, out: Path, opened: float) -> None:
+    """The targets of `clicks` (their clicks kept) with the drawn points of a new
+    reconstruction `shard` at the same episode, camera, arm and frame: a description or priors
+    change re-scored on the same clicks."""
+
+    data = json.loads(clicks.read_text())
+    parts = {episode: (part, cams) for episode, part, cams, _, _ in _episodes(shard)}
+    kept = []
+    for t in data["targets"]:
+        if t["episode"] not in parts:
+            print(f"{t['key']}: episode not in {shard}, dropped")
+            continue
+        part, cams = parts[t["episode"]]
+        frames = np.array(part.column("frame_index").to_pylist())
+        rows = np.flatnonzero(frames == t["frame"])
+        found = _arm_points(part, t["arm"], opened)
+        if not len(rows) or found is None:
+            print(f"{t['key']}: frame or arm missing, dropped")
+            continue
+        pts, metric, axis = found
+        row, lens = int(rows[0]), cams[t["camera"]]["camera.lens"]
+        uv, _ = _project(part, t["camera"], lens, pts)
+        t |= {
+            "row": row,
+            "metric": metric,
+            "drawn": np.round(uv[row], 2).tolist(),
+            "along": _along(part, t["camera"], lens, pts, axis, row),
+        }
+        kept.append(t)
+    out.write_text(json.dumps(data | {"targets": kept}, indent=1))
+    print(f"{len(kept)} targets redrawn -> {out}")
 
 
 def _size(part: pa.Table, camera: str) -> tuple[int, int]:
@@ -419,5 +461,7 @@ if __name__ == "__main__":
             views,
             "--no-sheets" in args,
         )
+    elif args[0] == "redraw":
+        redraw(Path(args[1]), Path(args[2]), Path(args[3]), float(option("--open", "0.08")))
     elif args[0] == "score":
         score(Path(args[1]))

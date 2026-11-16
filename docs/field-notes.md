@@ -164,6 +164,11 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   per-episode poses do; the robot was moved between rooms. Before freeing a camera per setup,
   test one fixed pose across setups on robot points (resting grippers at the same pixels is a
   quick sign). Freeing it let the light solve wander 15–20 cm at 1–2 px.
+- **Stream names can swap between setups:** robomind2 ark's `camera_top` is the static view in
+  9279 episodes and the left wrist in 5578 (`camera_left` then the static view), switching every
+  few hundred episodes. A sheet of all streams of one episode shows it; the open fingers at rest
+  (fixed pixels in every wrist view) classify every episode in a minute. Write the layout as the
+  `station` and swap the mounts in `stations` (output `camera.mount: per station`).
 - **Merged roots mix setups:** community-v3 roots join many LeRobot repos, each with its own
   cameras and calibration (one root's overlay showed three rooms). Find the setup key first
   (`source/subtree` or `source/publisher_repo` in `meta/episodes`), write it as `station`, and
@@ -301,6 +306,10 @@ stay in `priors/onboarding/<embodiment>.md` (section "Tips and tricks"); general
   - It needs ~20 episodes to agree to millimetres (abc: 10 episodes 1.5 cm, 20 episodes 0.3 cm).
   - Arm placement differs per setup or station.
   - Two episodes do not pin a second arm's base, even when the overlay looks right.
+  - With wrist cameras only, scene tracks barely pin it (robomind2 ark: four 10-episode rigs
+    3.5 cm apart, groups up to 20 cm). Check it where a wrist sees the other gripper: project
+    the other end effector with the written values and compare (ark: 30-100 px off). A handful
+    of picks there moves `r4r rig` little (keypoint weight 10 against ~10^5 track residuals).
   - Delivered two-arm descriptions are often wrong (right arm on the left; ALOHA arms side by
     side instead of facing).
 - **Mobile bases:**

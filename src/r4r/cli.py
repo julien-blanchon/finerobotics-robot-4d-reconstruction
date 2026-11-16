@@ -293,7 +293,7 @@ class Fit:
             print(
                 f"not written: {refusal}"
                 if refusal
-                else f"wrote {write_camera(root, self.camera, values, station_of(loaded))}"
+                else f"wrote {write_camera(root, self.camera, values, *write_target(loaded))}"
             )
 
 
@@ -366,6 +366,12 @@ def _prepare_rig(
     mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
     bodies = body_mounts(loaded[0].priors)
     robot = _robot(loaded[0].robot, mounts, bodies).to(device, torch.float64)
+    groups = {e.priors.group for e in loaded}
+    if len(groups) > 1:
+        raise SystemExit(
+            f"episodes come from several priors groups {sorted(map(str, groups))}: each group "
+            "has its own robot and cameras (pick episodes of one)"
+        )
     stations = {e.station for e in loaded}
     if len(stations) > 1:
         raise SystemExit(
@@ -538,7 +544,7 @@ def _write_rig(
     from r4r.geometry import se3
 
     robot, streams = rig.robot, rig.streams
-    station = station_of(rig.loaded)
+    target = write_target(rig.loaded)
     for c, stream in enumerate(streams):
         values: dict[str, object] = {
             "focal": round(float(fit.intrinsics[c, 0, 0]), 2),
@@ -565,7 +571,7 @@ def _write_rig(
                 # No per-group mounts to measure a spread from: the indicative ranges
                 **range_fields(*INDICATIVE_RANGES),
             }
-        print(f"wrote {write_camera(rig.root, stream.name, values, station)}")
+        print(f"wrote {write_camera(rig.root, stream.name, values, *target)}")
     checked = len(fit.group_corrections) > 1
     for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
         if robot.free_bodies[name].scope != "dataset":
@@ -595,7 +601,7 @@ def _write_rig(
             **ranges,
             "fitted": {"episodes": list(episodes), "groups": groups},
         }
-        print(f"wrote {write_body(rig.root, name, body, station)}")
+        print(f"wrote {write_body(rig.root, name, body, *target)}")
     _write_odometry(fit, rig, episodes)
 
 
@@ -616,7 +622,11 @@ def _write_kinematics(fit: RigFit, rig: _RigInputs, stride: int, episodes: tuple
             offsets[name] = round(offsets.get(name, 0.0) + value, 6)
     path = priors_path(rig.root)
     raw = json.loads(path.read_text())
-    raw["kinematics"] |= {
+    target, group = raw, rig.loaded[0].priors.group
+    if group is not None:  # a dataset mixing robots: the group's own kinematics
+        target = raw["groups"][group]
+        target["kinematics"] = dict(target.get("kinematics", raw["kinematics"]))
+    target["kinematics"] |= {
         "offsets": offsets,
         "time_offset": round(spec.time_offset + fit.time_offset * stride, 4),
         "fitted": {"episodes": list(episodes)},
@@ -665,6 +675,14 @@ def station_of(loaded: list[Episode[int, int]]) -> str | None:
 
     first = loaded[0]
     return first.station if first.station is not None and first.priors.stations else None
+
+
+def write_target(loaded: list[Episode[int, int]]) -> tuple[str | None, str | None]:
+    """Where fitted values go, as (station, group): the episodes' station (`station_of`), else
+    their priors group (a dataset mixing robots), else the dataset level."""
+
+    station = station_of(loaded)
+    return station, None if station is not None else loaded[0].priors.group
 
 
 def distortion_values(
@@ -1441,29 +1459,36 @@ class Stations:
     """Setups (stations) of a dataset from two thumbnails per episode of a camera that is not on
     the robot (`r4r.data.setups`, CPU): runs of episodes with the camera in one place. Prints
     the runs; `--write` sets each episode's `station` in the episodes table (a run takes the
-    label most of its labelled episodes carry, else `auto-<first episode>`)."""
+    label most of its labelled episodes carry, else `auto-<first episode>`). `--group` keeps
+    a priors group's episodes only (a dataset mixing robots: setups within each robot)."""
 
     dataset: tyro.conf.Positional[str]
     camera: tyro.conf.Positional[str]
     # First and last episode (inclusive; default: every episode)
     first: int = 0
     last: int | None = None
+    # Only the episodes of this priors group (`groups`; `-` for those of no group)
+    group: str | None = None
     write: bool = False
 
     def run(self) -> None:
         import time
 
-        from r4r.data.lerobot import episode_count
+        from r4r.data.lerobot import episode_count, episode_group
         from r4r.data.priors import episode_table_path
         from r4r.data.setups import SetupConfig, labelled, setups, thumbnails, write_stations
 
         root = dataset_root(self.dataset)
         last = episode_count(root) - 1 if self.last is None else self.last
+        episodes = list(range(self.first, last + 1))
+        if self.group is not None:
+            wanted = None if self.group == "-" else self.group
+            episodes = [e for e in episodes if episode_group(root, e) == wanted]
         start = time.perf_counter()
-        found = thumbnails(root, range(self.first, last + 1), self.camera)
+        found = thumbnails(root, episodes, self.camera)
         runs = setups(found, SetupConfig())
         took = time.perf_counter() - start
-        print(f"{len(runs)} runs in {last + 1 - self.first} episodes ({took:.0f} s)")
+        print(f"{len(runs)} runs in {len(episodes)} episodes ({took:.0f} s)")
         path = episode_table_path(root)
         known = {}
         if path.exists():
@@ -1471,9 +1496,10 @@ class Stations:
 
             table = pq.read_table(path, columns=["episode", "station"]).to_pylist()
             known = {int(r["episode"]): str(r["station"]) for r in table if r["station"]}
-        stations, relabelled = labelled(runs, known)
+        stations, relabelled = labelled(runs, known, episodes)
         for first, end in runs:
-            print(f"{first}-{end}: {stations[first]} ({end - first + 1} episodes)")
+            count = sum(first <= e <= end for e in stations)
+            print(f"{first}-{end}: {stations[first]} ({count} episodes)")
         if relabelled:
             print(f"labelled episodes another run claims: {relabelled}")
         if self.write:
@@ -1500,6 +1526,10 @@ class Station:
     samples: int = 3
     # Stop after this many stations (0: all)
     limit: int = 0
+    # Prior std of the camera's log focal around its start (0 holds the neighbour's focal: one
+    # camera model in every station, whose focal a full rig measured)
+    focal_std: float = 0.3
+    # Store each station's camera under `stations.<name>`
     write: bool = False
 
     def run(self) -> None:
@@ -1508,7 +1538,7 @@ class Station:
         import pyarrow.parquet as pq
         import torch
 
-        from r4r.data.lerobot import _root
+        from r4r.data.lerobot import _root, episode_group
         from r4r.data.priors import episode_table_path
         from r4r.plan import MIN_SETUP
         from r4r.rago.station import (
@@ -1536,11 +1566,17 @@ class Station:
             : self.limit or None
         ]
         matcher = _matcher("cuda") if torch.cuda.is_available() else None
-        config = StationConfig()
+        config = StationConfig(focal_std=self.focal_std)
+        # A dataset mixing robots: neighbours come from the station's own priors group
+        group = {n: episode_group(root, min(runs[n])) for n in order}
         for name in todo:
             # The nearest calibrated station in episode order gives the held values; the
             # nearest on each side of the robot (facing it, behind it) a seed for the camera
-            nearest = sorted(done, key=lambda n: abs(min(runs[n]) - min(runs[name])))
+            kin = [n for n in done if group[n] == group[name]]
+            if not kin:
+                print(f"{name}: no calibrated station in its group {group[name]}, skipped")
+                continue
+            nearest = sorted(kin, key=lambda n: abs(min(runs[n]) - min(runs[name])))
             neighbour = nearest[0]
             seeds, sides = [], set()
             for other in nearest:

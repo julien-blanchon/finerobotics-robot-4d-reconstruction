@@ -111,6 +111,21 @@ class LeRobotTables:
         value = pq.read_table(path, columns=["source/is_simulation"])[0][0].as_py()
         return None if value is None else bool(value)
 
+    def episode_statistic(self, stat: str) -> tuple[np.ndarray, np.ndarray]:
+        """Every episode's `stats/<stat>` of `meta/episodes` (e.g. `observation.state/q99`):
+        the episode indices `[E]` and the values `[E, n]` (float64), in episode order."""
+
+        episodes, values = [], []
+        for path in sorted((self.root / "meta" / "episodes").glob("*/*.parquet")):
+            table = pq.read_table(path, columns=["episode_index", f"stats/{stat}"])
+            episodes.append(table["episode_index"].to_numpy())
+            column = table[f"stats/{stat}"].to_pylist()
+            values.append(np.asarray(column, dtype=np.float64).reshape(len(column), -1))
+        order = np.concatenate(episodes)
+        rows = np.concatenate(values)
+        sort = np.argsort(order, kind="stable")
+        return order[sort], rows[sort]
+
     def _episode_row(self, episode: int) -> dict[str, float]:
         path = self._episode_file(episode)
         if self._episode_rows is None or self._episode_rows[0] != path:

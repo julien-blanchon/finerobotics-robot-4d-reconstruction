@@ -39,6 +39,7 @@ from .tables import Column, LeRobotTables
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    import numpy as np
     from torch import Tensor
 
     from r4r.data import priors as checked_priors
@@ -66,6 +67,42 @@ def _root(root: Path) -> _Root:
 
     robot = json.loads((root / "meta" / "robot.json").read_text())
     return _Root(LeRobotTables(root), robot, load_priors(root))
+
+
+@functools.cache
+def _groups(root: Path) -> tuple[np.ndarray, list[str | None]]:
+    """Each episode's priors group (`priors.groups` and their `match`): the episode indices
+    and their groups (None: no group matched), in episode order."""
+
+    import numpy as np
+
+    opened = _root(root)
+    matches = opened.priors.group_matches()
+    statistics = {s: opened.tables.episode_statistic(s) for s in {m.stat for m in matches.values()}}
+    episodes = next(iter(statistics.values()))[0]
+    names = np.full(len(episodes), None, dtype=object)
+    for name, match in matches.items():  # file order: the first matching group takes it
+        names[np.equal(names, None) & match.matches(statistics[match.stat][1])] = name
+    return episodes, names.tolist()
+
+
+def episode_group(root: Path, episode: int) -> str | None:
+    """The priors group `episode` belongs to (None: the dataset-level priors)."""
+
+    import numpy as np
+
+    if not _root(root).priors.groups:
+        return None
+    episodes, names = _groups(root)
+    i = int(np.searchsorted(episodes, episode))
+    return names[i] if i < len(episodes) and episodes[i] == episode else None
+
+
+@functools.cache
+def _episode_priors(root: Path, group: str | None, station: str | None) -> DatasetPriors:
+    """The priors of an episode of `group` and `station` (parsed once per process)."""
+
+    return _root(root).priors.for_episode(group, station)
 
 
 def episode_count(root: Path) -> int:
@@ -111,8 +148,10 @@ def load_episode(
     opened = _root(root)
     tables, robot = opened.tables, opened.robot
     record = load_episode_record(root, episode)
-    # A station's own mounts and bodies (priors `stations`) on top of the dataset's
-    priors = opened.priors.for_station(None if record is None else record.station)
+    # The episode's group (a dataset mixing robots), then its station's own mounts and bodies
+    # (priors `groups`, `stations`) on top of the dataset's
+    group = episode_group(root, episode)
+    priors = _episode_priors(root, group, None if record is None else record.station)
     keys = [
         key
         for key in tables.video_keys

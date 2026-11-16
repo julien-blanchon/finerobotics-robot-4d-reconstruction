@@ -484,6 +484,7 @@ class Rig:
             groups=self.groups,
             kinematic=kinematic_freedom(loaded[0].priors, robot, self.stride),
             focal_ranges=focal_ranges(streams),
+            refined=frozenset(c.name for c in streams if c.moving and c.prior.refine),
         )
         fit = calibrate_rig(
             robot,
@@ -571,6 +572,8 @@ def _write_rig(
                 # No per-group mounts to measure a spread from: the indicative ranges
                 **range_fields(*INDICATIVE_RANGES),
             }
+        elif stream.moving and stream.prior.refine:  # a known mount the bundles refined
+            values |= {"mount": "moving", **pose_fields(fit.mounts[c].cpu())}
         print(f"wrote {write_camera(rig.root, stream.name, values, *target)}")
     checked = len(fit.group_corrections) > 1
     for b, (name, (cm, deg)) in enumerate(zip(free, disagreement, strict=True)):
@@ -1090,7 +1093,7 @@ class Preview:
         import torch
 
         from r4r.data.lerobot import load_episode
-        from r4r.rago.kinematics import forward_kinematics
+        from r4r.rago.kinematics import corrected_qpos, forward_kinematics
         from r4r.rago.lens import lens_from_priors
         from r4r.rago.robot import (
             CameraMount,
@@ -1106,7 +1109,11 @@ class Preview:
         mounts = tuple(CameraMount.from_prior(c.name, c.prior, c.mount, c.moving) for c in streams)
         bodies = body_mounts(episode.priors)
         robot = load_robot(episode.robot, cameras=mounts, bodies=bodies).to("cpu", torch.float64)
+        # The priors' fitted kinematics (joint offsets, lag), as every solve applies them
+        fitted = episode.priors.kinematics
         qpos = qpos_from_state(robot, episode.state, episode.joints)
+        if fitted is not None:
+            qpos = corrected_qpos(robot, qpos, fitted.offsets, fitted.time_offset / self.stride)
         names = tuple(c.name for c in streams)
         index = [robot.camera(n) for n in names]
         k = []

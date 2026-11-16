@@ -1756,6 +1756,168 @@ class Station:
                 done.sort(key=lambda n: min(runs[n]))
 
 
+@dataclass(frozen=True, slots=True)
+class Silhouette:
+    """Calibrate one static camera per setup from the robot's silhouette
+    (`r4r.rago.silhouette`, CPU, 10-50 s per setup): for a camera re-placed between setups that
+    scene matches and neighbour seeds cannot place. Per setup of the episodes table (the
+    camera's own key `station.<camera>` when present, else `station`), `samples` episodes fit
+    the camera's pose (the focal held when the priors give one) to robot masks, from the
+    setup's own prior and up to `seeds` calibrated setups; `held` other episodes score it.
+    Masks: SAM 3 (`--select` writes the frames, `python -m r4r.rago.segment` masks them on a
+    GPU, `--masks` reads them), else background subtraction. A setup under the config's pass
+    values (IoU, precision, two arms seen or one spread across the image) is flagged and
+    written as a start only (orientation range 180°: `--uncalibrated nan` leaves it NaN).
+    `--write` stores the camera alone under `stations.<name>`."""
+
+    dataset: tyro.conf.Positional[str]
+    camera: tyro.conf.Positional[str]
+    # Only these setups (default: every one with at least 10 episodes and no calibrated camera)
+    stations: tuple[str, ...] = ()
+    samples: int = 4
+    held: int = 2
+    # Calibrated setups used as extra starts (distinct placements, nearest in episode order)
+    seeds: int = 3
+    # Fit the focal too (default: only when the priors give none)
+    free_focal: bool = False
+    # Stop after this many setups (0: all)
+    limit: int = 0
+    # Fit again the setups a previous run flagged
+    retry: bool = False
+    write: bool = False
+    # Write the frames a segmentation model should mask, per setup and episode, to this JSON
+    # and stop (`python -m r4r.rago.segment` masks them on a GPU)
+    select: Path | None = None
+    # Robot masks of a segmentation model: `<setup>.npz` files in this folder
+    # (`r4r.rago.segment`), used instead of background subtraction
+    masks: Path | None = None
+
+    def run(self) -> None:
+        import json
+        import time
+
+        import pyarrow.parquet as pq
+
+        from r4r.data.lerobot import _root
+        from r4r.data.priors import episode_table_path
+        from r4r.plan import MIN_SETUP
+        from r4r.rago import segment, silhouette
+        from r4r.rago.station import distinct, samples
+
+        root = dataset_root(self.dataset)
+        priors = _root(root).priors
+        path = episode_table_path(root)
+        column = f"station.{self.camera}"
+        if column not in pq.read_schema(path).names:
+            column = "station"
+        table = pq.read_table(path, columns=["episode", column])
+        runs: dict[str, list[int]] = {}
+        for episode, name in zip(
+            table["episode"].to_pylist(), table[column].to_pylist(), strict=True
+        ):
+            if name is not None and episode not in runs.setdefault(name, []):
+                runs[name].append(episode)
+        order = sorted(runs, key=lambda n: min(runs[n]))
+        done = [n for n in order if _placed(priors.stations.get(n, {}), self.camera)]
+        tried = {
+            n
+            for n in order
+            if priors.stations.get(n, {}).get("cameras", {}).get(self.camera, {}).get("fitted")
+        }
+        todo = [
+            n
+            for n in (self.stations or order)
+            if self.stations
+            or (n not in done and len(runs[n]) >= MIN_SETUP and (self.retry or n not in tried))
+        ][: self.limit or None]
+        config = silhouette.SilhouetteConfig()
+        chosen: dict[str, dict[str, list[int]]] = {}
+        for name in todo:
+            start = time.perf_counter()
+            numbers = samples(sorted(runs[name]), self.samples + self.held)
+            held = numbers[1::3][: self.held] if len(numbers) > self.samples else []
+            if self.select is not None:
+                chosen[name] = {
+                    str(e): frames
+                    for e in numbers
+                    if (frames := silhouette.segment_frames(root, e, config))
+                }
+                self.select.write_text(json.dumps(chosen))
+                print(f"{name}: frames selected")
+                continue
+            masks = {} if self.masks is None else segment.read(self.masks / f"{name}.npz")
+            loaded = {
+                e: silhouette.load(root, e, self.camera, config, masks.get(e))
+                for e in numbers
+                if self.masks is None or e in masks
+            }
+            fitting = [x for e, x in loaded.items() if x and x.frames.masks and e not in held]
+            scoring = [x for e, x in loaded.items() if x and x.frames.masks and e in held]
+            if not fitting:
+                print(f"{name}: no usable episode, skipped")
+                continue
+            pose, focal, focal_range = fitting[0].prior
+            if focal is None:
+                raise SystemExit(
+                    f"{self.camera}: no focal in the priors (give one, then --free-focal)"
+                )
+            nearest = sorted(done, key=lambda n: abs(min(runs[n]) - min(runs[name])))
+            placed = [(n, *_station_camera(priors.stations[n], self.camera)) for n in nearest]
+            starts = ([] if pose is None else [(pose, focal)]) + [
+                (p, f) for _, p, f in distinct(placed, self.seeds)
+            ]
+            free = self.free_focal or focal_range is None
+            fit = silhouette.fit(
+                silhouette.stacked([x.frames for x in fitting], config), starts, free, config
+            )
+            checked = scoring or fitting
+            found = silhouette.scored(
+                [x.frames for x in checked], fit.pose, fit.focal, checked[0].geoms, config
+            )
+            arms, spread = silhouette.arms_seen(
+                [x.frames for x in fitting + scoring], fitting[0].arm, fit.pose, fit.focal, config
+            )
+            flagged = (
+                found.precision < config.pass_precision
+                or found.iou < config.pass_iou
+                or (arms < 2 and spread < config.pass_spread)
+            )
+            took = time.perf_counter() - start
+            print(
+                f"{name} ({len(runs[name])} episodes): precision {found.precision:.2f}, "
+                f"IoU {found.iou:.2f} on {found.frames} {'held-out' if scoring else 'fitted'} "
+                f"frames, {arms} arm(s) seen over {spread:.2f} of the diagonal, "
+                f"focal {fit.focal:.0f} px, {took:.0f} s"
+                + (" FLAGGED: read its overlay" if flagged else "")
+            )
+            values = {
+                **pose_fields(fit.pose),
+                "focal": round(fit.focal, 2),
+                "focal_range": 0.0,
+                # A flagged camera is only a start: its setup stays uncalibrated
+                **(
+                    {"position_range": 1.0, "orientation_range_deg": 180.0}
+                    if flagged
+                    else {"position_range": 0.02, "orientation_range_deg": 2.0}
+                ),
+                "fitted": {
+                    "episodes": [e for e in numbers if e not in held],
+                    "held": held,
+                    "from": "r4r silhouette",
+                    "precision": round(found.precision, 3),
+                    "iou": round(found.iou, 3),
+                    "arms": arms,
+                    "spread": round(spread, 3),
+                    "flagged": flagged,
+                },
+            }
+            if self.write:
+                _write_station(root, name, {"cameras": {self.camera: values}})
+            if not flagged:
+                done.append(name)
+                priors.stations.setdefault(name, {}).setdefault("cameras", {})[self.camera] = values
+
+
 def _placed(block: JsonObject, camera: str) -> bool:
     """Whether a station block gives `camera` a pose and a focal (and was not flagged)."""
 
@@ -1887,6 +2049,7 @@ type Command = (
     | Annotated[Reconstruct, tyro.conf.subcommand("reconstruct")]
     | Annotated[Stations, tyro.conf.subcommand("stations")]
     | Annotated[Station, tyro.conf.subcommand("station")]
+    | Annotated[Silhouette, tyro.conf.subcommand("silhouette")]
     | Annotated[Merge, tyro.conf.subcommand("merge")]
     | Annotated[Check, tyro.conf.subcommand("check")]
 )

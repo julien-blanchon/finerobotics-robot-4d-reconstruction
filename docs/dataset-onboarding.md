@@ -305,6 +305,39 @@ string column (SynGrasp-1B, 4.9M episodes), the camera prior names it instead �
 
 <img src="assets/stills/syngrasp-preview.jpg" alt="SynGrasp-1B previews from recorded cameras" width="100%">
 
+#### Cameras re-placed per setup: `r4r silhouette`
+
+A static camera moved between setups, where neighbour seeds, the light route and transferred
+points fail, is fitted to the robot's silhouette, per setup (not per episode). Robot meshes
+are used in this solve only. Before you start:
+
+- The description must pass held-out clicks on a few setups. A wrong gripper or link moves
+  the camera. Check the gripper by fitting the camera to clicks with and without a tip
+  extension along the approach axis. Don't read the `score` best shift alone: it drifts
+  wherever the camera is wrong.
+- Setups come from `r4r stations DATASET CAMERA --per-camera --write`. A source repository
+  is not a setup: lane02's `basket_storage_banana` holds two placements.
+- The focal must be known (held). A free focal runs off along focal ↔ distance (lane02: 463 →
+  868 px, camera 66 cm back).
+
+```bash
+r4r silhouette DATASET CAMERA --stations S1 S2 --select sel.json   # frames to mask (CPU)
+# GPU, in the SAM 3 environment (transformers >= 5, facebook/sam3):
+gpu-run "PYTHONPATH=src $SAM3_PYTHON -m r4r.rago.segment DATASET CAMERA sel.json masks/"
+r4r silhouette DATASET CAMERA --stations S1 S2 --masks masks/ --write
+r4r preview DATASET check.mp4 --episode E                           # a held-out episode
+```
+
+- Without `--masks`, background subtraction is used. It fails when moved objects fill the
+  change mask (openneodata aloha's bag and towels), when lighting or writing changes more
+  than the robot (robomind2 whiteboard stations), or when the arm leaves the view.
+- Seeds: the setup's own prior and up to `--seeds` calibrated setups. With one arm in view, a
+  mirrored camera fits the other arm. The prior on the departure from the seed (0.3 m / 20°)
+  is what stops it, so give a seed on the right side.
+- Every written setup carries `fitted.iou` and `fitted.precision` (held-out frames). Under
+  `pass_iou` (0.5) the setup is flagged and written as a start only. Read the overlays of the
+  flagged setups and of a sample of the passing ones.
+
 ### Lens
 
 | lens | coefficients (recorded first) | missing |

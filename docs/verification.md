@@ -378,6 +378,103 @@ moving heads are weaker. The lowest in-sync scores are not noise:
 fit check of `r4r reconstruct` is unchanged: the image checks decode 32 frames per camera, and
 on the fast route (13–40 ms, no video) that would be most of the cost.
 
+## Per-setup static cameras from silhouettes (2026-11-16)
+
+`r4r silhouette` ([architecture](architecture.md#per-setup-static-cameras-from-the-robots-silhouette-r4r-silhouette))
+was piloted on three datasets whose static camera is re-placed per setup. Every setup with
+existing clicks was fitted: 4 episodes fit, 2 score, and none of them is a click episode. The
+clicks are held out and never enter the fit. Scripts and results are in
+`/e/scratch/reformo/blanchon1/r4r-cache/onboarding/silhouette/` (`batch.py`, `rescore.py`,
+`flag.py`, `*_sam*.json`).
+
+**Piper gripper: no change.** The Piper finger meshes end at 0.1358 m along link6 z, the
+`piper` preset's TCP. A camera fitted to the clicks, together with a tip extension along the
+approach axis, gives −2.8 cm (lane02 clean_blackboard, 32 clicks), −1.0 cm (lane103, 39) and
++0.4 cm (5b28 Piper, 25). The extension makes held-out clicks worse each time. The +5 to +6 cm
+in "Still open" above is the `score` best shift taken on wrong cameras: it drifts wherever the
+camera is wrong. The SAM masks agree (`tipmask.py`). On setups whose fitted camera passed the
+clicks, the share of points on the robot mask along the approach axis from the mesh
+fingertips:
+- 5b28 (8 stations, 38 arm-frames): 1.00 at 0 cm, 0.92 at +1, 0.71 at +2, 0.37 at +3, 0.16 at +5.
+- lane02 (6 setups): 0.79 at +1, 0.55 at +2, 0.32 at +5 (held erasers and cables make the tail).
+
+With the 5 px mask dilation, the real fingers end within ~1-2 cm of the model's. No base plate
+or cable carrier is missing in these views. The Cobot Magic's loose cables are in the masks
+and cost at most 1 each in the bounded loss.
+
+**Masks.** Background subtraction (median background, exposure-normalised CIELAB distance)
+made fits worse on two pilots:
+- aloha: moved bags and towels fill the change mask, 41 → 92 px.
+- 5b28 whiteboard stations: writing and lighting dominate, 55 → 69 px.
+
+It was clean only on a white board with a black arm (clean_blackboard, 38 → 22.5 px). SAM 3
+("robot arm", bf16) gives clean robot masks, cables included, on all three pilots.
+
+Clicks are scored against the nearer drawn fingertip of either arm. The clicks converted from
+the verify sets carry the arm of the drawn target. With a wrong camera, the clicker often
+clicked the other arm. Example: 5b28 auto-13355, labelled right: 326 px to the right tips, 11 px
+to the left ones, with the camera within 4 cm / 6° of its seed.
+
+| dataset (camera) | setups | clicks | before median | after median (p90) | setups passing IoU ≥ 0.5 | their clicks after | flagged setups' clicks |
+|---|---|---|---|---|---|---|---|
+| robocoin lane02 (cam_high_rgb, setups from `r4r stations --per-camera`) | 28 | 73 | 43.5 | 22.9 (80) | 18 | 21.3 px (n 52) | 32.4 px |
+| robomind2 agilex-5b28 Piper (camera_front, detector stations) | 20 | 36 | 45.9 | 19.3 (51) | 17 | 19.2 px (n 32) | 44.4 px |
+| openneodata aloha (third_view, setups from `r4r stations --per-camera`) | 7 | 7 | 30.2 (start; 54.9 light per episode) | 57.3 (125) | 1 | 7.8 px (n 1) | 63.1 px |
+
+"Before" is the written camera: lane02 the two station rigs, 5b28 the dataset's
+rides-on-robot pose, aloha its third-view start. That table is the evaluation run
+(`batch.py`). The cameras written into the priors come from `r4r silhouette --write`. It
+samples its own episodes and adds the arm gate (passes need IoU ≥ 0.5, precision ≥ 0.7, and
+two arms seen or one arm spread over ≥ 0.25 of the diagonal). Per setup, with the
+median click error over the setup's clicks:
+
+| dataset | setups | clicks median | setups ≤ 15 px | ≤ 25 px | > 40 px | passing setups: clicks median, ≤ 15 / > 40 | flagged setups' clicks |
+|---|---|---|---|---|---|---|---|
+| lane02 | 28 | 30.2 px (n 73) | 3 | 10 | 12 | 16: 29.9 px, 3 / 6 | 32.7 px |
+| 5b28 Piper | 17 (3 rig stations keep their rig camera) | 20.7 px (n 31) | 4 | 11 | 4 | 12: 20.7 px, 3 / 1 | 46.4 px |
+| aloha | 7 | 59.4 px (n 7) | 2 | 2 | 5 | 2: 8.4 and 71.6 px | 59.4 px |
+
+- **One sample is not enough on lane02.** The same setups fit from another sample of episodes
+  move by up to 40 px: auto-1950 goes from 5.2 px (evaluation run) to 35.4 px (CLI run), and
+  auto-5142 from 14.0 to 47.3. Detector setups smaller than a source repo still mix
+  placements: the camera moves within a run, and both runs fit their own episodes (IoU
+  0.5-0.6). Per-setup accuracy is bounded by how well the setup is defined.
+- **The arm gate** catches 5b28 auto-2534 (one arm, 226 px at IoU 0.60) and auto-8697. It
+  also flags auto-2493 and auto-17353 (14 and 19 px).
+- **A second score from image edges does not help.** The edge chamfer's best 2D shift of the
+  drawn outline (`r4r.checks.edges`) was tried as a second score:
+  - 5b28: 30-90 px on the good setups (cluttered scenes).
+  - lane02: 1.6-5 px on three bad setups (auto-5201 72 px, auto-4235 66 px, auto-7989 128 px).
+
+  This matches the checks' own finding that the edge estimate is reported, not flagged. Not
+  adopted.
+- **Focal.** It is held at the rigs' value (lane02 461/463 px, 5b28 419 px). Freed per setup,
+  it scatters 444-552 px (lane02) and 359-555 px (5b28) with no gain on clicks (labelled arm:
+  lane02 26.6 vs 22.9 px held, 5b28 23.2 vs 22.4). The ~20 px floor is not a focal pattern.
+
+- **The bar of ~15 px is not met.** On lane02 and 5b28, the median halves (to ~20 px). The
+  overlays put both arms on the real ones in most fit and held-out frames
+  (lane02 auto-7989, 5b28 auto-13355, aloha auto-4739 read).
+- What is left:
+  - Single clicks at the image edge, where an arm only enters the view (lane02 8000: 125 px).
+  - Setups that mix placements: the detector and the source repos both merge them (aloha
+    auto-4739, lane02 banana).
+  - The meshes are thinner than the real arms. Cables hanging from the arms are in the SAM
+    masks.
+- **Low IoU means a wrong camera.** Every setup under 0.3 IoU is off by 72-260 px.
+- **High IoU doesn't prove a right camera.** It misses 5 of 7 bad 5b28 setups and 5 of 11 on
+  lane02. Example: auto-2534, IoU 0.60, 226 px, 26 cm from the seed, where only one arm is in
+  view. A camera fitted to one visible arm can place the other arm off-image unchallenged.
+  The prior on the departure from the seed (0.3 m / 20°) reduces this. On 5b28, where most
+  stations share one pose, the fits land 1-7 cm from it.
+- **aloha** is not solved. It has 7 single clicks. Its setups are close-ups where the arms
+  fill half the image, the focal is unknown (500 px held), and several detector setups hold
+  more than one placement.
+- **Cost per setup.** GPU: ~1.3 s for the 18 SAM frames (GH200, bf16), plus ~10 s to load the
+  model once per job. CPU: 1-8 s to load episodes and 10-50 s to fit (6 threads, on a login
+  node at load ~180). No video is decoded beyond the 18 frames.
+
+
 ## Method
 
 Per dataset, CPU only (`CUDA_VISIBLE_DEVICES=""`, `OMP_NUM_THREADS=8`), commit `54b8e49`:

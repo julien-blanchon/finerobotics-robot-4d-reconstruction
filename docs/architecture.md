@@ -190,6 +190,9 @@ stay free.
   come from its own `stations.<key>` block (only its entry), on top of the common `station`'s;
   `r4r station` and the planner use the camera's key when the column exists, and `r4r rig`
   refuses episodes of several keys of one camera.
+- **`r4r silhouette`** (`rago/silhouette.py`): a static camera re-placed per setup that scene
+  matches, neighbour seeds and transferred points cannot place, fitted to the robot's
+  silhouette. The one place robot meshes enter a solve (user decision, 2026-11-16). Details below.
 - **Output layout:** `out/<family>/<dataset>/shard-<k>.parquet`, one file per `--shard-size`
   episodes (default 1000) of the selection, one row per frame in the
   [output spec](output-spec.md)'s columns. The schema metadata `r4r.episodes` (JSON) gives per
@@ -214,6 +217,37 @@ stay free.
   (quality and provenance), ~12 s per 1,000 SynGrasp episodes
   ([packaging](output-spec.md#packaging-r4r-merge)).
 
+### Per-setup static cameras from the robot's silhouette (`r4r silhouette`)
+
+Some static cameras move between setups (source repos, stations, sessions). For them, scene
+matches with the wrist cameras (rigs, light route) land 2-24 cm off at small residuals,
+neighbour seeds pass 1 time in 8, and transferred points are ~5.6 cm off. Every setup shows
+the robot, though, and its joints are recorded: the camera is where the description's
+projected surface covers the robot in the image.
+
+1. **Frames.** Per setup, `--samples` episodes fit and `--held` other episodes score. Per
+   episode, `kept` (3) of 40 evenly spaced frames, spread in joint space.
+2. **Masks.** SAM 3 with the text prompt "robot arm" (`python -m r4r.rago.segment`, GPU,
+   ~1.3 s per setup for 18 frames, in its own environment). Background subtraction (the
+   median of the episode's frames, CIELAB distance, exposure normalised) is the fallback
+   when no masks are given. It works only where the robot is the one thing that moves.
+3. **Model.** 150 area-weighted points per body on the drawn surfaces (`viz.overlay.surfaces`),
+   posed by forward kinematics with the priors' kinematics corrections.
+4. **Loss** `ρ(r) = r²/(1+r²)`, `r = d/σ` (bounded, so clutter and occlusion cost at most 1):
+   each point to the mask (distance transform), and each mask pixel to the nearest projected
+   point (×0.5); fingers ×0.3. A weak Gaussian prior on the departure from the seed (0.3 m,
+   20°) keeps a bimanual robot with one arm in view from fitting the other arm.
+5. **Fit.** Adam, from each seed (the setup's priors, calibrated setups) and 10 perturbations,
+   σ 40 → 20 px on all of them, then 10 → 5 px on the best 3. The pose moves about a pivot
+   at the robot's depth, which keeps rotation and translation nearly independent. CPU: 10-50 s
+   per setup.
+6. **Score** on the held-out frames: the IoU of the drawn robot with the mask (`iou`) and the
+   share of model points inside it (`precision`). Below `pass_iou` or `pass_precision`, the
+   setup is flagged and written as a start only (orientation range 180°). The planner then
+   counts it as uncalibrated, and `--uncalibrated nan` leaves it NaN.
+
+Results are in [verification](verification.md#per-setup-static-cameras-from-silhouettes-2026-11-16).
+
 ## Which tool is used where
 
 | tool | used for | on what |
@@ -222,7 +256,8 @@ stay free.
 | batched search + bundle | mounts, focal, any free parameter | tracks of sampled windows; batched copies |
 | RoMa v2 (`r4r.matching`) | static↔moving and static↔static links; robot keypoints from calibrated sessions (`r4r picks`) | a few dozen frame pairs per episode, kept where it is certain |
 | ARROW | focal draft (`r4r focal`, gen2 adapter); dense depth and tracks (planned) | sampled frames; all frames (dense pass) |
-| robot meshes | overlays; which surface point a reference pixel shows (`r4r picks`); never inside the solve | `r4r preview`, `r4r overlay`, `r4r picks` |
+| robot meshes | overlays; which surface point a reference pixel shows (`r4r picks`); inside a solve only for per-setup static cameras (`r4r silhouette`) | `r4r preview`, `r4r overlay`, `r4r picks`, `r4r silhouette` |
+| SAM 3 (`r4r.rago.segment`, own environment) | robot masks for `r4r silhouette` | 18 frames per setup (GPU) |
 
 Bad frames (zoomed-in wrist, no texture, dark, motion blur) are not detected by rules on the
 image: they show up as few surviving KLT tracks, low RoMa certainty, high residuals or

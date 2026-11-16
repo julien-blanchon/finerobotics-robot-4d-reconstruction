@@ -218,11 +218,16 @@ def load_episode(
         name = camera_name(key)
         prior = priors.cameras.get(name, CameraPrior())
         info = tables.features[key].get("info", {})
-        height, width = tables.features[key]["shape"][:2]
+        height, width = prior.image_size(tuple(tables.features[key]["shape"][:2]))
         frames = torch.empty(0, 3, 0, 0)
         if decode is None or name in decode:
             assert files is not None
-            frames = _decode(*files.videos[key], timestamps, tables.fps)
+            path, start = files.videos[key]
+            if prior.cropped:  # frame by frame: whole 4K frames of an episode do not fit
+                times = [start + t for t in timestamps]
+                frames = seek_frames(path, times, 0.5 / tables.fps, view=prior)
+            else:
+                frames = _decode(path, start, timestamps, tables.fps)
             height, width = frames.shape[-2:]
         stream = _camera(key, info, links.get(key), prior, frames, (height, width))
         if record is not None and name in record.intrinsics:
@@ -338,23 +343,48 @@ def keyframes(
     """uint8 frames of `cameras` at the episode's frame indices `frames` only, each decoded from
     the nearest key frame before it: a few frames cost a few GOPs, not the whole video."""
 
-    tables = _root(root).tables
+    opened = _root(root)
+    tables = opened.tables
     files = tables.files(episode)
     timestamps = cast("Tensor", tables.rows(episode, ["timestamp"])["timestamp"])
     out = {}
     for name in cameras:
         path, start = files.videos[video_key(list(files.videos), name)]
         times = [start + float(timestamps[f]) for f in frames]
-        out[name] = seek_frames(path, times, 0.5 / tables.fps)
+        # A camera's crop and size are dataset-level (not per group or station)
+        view = opened.priors.cameras.get(name)
+        out[name] = seek_frames(path, times, 0.5 / tables.fps, view=view)
     return out
 
 
+def camera_view(image: np.ndarray, prior: CameraPrior | None) -> np.ndarray:
+    """A decoded frame `[H, W, 3]` as the camera sees it: its priors' `crop`, then `size`."""
+
+    if prior is None or not prior.cropped:
+        return image
+    import cv2
+
+    if prior.crop is not None:
+        x, y, w, h = prior.crop
+        if y + h > image.shape[0] or x + w > image.shape[1]:
+            raise ValueError(f"crop {prior.crop} outside a {image.shape[1]}×{image.shape[0]} video")
+        image = image[y : y + h, x : x + w]
+    if prior.size is not None and tuple(prior.size) != (image.shape[1], image.shape[0]):
+        image = cv2.resize(image, tuple(prior.size), interpolation=cv2.INTER_AREA)
+    return image
+
+
 def seek_frames(
-    path: Path, times: Sequence[float], tolerance: float, gap: float = 1.0
+    path: Path,
+    times: Sequence[float],
+    tolerance: float,
+    gap: float = 1.0,
+    view: CameraPrior | None = None,
 ) -> Tensor[[int, *RGB, int, int]]:
     """uint8 RGB frames of a video file at increasing `times` (seconds): the first frame at or
     after `time − tolerance` for each. Decoding seeks to the key frame before a time, then runs
-    forward; a time less than `gap` seconds ahead is reached by decoding on, without a seek."""
+    forward; a time less than `gap` seconds ahead is reached by decoding on, without a seek.
+    `view`: a camera prior whose `crop` and `size` apply to every frame as it is decoded."""
 
     import av
     import numpy as np
@@ -362,6 +392,8 @@ def seek_frames(
     images = []
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
+        if view is not None and view.cropped:
+            stream.thread_type = "AUTO"  # large (4K) videos: decode on several threads
         base = float(stream.time_base or 1.0)
         decoded = None  # the open decoder and the time of its last frame
         for time in times:
@@ -376,7 +408,7 @@ def seek_frames(
                     break
             if image is None:
                 raise ValueError(f"{path}: no frame at {time:.3f} s")
-            images.append(image.to_ndarray(format="rgb24"))
+            images.append(camera_view(image.to_ndarray(format="rgb24"), view))
     return rearrange(torch.from_numpy(np.stack(images)), "n h w c -> n c h w")
 
 
@@ -552,7 +584,7 @@ def _camera(
     return CameraStream(
         name=camera_name(key),
         frames=frames,
-        role=info.get("camera.role", "other"),
+        role=prior.role or info.get("camera.role", "other"),
         moving=moving,
         mount=mount,
         side=info.get("camera.side"),

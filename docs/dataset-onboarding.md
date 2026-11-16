@@ -143,6 +143,8 @@ cameras need clicks is not solved for those cameras.
 | focal | recorded first (below), estimated last | `focal`, `focal_range` (0 by default); `principal` (cx, cy) for an off-centre principal point |
 | per-episode intrinsics or poses | several stations, per-unit calibrations, a dataset's own extrinsics | `<dataset>.episodes.parquet` (below) |
 | lens | pinhole or fisheye, recorded coefficients | `lens`, `distortion`, `distortion_range` |
+| stereo or very large videos | a side-by-side stereo video (both eyes in one frame), or 4K frames that would not fit in memory for a whole episode (LingYu: head 3840×1920, wrists 2560×800) | `crop` [x, y, w, h] (one eye), `size` [w, h] (e.g. 512 wide): frames are cropped and resized as they are decoded; focal and pixels are at `size` |
+| camera role | no or wrong `camera.role` in the feature info; held-out clicks pick wrist and scene targets by role | `role`: `wrist`, `scene` |
 | scope | bolted (dataset), re-placed (episode), driving (frame) | `scope` on cameras and bodies |
 | robots | one dataset mixing robots (RoboMIND2 agilex: Piper and ARX arms): per-episode statistics tell them apart (`meta/episodes` `stats/observation.state/q99`) | `groups`: a `match` on a statistic and the group's own description, joints, cameras (`r4r.data.priors`); `r4r stations … --group` per group |
 | setups | sessions where a static camera stays put: `r4r stations <dataset> <camera> --write`; cameras re-placed independently of each other: `--per-camera`, one key per camera | `station` (or `station.<camera>`) column of the episodes table; values per station in `stations` |
